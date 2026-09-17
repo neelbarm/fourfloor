@@ -91,6 +91,16 @@ class Plan:
         }
 
 
+def form_min_bars(form: list[tuple[str, int]]) -> int:
+    """Shortest arrangement a form can express.
+
+    Builds are fixed and every scalable slot floors at one 8-bar phrase, so a
+    form cannot be squeezed below this no matter what ``--length`` asks for.
+    """
+    fixed = sum(b for k, b in form if k not in SCALABLE)
+    return fixed + 8 * sum(1 for k, _ in form if k in SCALABLE)
+
+
 def scale_form(form: list[tuple[str, int]], target_bars: int) -> list[tuple[str, int]]:
     """Scale a form to ``target_bars``, keeping every slot a multiple of 8 bars.
 
@@ -159,7 +169,10 @@ def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
     bar_dur = 4.0 * 60.0 / target_bpm
     base = FORMS.get(form_name, FORMS["club"])
     if length:
-        target_bars = max(32, int(round(length / bar_dur / 8.0)) * 8)
+        # Floor at what the form can actually express. Asking for less used to
+        # leave `scale_form` unable to reach its target, and it returned a
+        # longer arrangement without saying so.
+        target_bars = max(form_min_bars(base), int(round(length / bar_dur / 8.0)) * 8)
         shape = scale_form(base, target_bars)
     else:
         shape = list(base)
@@ -271,12 +284,21 @@ def validate(p: Plan) -> list[str]:
 def parse_length(text: str) -> float:
     """Parse ``4:30``, ``270`` or ``4m30s`` into seconds."""
     t = text.strip().lower().replace("m", ":").replace("s", "")
-    if ":" in t:
-        parts = [p for p in t.split(":") if p != ""]
-        mins = float(parts[0])
-        secs = float(parts[1]) if len(parts) > 1 else 0.0
-        return mins * 60.0 + secs
-    return float(t)
+    try:
+        if ":" in t:
+            parts = [p for p in t.split(":") if p != ""]
+            mins = float(parts[0])
+            secs = float(parts[1]) if len(parts) > 1 else 0.0
+            seconds = mins * 60.0 + secs
+        else:
+            seconds = float(t)
+    except (ValueError, IndexError):
+        raise ValueError(
+            f"could not read --length {text!r}; use 4:30, 270 or 4m30s"
+        ) from None
+    if seconds <= 0:
+        raise ValueError(f"--length {text!r} must be greater than zero")
+    return seconds
 
 
 def fmt_time(seconds: float) -> str:

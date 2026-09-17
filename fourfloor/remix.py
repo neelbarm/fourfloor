@@ -152,6 +152,14 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
         style.length if style and style.length else 270.0)
     p = arrange.plan(a, target_bpm, tempo.beat_multiple, form_name=opts.form,
                      length=length, swing=swing, has_stems=(opts.stems == "demucs"))
+    if length and p.duration > length + 4.0 * p.bar_dur:
+        min_bars = arrange.form_min_bars(arrange.FORMS.get(opts.form, arrange.FORMS["club"]))
+        warnings.append(
+            f"the {opts.form} form is at least {min_bars} bars "
+            f"({arrange.fmt_time(min_bars * p.bar_dur)} at {target_bpm:.0f} BPM), so "
+            f"--length {arrange.fmt_time(length)} was rounded up to "
+            f"{arrange.fmt_time(p.duration)}"
+        )
     if opts.producer:
         from .producer import apply_producer_plan
         p, note = apply_producer_plan(a, p, warnings)
