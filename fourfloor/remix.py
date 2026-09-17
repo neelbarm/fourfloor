@@ -145,7 +145,7 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     warped = warp_source(a, tempo, semitones)
 
     step("separate", f"{opts.stems} separation")
-    stems = separate(path, warped, a.sr, opts.stems)
+    stems = separate(warped, a.sr, opts.stems)
 
     step("arrange", f"{opts.form} form")
     length = arrange.parse_length(opts.length) if opts.length else (

@@ -9,6 +9,7 @@ a real four-way split and therefore a true vocal-house remix.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .audio import SR, decode, fit
+from .audio import SR, decode, fit, write_wav
 from .dsp.hpss import hpss_stereo
 from .house.engine import Stems
 
@@ -39,9 +40,15 @@ def separate_hpss(x: np.ndarray, sr: int) -> Stems:
     return Stems(harmonic=harm, percussive=perc, source_name="hpss")
 
 
-def separate_demucs(path: str | Path, sr: int = SR, model: str = DEMUCS_MODEL,
-                    jobs: int = 4) -> Stems:
+def separate_demucs(x: np.ndarray, sr: int = SR, model: str = DEMUCS_MODEL,
+                    jobs: int = 2) -> Stems:
     """Run demucs and fold its four stems into fourfloor's two buses.
+
+    ``x`` is the source *after* the beat-by-beat warp onto the target grid, not
+    the original file: the arrangement addresses stems in warped seconds, so
+    separating the untouched file would hand the engine a bed at the source
+    tempo and every cut would land off the grid. Demucs is tempo-agnostic, so
+    running it on the warped audio costs nothing in quality.
 
     ``vocals`` and ``other`` become the harmonic bed (the house kit supplies the
     rhythm section); ``drums`` becomes the percussive bed, used only where the
@@ -56,10 +63,15 @@ def separate_demucs(path: str | Path, sr: int = SR, model: str = DEMUCS_MODEL,
         )
     tmp = Path(tempfile.mkdtemp(prefix="fourfloor-demucs-"))
     try:
+        src = write_wav(tmp / "warped.wav", x, sr)
+        # torch defaults to one thread per core *inside each* of the -j workers,
+        # which oversubscribes badly on a laptop; give each worker a fair share.
+        env = dict(os.environ)
+        env.setdefault("OMP_NUM_THREADS", str(max(1, (os.cpu_count() or 4) // jobs)))
         proc = subprocess.run(
             [sys.executable, "-m", "demucs", "-n", model, "-j", str(jobs),
-             "-o", str(tmp), str(path)],
-            capture_output=True, text=True, check=False,
+             "-o", str(tmp), str(src)],
+            capture_output=True, text=True, check=False, env=env,
         )
         if proc.returncode != 0:
             raise RuntimeError(f"demucs failed: {proc.stderr.strip()[-400:]}")
@@ -87,8 +99,12 @@ def separate_demucs(path: str | Path, sr: int = SR, model: str = DEMUCS_MODEL,
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def separate(path: str | Path, x: np.ndarray, sr: int, mode: str = "hpss") -> Stems:
-    """Separate by ``mode``, falling back to HPSS if demucs is unavailable."""
+def separate(x: np.ndarray, sr: int, mode: str = "hpss") -> Stems:
+    """Separate the warped source by ``mode``.
+
+    Both engines see the same warped buffer, so the stems they return are
+    already on the target grid that the arrangement addresses.
+    """
     if mode == "demucs":
-        return separate_demucs(path, sr)
+        return separate_demucs(x, sr)
     return separate_hpss(x, sr)
