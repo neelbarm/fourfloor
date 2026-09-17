@@ -54,7 +54,11 @@ def _loop_to(src: np.ndarray, start: int, want: int, period: int, sr: int) -> np
     while len(out) < want:
         nxt = take(start, period)
         out = xfade(out, nxt, fade)
-    return fit(out, want)
+    # Always hand back a fresh buffer. `fit` and the slicing in `take` return
+    # views when the span already has the right length, and the caller fades
+    # the slot edges in place -- writing straight back into the shared stem and
+    # corrupting it for every later slot that reads the same span.
+    return np.array(fit(out, want), dtype=np.float32, copy=True)
 
 
 def _sweep_curve(n: int, spec: tuple[float, float] | None) -> np.ndarray | None:
