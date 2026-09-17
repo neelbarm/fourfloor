@@ -253,12 +253,14 @@ MIN_CONTRAST_DB = 9.0
 #: phrase ends -- an instrumental, a loop, or a master squashed flat.
 MIN_GAPS = 3
 
-#: Shortest median voiced run we will believe is a voice. A sung phrase runs
-#: about a second -- the reference corpus measured 1.05 s in an original and
-#: 1.25 s in its remix -- while a click track, a hat pattern or a plucked loop
-#: is on for tens of milliseconds at a time. Without this, a metronome looks
-#: like the most articulate singer in the world: enormous contrast, dozens of
-#: evenly spaced "phrase gaps", and every one of them meaningless.
+#: Shortest upper-quartile voiced run we will believe is a voice. Without it a
+#: metronome looks like the most articulate singer alive: enormous contrast,
+#: dozens of evenly spaced "phrase gaps", every one of them meaningless.
+#:
+#: Measured upper quartiles: a click track and a 16th hat pattern both sit at
+#: 0.070 s and never exceed it at any percentile, while a vocal runs 0.60 s
+#: (Demucs stem) to 0.72 s (centre-extracted mix). 0.35 s sits between them
+#: with roughly a factor of two of margin on each side.
 MIN_VOICED_RUN = 0.35
 
 
@@ -302,7 +304,7 @@ class VocalMap:
     source: str
     duration: float
     contrast_db: float
-    voiced_run: float = 0.0     # median length of a run above `threshold`
+    voiced_run: float = 0.0     # 75th-pct length of a run above `threshold`
 
     @property
     def usable(self) -> bool:
@@ -466,8 +468,18 @@ def find_gaps(env: np.ndarray, fps: float, threshold: float,
     return gaps
 
 
-def voiced_run(env: np.ndarray, fps: float, threshold: float) -> float:
-    """Median length in seconds of a contiguous run above ``threshold``."""
+def voiced_run(env: np.ndarray, fps: float, threshold: float,
+               percentile: float = 75.0) -> float:
+    """Upper-quartile length in seconds of a run above ``threshold``.
+
+    The *median* is the wrong statistic here, and wrong in the direction that
+    matters: a cleanly separated vocal stem falls to silence between syllables,
+    so its median run is one syllable (0.30 s measured) while a bleedier
+    centre-extracted mix of the same song reads 0.44 s. Judging by the median
+    would reject the better input. The upper quartile asks a different question
+    -- does this signal ever sustain the way a voice does? -- which a percussive
+    track fails at every percentile, its runs being one decay envelope long.
+    """
     if not len(env):
         return 0.0
     loud = env >= threshold
@@ -480,7 +492,7 @@ def voiced_run(env: np.ndarray, fps: float, threshold: float) -> float:
             n = 0
     if n:
         runs.append(n / fps)
-    return float(np.median(runs)) if runs else 0.0
+    return float(np.percentile(runs, percentile)) if runs else 0.0
 
 
 def vocal_map(x: np.ndarray, sr: int, vocals: np.ndarray | None = None,
