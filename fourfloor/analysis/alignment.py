@@ -1,0 +1,355 @@
+"""Does the rendered remix actually sit on its own grid?
+
+This module is the objective answer to "some of it is off beat". A remix is
+built on a fixed target grid: ``bpm`` beats per minute with bar one starting at
+``first_downbeat_sec``. Everything the engine synthesises is placed on that grid
+by construction, so the kit is trivially in time; the part that can drift is the
+*source* -- the warped song laid over the grid slot by slot. If the warp
+anchoring, the loop length or the slot's source offset is wrong, the vocal and
+the instrumental sit a few tens of milliseconds -- or a whole beat -- away from
+the kick, and the remix sounds drunk.
+
+Three independent measurements, because each catches a different failure:
+
+* **Onset phase error.** Pick onsets out of the layer, measure the distance from
+  each to the nearest point of the grid's 16th-note lattice, and report the
+  median and 90th percentile in milliseconds. Real music plays on 16ths, so the
+  lattice -- not the beat -- is the right ruler: a correctly warped source lands
+  on it, a mis-anchored one does not. This catches slow drift and small
+  constant offsets.
+* **Comb phase.** Cross-correlate the whole onset envelope against a comb of the
+  beat grid, sweeping the comb over +/- half a beat. The peak's position is the
+  layer's global phase; a peak near half a beat means the source is playing the
+  offbeats where the kick expects the downbeats.
+* **Bar phase (downbeat parity).** Score the four possible bar phases by the
+  low-band and onset energy landing on their beat one. Phase 0 means the
+  source's bar one is the grid's bar one; anything else means the arrangement is
+  a beat or two out even though every onset is individually on the lattice.
+
+Plus a structural check that has nothing to do with phase: no two arrangement
+slots may render source audio at the same time. ``span_overlap`` takes the
+per-slot spans the engine reports and returns the worst concurrency it finds.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from scipy import signal as sps
+
+from . import features as F
+
+#: Onset envelope hop for alignment work. The analysis hop of 512 quantises
+#: every measurement to 11.6 ms, which is most of the error budget we are trying
+#: to measure; 64 gives 1.45 ms and parabolic peak interpolation gets well under
+#: a millisecond from there.
+FINE_HOP = 64
+
+#: Window for the alignment onset envelope. 1024 samples (23 ms) is short enough
+#: that a kick's attack is not smeared across a beat and long enough that the
+#: mel bands below 200 Hz still resolve.
+FINE_FFT = 1024
+
+#: Frames the flux looks back over. A two-frame difference is far steadier than
+#: a one-frame difference at this hop -- a single frame at 1.45 ms is mostly
+#: window ripple -- and its group delay is exactly one frame, which is corrected
+#: below.
+FLUX_LAG = 2
+
+#: Residual latency of the detector above, in milliseconds, measured on
+#: synthesised kicks, hats, claps and a full kit placed exactly on a grid: every
+#: one of them reads 2.8-3.5 ms early once the flux's own group delay is out.
+#: What is left is the asymmetry of the mel filterbank's response to an attack;
+#: it is a constant, so it is simply added back.
+DETECTOR_LAG_MS = 3.2
+
+#: "On the grid" for the purposes of the gate.
+ON_GRID_MS = 20.0
+
+#: Acceptance thresholds. These are the numbers a render has to beat.
+MAX_MEDIAN_MS = 12.0
+MAX_P90_MS = 25.0
+MIN_ON_GRID = 0.85
+
+
+def _mono(x: np.ndarray) -> np.ndarray:
+    return x if x.ndim == 1 else x.mean(axis=1)
+
+
+def onset_envelope(x: np.ndarray, sr: int, hop: int = FINE_HOP,
+                   n_fft: int = FINE_FFT, lag: int = FLUX_LAG
+                   ) -> tuple[np.ndarray, float]:
+    """Low-latency onset envelope for alignment work, plus its frame rate.
+
+    This is deliberately *not* ``features.onset_strength``. That envelope is
+    built for beat tracking, where a stable period matters and a fixed tens-of-
+    milliseconds lag does not; it uses a 2048-sample window and a logarithmic
+    magnitude, and both push the flux peak well ahead of the actual attack --
+    measured on a synthesised kit whose every hit is exactly on a grid, it reads
+    20 ms early for hats and claps and 45 ms early for kicks. You cannot measure
+    a 12 ms budget with a ruler that is 20 ms out.
+
+    Flux on *linear* mel magnitude over a 1024-sample window reads the same kit
+    within 3 ms with a sub-millisecond spread, because linear magnitude weights
+    the loud attack rather than the quiet pre-echo the log lifts up. The
+    remaining group delay of the ``lag``-frame difference -- exactly half the lag
+    -- is subtracted from the returned time base, so frame ``i`` means the
+    attack happened at ``i / fps`` seconds.
+
+    Percussive material is what this is for: measure a drums stem, or HPSS's
+    percussive half, rather than a pad.
+    """
+    mono = np.asarray(_mono(x), dtype=np.float64)
+    if len(mono) < n_fft:
+        return np.zeros(0), sr / float(hop)
+    mag = np.abs(F.stft(mono, n_fft, hop))
+    bands = F.mel_filterbank(sr, n_fft, n_mels=64) @ mag
+    flux = np.maximum(0.0, bands[:, lag:] - bands[:, :-lag]).sum(axis=0)
+    flux = np.concatenate([np.zeros(lag), flux])
+    fps = sr / float(hop)
+    # local-mean removal, so a quiet passage contributes peaks too
+    win = max(3, int(round(0.25 * fps)) | 1)
+    env = np.maximum(0.0, flux - sps.convolve(flux, np.ones(win) / win, mode="same"))
+    peak = env.max()
+    return (env / peak if peak > 0 else env), fps
+
+
+def envelope_times(n: int, fps: float, lag: int = FLUX_LAG,
+                   hop: int = FINE_HOP, sr: int = 44100) -> np.ndarray:
+    """Time base of an onset envelope, with the flux's group delay removed."""
+    return np.arange(n) / fps - lag / (2.0 * fps) + DETECTOR_LAG_MS / 1000.0
+
+
+def onset_times(x: np.ndarray, sr: int, hop: int = FINE_HOP,
+                floor: float = 0.15) -> tuple[np.ndarray, np.ndarray]:
+    """Onset times (seconds) and strengths, with sub-frame peak interpolation.
+
+    ``floor`` is a fraction of the envelope's 95th percentile; peaks below it
+    are reverb tails and noise, not events a listener hears as "a hit".
+    """
+    env, fps = onset_envelope(x, sr, hop=hop)
+    if env.size < 4 or env.max() <= 0:
+        return np.zeros(0), np.zeros(0)
+    ref = float(np.percentile(env[env > 0], 95)) if np.any(env > 0) else 0.0
+    height = max(floor * ref, 1e-6)
+    peaks, _ = sps.find_peaks(env, height=height, distance=max(1, int(0.05 * fps)))
+    peaks = peaks[(peaks > 0) & (peaks < len(env) - 1)]
+    if not len(peaks):
+        return np.zeros(0), np.zeros(0)
+    a, b, c = env[peaks - 1], env[peaks], env[peaks + 1]
+    den = a - 2 * b + c
+    shift = np.where(np.abs(den) > 1e-12, 0.5 * (a - c) / np.where(den == 0, 1e-12, den), 0.0)
+    shift = np.clip(shift, -0.5, 0.5)
+    return ((peaks + shift) / fps - FLUX_LAG / (2.0 * fps)
+            + DETECTOR_LAG_MS / 1000.0), b
+
+
+def grid_times(bpm: float, first_downbeat: float, duration: float,
+               division: int = 4) -> np.ndarray:
+    """Every ``division``-th of a beat of the target grid, covering ``duration``.
+
+    ``division=1`` gives beats, ``4`` gives 16th notes. The lattice is extended
+    backwards past ``first_downbeat`` so material in the pickup bar is measured
+    against the same ruler -- and it is extended in whole *bars*, so ``grid[0]``
+    is always a beat one and ``grid[k]`` is beat ``(k // division) % 4`` of a
+    bar whatever the division. ``bar_phase`` relies on that.
+    """
+    beat = 60.0 / max(bpm, 1e-6)
+    step = beat / max(division, 1)
+    bar = 4.0 * beat
+    first = first_downbeat - bar * np.ceil(first_downbeat / bar)
+    n = int(np.floor((duration - first) / step)) + 1
+    return first + step * np.arange(max(n, 1))
+
+
+def phase_errors(onsets: np.ndarray, grid: np.ndarray) -> np.ndarray:
+    """Signed seconds from each onset to the nearest grid point."""
+    if not len(onsets) or not len(grid):
+        return np.zeros(0)
+    idx = np.clip(np.searchsorted(grid, onsets), 1, len(grid) - 1)
+    lo, hi = grid[idx - 1], grid[idx]
+    pick = np.where(np.abs(onsets - lo) <= np.abs(onsets - hi), lo, hi)
+    return onsets - pick
+
+
+def comb_offset(x: np.ndarray, sr: int, bpm: float, first_downbeat: float,
+                hop: int = FINE_HOP, steps: int = 241) -> tuple[float, float]:
+    """Global phase of a layer against the beat comb.
+
+    Returns ``(offset_seconds, sharpness)``. The offset is where a comb of beat
+    impulses best explains the onset envelope, searched over +/- half a beat;
+    sharpness is how much better the winner is than the mean of the sweep, which
+    tells you whether the answer means anything (a pad has no sharpness).
+    """
+    env, fps = onset_envelope(x, sr, hop=hop)
+    if env.size < 8 or env.max() <= 0:
+        return 0.0, 0.0
+    beat = 60.0 / max(bpm, 1e-6)
+    duration = len(env) / fps
+    beats = grid_times(bpm, first_downbeat, duration, division=1)
+    beats = beats[(beats >= 0) & (beats < duration)]
+    if len(beats) < 4:
+        return 0.0, 0.0
+    offsets = np.linspace(-beat / 2.0, beat / 2.0, steps)
+    frames = (np.arange(len(env)) / fps - FLUX_LAG / (2.0 * fps)
+              + DETECTOR_LAG_MS / 1000.0)
+    scores = np.array([float(np.interp(beats + o, frames, env, left=0.0, right=0.0).sum())
+                       for o in offsets])
+    best = int(np.argmax(scores))
+    mean = float(scores.mean())
+    sharp = (scores[best] - mean) / max(scores[best], 1e-9)
+    return float(offsets[best]), float(sharp)
+
+
+def bar_phase(x: np.ndarray, sr: int, bpm: float, first_downbeat: float,
+              hop: int = FINE_HOP) -> tuple[int, float]:
+    """Which of the four beat offsets carries this layer's bar one.
+
+    Returns ``(phase, margin)``. ``phase == 0`` means the layer's downbeat is the
+    grid's downbeat. Scoring is the same low-band-plus-onset weighting the beat
+    tracker uses to find downbeats in a source track, so a source whose bar one
+    got placed on the grid's beat three reads back as phase 2.
+    """
+    mono = _mono(x)
+    env, fps = onset_envelope(x, sr, hop=hop)
+    low = F.band_energy(mono, sr, 20.0, 160.0, hop=hop)
+    n = min(len(env), len(low))
+    if n < 16:
+        return 0, 0.0
+    beats = grid_times(bpm, first_downbeat, n / fps, division=1)
+    # drop whole bars off the front so beats[0] stays a beat one
+    lead = int(np.sum(beats < 0))
+    beats = beats[int(np.ceil(lead / 4.0)) * 4:]
+    beats = beats[beats < n / fps]
+    if len(beats) < 8:
+        return 0, 0.0
+    idx = np.clip((beats * fps).astype(int), 0, n - 1)
+    en = env[:n] / max(env[:n].max(), 1e-9)
+    ln = low[:n] / max(low[:n].max(), 1e-9)
+    strength = 0.65 * ln[idx] + 0.35 * en[idx]
+    # beats[0] is the first grid point at or before time 0, and grid_times walks
+    # backwards from the downbeat in whole steps, so beats[0] is itself a
+    # downbeat: index p of `strength` is beat p of a bar.
+    scores = np.array([strength[p::4].mean() for p in range(4)])
+    phase = int(np.argmax(scores))
+    srt = np.sort(scores)[::-1]
+    return phase, float((srt[0] - srt[1]) / max(srt[0], 1e-9))
+
+
+def _layer_report(x: np.ndarray, sr: int, bpm: float, first_downbeat: float,
+                  division: int = 4) -> dict:
+    """Every phase measurement for one layer."""
+    duration = len(x) / float(sr)
+    onsets, _ = onset_times(x, sr)
+    grid = grid_times(bpm, first_downbeat, duration, division=division)
+    err = phase_errors(onsets, grid) * 1000.0
+    absr = np.abs(err)
+    offset, sharp = comb_offset(x, sr, bpm, first_downbeat)
+    phase, margin = bar_phase(x, sr, bpm, first_downbeat)
+    beat_ms = 60_000.0 / max(bpm, 1e-6)
+    off_ms = offset * 1000.0
+    if abs(off_ms) < 0.18 * beat_ms:
+        where = "grid"
+    elif abs(abs(off_ms) - 0.5 * beat_ms) < 0.18 * beat_ms:
+        where = "half-beat"
+    else:
+        where = "offset"
+    return {
+        "onsets": int(len(onsets)),
+        "median_ms": float(np.median(absr)) if len(absr) else 0.0,
+        "p90_ms": float(np.percentile(absr, 90)) if len(absr) else 0.0,
+        "mean_signed_ms": float(np.mean(err)) if len(err) else 0.0,
+        "within_20ms": float(np.mean(absr <= ON_GRID_MS)) if len(absr) else 1.0,
+        "comb_offset_ms": off_ms,
+        "comb_sharpness": sharp,
+        "beat_alignment": where,
+        "bar_phase": phase,
+        "bar_phase_margin": margin,
+        "grid_division": division,
+    }
+
+
+def span_overlap(spans: list[tuple[int, int]], n: int) -> dict:
+    """Worst simultaneous-span count over a set of half-open sample ranges.
+
+    The engine reports one span per arrangement slot. Two slots whose source
+    audio is live at the same instant is the "everything was overlapping" bug:
+    the count at every boundary must be exactly one while the arrangement is
+    running (a crossfade is allowed, but it is handled inside a single slot's
+    buffer, not by rendering two slots on top of each other).
+    """
+    if not spans:
+        return {"max_concurrent": 0, "overlaps": [], "gaps": []}
+    edges = sorted({e for s in spans for e in s} | {0, n})
+    worst, overlaps, gaps = 0, [], []
+    for a, b in zip(edges, edges[1:]):
+        if b <= a:
+            continue
+        mid = (a + b) / 2.0
+        live = sum(1 for s, e in spans if s <= mid < e)
+        worst = max(worst, live)
+        if live > 1:
+            overlaps.append({"start": a, "end": b, "count": live})
+        elif live == 0 and 0 <= a < n:
+            gaps.append({"start": a, "end": b})
+    return {"max_concurrent": worst, "overlaps": overlaps[:8], "gaps": gaps[:8]}
+
+
+def alignment_report(rendered_audio: np.ndarray, sr: int, bpm: float,
+                     first_downbeat_sec: float = 0.0,
+                     source_stem: np.ndarray | None = None,
+                     kit_layer: np.ndarray | None = None,
+                     spans: list[tuple[int, int]] | None = None,
+                     division: int = 4) -> dict:
+    """Measure whether a rendered remix sits on its own grid.
+
+    ``rendered_audio`` is the finished mix. ``source_stem`` should be the source
+    layer rendered on its own -- ideally the source's drums, which have the
+    clearest onsets -- because in the full mix the kit's onsets swamp the
+    source's and every number comes back flattering. ``kit_layer`` is the
+    synthesised drum bus, whose numbers should be ~0 by construction and are
+    therefore the control: if the kit reads badly the grid parameters passed in
+    are wrong, not the render.
+
+    Returns a dict of per-layer reports plus ``ok`` and a list of ``problems``
+    naming, in plain words, whichever threshold failed.
+    """
+    out: dict = {
+        "bpm": float(bpm),
+        "first_downbeat_sec": float(first_downbeat_sec),
+        "duration": len(rendered_audio) / float(sr),
+        "mix": _layer_report(rendered_audio, sr, bpm, first_downbeat_sec, division),
+    }
+    if source_stem is not None:
+        out["source"] = _layer_report(source_stem, sr, bpm, first_downbeat_sec, division)
+    if kit_layer is not None:
+        out["kit"] = _layer_report(kit_layer, sr, bpm, first_downbeat_sec, division)
+    if spans is not None:
+        out["spans"] = span_overlap(spans, len(rendered_audio))
+
+    judged = out.get("source", out["mix"])
+    problems: list[str] = []
+    if judged["median_ms"] > MAX_MEDIAN_MS:
+        problems.append(f"median phase error {judged['median_ms']:.1f} ms "
+                        f"(limit {MAX_MEDIAN_MS:.0f})")
+    if judged["p90_ms"] > MAX_P90_MS:
+        problems.append(f"p90 phase error {judged['p90_ms']:.1f} ms "
+                        f"(limit {MAX_P90_MS:.0f})")
+    if judged["within_20ms"] < MIN_ON_GRID:
+        problems.append(f"only {judged['within_20ms']:.1%} of source onsets within "
+                        f"+/-{ON_GRID_MS:.0f} ms of the grid "
+                        f"(limit {MIN_ON_GRID:.0%})")
+    if judged["beat_alignment"] != "grid" and judged["comb_sharpness"] > 0.05:
+        problems.append(f"the source sits {judged['comb_offset_ms']:+.0f} ms off the beat "
+                        f"({judged['beat_alignment']})")
+    if judged["bar_phase"] != 0 and judged["bar_phase_margin"] > 0.08:
+        problems.append(f"the source's bar one lands on the grid's beat "
+                        f"{judged['bar_phase'] + 1}")
+    if "kit" in out and out["kit"]["median_ms"] > 6.0:
+        problems.append(f"the kit itself reads {out['kit']['median_ms']:.1f} ms off its own "
+                        "grid, so the grid parameters are wrong")
+    if "spans" in out and out["spans"]["max_concurrent"] > 1:
+        problems.append(f"{out['spans']['max_concurrent']} arrangement slots render "
+                        "source audio at the same time")
+    out["problems"] = problems
+    out["ok"] = not problems
+    return out

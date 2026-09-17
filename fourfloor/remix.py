@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +38,9 @@ class RemixOptions:
     producer: bool = False
     seed: int = 0
     wav: bool = True
+    keep_layers: bool = False
+    """Hold on to the engine's individual buses so the alignment gate can
+    measure the source layer without the kit shouting over it."""
 
 
 @dataclass
@@ -55,6 +58,8 @@ class RemixResult:
     paths: dict[str, Path]
     metrics: dict
     warnings: list[str]
+    layers: dict[str, np.ndarray] = field(default_factory=dict)
+    source_spans: list[tuple[int, int]] = field(default_factory=list)
 
 
 def _resolve_key(a: Analysis, opts: RemixOptions) -> tuple[int, KeyEstimate, list[str]]:
@@ -219,6 +224,8 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
                     swing=swing, beat_multiple=tempo.beat_multiple,
                     src_bar_dur=a.bar_dur, seed=opts.seed)
     audio, metrics = engine.render()
+    layers = engine.layers if opts.keep_layers else {}
+    spans = list(engine.source_spans)
 
     step("write", str(out))
     paths: dict[str, Path] = {}
@@ -256,4 +263,5 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
 
     return RemixResult(audio=audio, sr=a.sr, plan=p, session=sess, analysis=a,
                        tempo_plan=tempo, semitones=semitones, target_key=target_key,
-                       paths=paths, metrics=metrics, warnings=warnings)
+                       paths=paths, metrics=metrics, warnings=warnings,
+                       layers=layers, source_spans=spans)

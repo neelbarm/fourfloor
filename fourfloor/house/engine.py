@@ -131,6 +131,14 @@ class Engine:
         self.beat = plan.bar_dur / 4.0
         self.n = int(round(plan.total_bars * plan.bar_dur * sr))
         self.ir = RV.synth_ir(sr, seconds=1.6, decay=4.0)
+        #: Per-slot sample spans of rendered source audio, filled by
+        #: ``render_source``. Two slots live at once is a bug; the alignment
+        #: gate reads this to prove it never happens.
+        self.source_spans: list[tuple[int, int]] = []
+        #: The individual buses of the last ``render``, kept so the alignment
+        #: gate can measure the source on its own instead of through a mix the
+        #: kit dominates.
+        self.layers: dict[str, np.ndarray] = {}
 
     # -- helpers ---------------------------------------------------------
     def _bar_sample(self, bar: float) -> int:
@@ -154,9 +162,17 @@ class Engine:
         """
         harm = np.zeros((self.n, 2), dtype=np.float32)
         perc = np.zeros((self.n, 2), dtype=np.float32)
+        # The same percussive bed at unity gain whatever the plan asks for. It
+        # is never mixed in; it exists so the alignment gate can measure the
+        # source's own drums -- the layer with the clearest onsets, and the one
+        # a listener compares against the kick -- laid out exactly where the
+        # arrangement puts the source.
+        perc_ref = np.zeros((self.n, 2), dtype=np.float32)
+        self.source_spans = []
         for slot in self.plan.slots:
             a = self._bar_sample(slot.start_bar)
             want = self._bar_sample(slot.end_bar) - a
+            self.source_spans.append((a, a + want))
             period = int(round(max(slot.source_bars, 1) * self.beat_multiple
                                * self.bar_dur * self.sr))
             start = int(round(slot.source_start * self.sr))
@@ -186,8 +202,10 @@ class Engine:
                 seg[-edge:] *= np.linspace(1.0, 0.0, edge)[:, None]
 
             add_at(harm, seg, a, slot.source_gain)
+            add_at(perc_ref, pseg, a, 1.0)
             if slot.percussive_gain > 0:
                 add_at(perc, pseg, a, slot.percussive_gain)
+        self.layers["source_perc"] = perc_ref
         return harm, perc
 
     def _throw(self, seg: np.ndarray, slot: Slot) -> np.ndarray:
@@ -309,7 +327,10 @@ class Engine:
         # carve 40-90 Hz out of the source so the kick and bass own the sub
         harm = FL.apply(harm, "highpass", self.sr, 105.0, q=0.707, order=2)
 
-        mix = harm * 1.35 + perc + drums * 0.72 + bassline * 0.55
+        source_bus = harm * 1.35 + perc
+        mix = source_bus + drums * 0.72 + bassline * 0.55
+        self.layers.update({"source": source_bus, "kit": drums * 0.72,
+                            "bass": bassline * 0.55})
         out = DY.master(mix, self.sr, peak_db=-1.0)
 
         metrics = {
