@@ -25,15 +25,50 @@ import numpy as np
 from ..analysis.features import N_FFT, HOP, istft, stft
 
 
-def _transient_frames(mag: np.ndarray, sensitivity: float = 2.2) -> np.ndarray:
-    """Boolean mask of frames that look like onsets (rectified spectral flux)."""
+def _transient_frames(mag: np.ndarray, sensitivity: float = 2.2,
+                      min_rise: float = 0.02) -> np.ndarray:
+    """Boolean mask of frames that look like onsets (rectified spectral flux).
+
+    Two conditions, and a frame has to meet both. The first is the usual robust
+    outlier test on the flux. The second asks that the rise be a real fraction
+    ``min_rise`` of the frame's own magnitude: without it, a steady tone -- whose
+    flux is nothing but window ripple -- has outliers like anything else, and
+    every one of them gets treated as an attack and has its phase re-seeded. On
+    a held sine that reads as beating.
+    """
     flux = np.maximum(0.0, np.diff(mag, axis=1)).sum(axis=0)
     flux = np.concatenate([[0.0], flux])
     if flux.max() <= 0:
         return np.zeros(mag.shape[1], dtype=bool)
     med = np.median(flux)
     mad = np.median(np.abs(flux - med)) + 1e-9
-    return flux > med + sensitivity * 1.4826 * mad
+    rise = flux / np.maximum(mag.sum(axis=0), 1e-9)
+    return (flux > med + sensitivity * 1.4826 * mad) & (rise > min_rise)
+
+
+def _snap_transients(steps: np.ndarray, transients: np.ndarray | None) -> np.ndarray:
+    """Round an analysis position to a whole frame when it straddles an attack.
+
+    Between two analysis frames the resynthesis interpolates magnitude linearly.
+    For a steady tone that is right. For an attack it is not: the frame before
+    the hit and the frame containing it get blended, so the attack appears at
+    reduced level one output frame early and at full level one frame late. The
+    flux peak therefore lands, on average, half a hop behind the beat -- 5.8 ms
+    at a hop of 512, measured on a click track warped at ratio 1.0, where the
+    answer should be exactly zero. Half a hop is half the error budget the
+    alignment gate allows for a whole remix.
+
+    Snapping the position to the nearer of the two frames whenever either of
+    them is an onset frame turns that systematic lateness into a symmetric
+    +/- half-hop rounding with zero mean, and stops the blend smearing the
+    attack into the silence in front of it, which is pre-echo.
+    """
+    if transients is None or not len(transients):
+        return steps
+    lo = np.clip(np.floor(steps).astype(int), 0, len(transients) - 1)
+    hi = np.clip(lo + 1, 0, len(transients) - 1)
+    near = transients[lo] | transients[hi]
+    return np.where(near, np.round(steps), steps)
 
 
 def _peak_regions(col: np.ndarray) -> np.ndarray:
@@ -71,6 +106,7 @@ def stretch_frames(spec: np.ndarray, time_steps: np.ndarray, hop: int = HOP,
     n_bins, n_frames = spec.shape
     mag_all = np.abs(spec)
     phase_all = np.angle(spec)
+    time_steps = _snap_transients(np.asarray(time_steps, dtype=float), transients)
     omega = 2.0 * np.pi * hop * np.arange(n_bins) / n_fft   # expected per-hop advance
 
     out = np.zeros((n_bins, len(time_steps)), dtype=complex)
@@ -155,6 +191,7 @@ def _stereo(x, steps_fn, target, hop, n_fft, phase_lock, preserve_transients):
     spec_m = stft(mid, n_fft, hop)
     ts = steps_fn(spec_m.shape[1])
     tr = _transient_frames(np.abs(spec_m)) if preserve_transients else None
+    ts = _snap_transients(np.asarray(ts, dtype=float), tr)
     _, adv = stretch_frames(spec_m, ts, hop, n_fft, phase_lock, tr)
     chans = []
     for c in range(x.shape[1]):
