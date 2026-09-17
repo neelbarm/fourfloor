@@ -37,28 +37,45 @@ class Stems:
 def _loop_to(src: np.ndarray, start: int, want: int, period: int, sr: int) -> np.ndarray:
     """Take ``want`` samples from ``src`` at ``start``, looping a ``period``-long span.
 
-    Repeats are joined with a 24 ms equal-power crossfade. Because ``period`` is
-    always a whole number of bars the seam lands on a downbeat, so the loop
-    stays in phase with the grid.
+    Every repeat begins at an exact multiple of ``period``, which is a whole
+    number of bars, so the loop cannot drift away from the grid however long it
+    runs. Seams are hidden by overlapping a short crossfade into the material
+    that follows the loop point -- audio the source already has, read past the
+    end of the span -- rather than by shortening the loop.
+
+    That distinction is the whole bug this replaced. Joining each repeat with
+    ``xfade`` returned ``len(a) + len(b) - fade`` samples, so every repetition
+    was 24 ms short. Eight bars at 128 BPM is a 15-second period, and a drop
+    three repeats long finished 72 ms -- most of a 16th note -- ahead of where
+    the grid said it was, with the error growing all the way through.
     """
     if want <= 0:
         return np.zeros((0, src.shape[1]) if src.ndim == 2 else (0,), dtype=np.float32)
     period = max(period, int(0.25 * sr))
-    fade = min(int(0.024 * sr), period // 4)
+    fade = int(min(0.024 * sr, period // 4))
+    shape = (want, src.shape[1]) if src.ndim == 2 else (want,)
+    out = np.zeros(shape, dtype=np.float32)
 
     def take(a: int, n: int) -> np.ndarray:
-        seg = src[max(0, a): max(0, a) + n]
-        return fit(seg, n)
+        return fit(src[max(0, a): max(0, a) + n], n)
 
-    out = take(start, period)
-    while len(out) < want:
-        nxt = take(start, period)
-        out = xfade(out, nxt, fade)
-    # Always hand back a fresh buffer. `fit` and the slicing in `take` return
-    # views when the span already has the right length, and the caller fades
-    # the slot edges in place -- writing straight back into the shared stem and
-    # corrupting it for every later slot that reads the same span.
-    return np.array(fit(out, want), dtype=np.float32, copy=True)
+    t = np.linspace(0.0, 1.0, fade, dtype=np.float32) if fade > 1 else None
+    rise = np.sin(t * np.pi / 2) if t is not None else None
+    fall = np.cos(t * np.pi / 2) if t is not None else None
+    if rise is not None and src.ndim == 2:
+        rise, fall = rise[:, None], fall[:, None]
+
+    pos = 0
+    while pos < want:
+        n = min(period + fade, want - pos)
+        seg = np.array(take(start, n), dtype=np.float32, copy=True)
+        if rise is not None and pos > 0:
+            seg[:fade] *= rise
+        if rise is not None and pos + period < want and n >= fade:
+            seg[period:period + fade] *= fall[: max(0, n - period)]
+        out[pos:pos + n] += seg
+        pos += period
+    return out
 
 
 def _sweep_curve(n: int, spec: tuple[float, float] | None) -> np.ndarray | None:
@@ -117,7 +134,7 @@ class Engine:
 
     def __init__(self, sr: int, plan: Plan, stems: Stems, chords: list[dict],
                  semitones: int = 0, swing: float = 0.08, beat_multiple: float = 1.0,
-                 src_bar_dur: float = 2.0, seed: int = 0) -> None:
+                 src_bar_dur: float = 2.0, seed: int = 0, warp=None) -> None:
         self.sr = sr
         self.plan = plan
         self.stems = stems
@@ -125,6 +142,7 @@ class Engine:
         self.semitones = semitones
         self.beat_multiple = beat_multiple
         self.src_bar_dur = src_bar_dur
+        self.warp = warp
         self.kit = DR.Kit(sr=sr, swing=swing)
         self.rng = np.random.default_rng(seed)
         self.bar_dur = plan.bar_dur
@@ -147,8 +165,11 @@ class Engine:
     def _slot_chord(self, slot: Slot, bar_in_slot: int) -> tuple[int, bool]:
         """Chord for a bar of a slot, read back through the warp to source time."""
         warped_t = slot.source_start + bar_in_slot * self.bar_dur
-        # a warped bar corresponds to 1/beat_multiple source bars
-        src_t = warped_t / self.bar_dur / self.beat_multiple * self.src_bar_dur
+        if self.warp is not None:
+            src_t = float(self.warp.to_source(warped_t))
+        else:
+            # a warped bar corresponds to 1/beat_multiple source bars
+            src_t = warped_t / self.bar_dur / self.beat_multiple * self.src_bar_dur
         root, minor = _chord_at(self.chords, src_t)
         return (root + self.semitones) % 12, minor
 
@@ -173,8 +194,7 @@ class Engine:
             a = self._bar_sample(slot.start_bar)
             want = self._bar_sample(slot.end_bar) - a
             self.source_spans.append((a, a + want))
-            period = int(round(max(slot.source_bars, 1) * self.beat_multiple
-                               * self.bar_dur * self.sr))
+            period = int(round(max(slot.source_bars, 1) * self.bar_dur * self.sr))
             start = int(round(slot.source_start * self.sr))
             seg = _loop_to(self.stems.harmonic, start, want, period, self.sr)
             pseg = _loop_to(self.stems.percussive, start, want, period, self.sr)

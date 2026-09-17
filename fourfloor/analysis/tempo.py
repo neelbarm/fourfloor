@@ -223,34 +223,117 @@ def track_beats(env: np.ndarray, fps: float, bpm: float, tightness: float = 300.
     return idx.astype(float) / fps
 
 
-def find_downbeats(beats: np.ndarray, env: np.ndarray, low: np.ndarray, fps: float,
+def bar_phase_strength(x: np.ndarray, sr: int, beats: np.ndarray,
+                       beats_per_bar: int = 4) -> np.ndarray:
+    """Per-beat evidence that *this* beat is a bar one.
+
+    Four cues, because the obvious one on its own is wrong for most music that
+    is not already house:
+
+    * **Low band on the beat.** A kick or an 808 on beat one. Strong evidence,
+      and the only cue the first version of this used.
+    * **Onset strength on the beat.** Bars tend to start with something.
+    * **Backbeat two or four beats away.** A snare on beat three (a half-time
+      trap beat) or on beats two and four (everything else). This is what stops
+      the score picking the snare itself, which is what happens on a separated
+      drums stem where the 808 has gone to the bass stem and the loudest thing
+      left in the bar *is* the snare. On Don Toliver's *Body* that mistake put
+      bar one two beats late.
+    * **A snare on the beat, as evidence against.** Bar one is rarely the
+      backbeat.
+
+    Returned per beat rather than per phase so a caller can re-vote inside short
+    windows and see whether the answer is stable across the track.
+    """
+    beats = np.asarray(beats, dtype=float)
+    if not len(beats):
+        return np.zeros(0)
+    env, fps = F.attack_envelope(x, sr)
+    if not len(env):
+        return np.zeros(len(beats))
+    n = len(env)
+
+    def band(lo: float, hi: float) -> np.ndarray:
+        b = F.band_energy(x, sr, lo, hi, hop=F.ATTACK_HOP)[:n]
+        return b / max(float(b.max()), 1e-9)
+
+    low, snare = band(20.0, 120.0), band(1800.0, 7000.0)
+    onset = env / max(float(env.max()), 1e-9)
+    idx = np.clip(((beats + F.ATTACK_LATENCY) * fps).astype(int), 0, n - 1)
+    lo_b, sn_b, on_b = low[idx], snare[idx], onset[idx]
+
+    def shifted(a: np.ndarray, k: int) -> np.ndarray:
+        out = np.zeros_like(a)
+        if k < len(a):
+            out[:len(a) - k] = a[k:]
+            out[len(a) - k:] = a[-1] if len(a) else 0.0
+        return out
+
+    half = shifted(sn_b, beats_per_bar // 2)                     # snare on beat 3
+    two_four = 0.5 * (shifted(sn_b, 1) + shifted(sn_b, beats_per_bar - 1))
+    back = np.maximum(half, two_four)
+    return 0.45 * lo_b + 0.20 * on_b + 0.35 * back - 0.25 * sn_b
+
+
+def find_downbeats(beats: np.ndarray, strength: np.ndarray,
                    beats_per_bar: int = 4) -> tuple[int, float]:
-    """Pick the bar phase whose beat 1 carries the most low-band + onset energy.
+    """Pick the bar phase with the most beat-one evidence.
 
     Returns ``(phase, confidence)``. Confidence is the margin between the best
     and second-best phase, multiplied by the fraction of 8-bar windows that vote
     for the winning phase (the consistency check).
     """
-    if len(beats) < beats_per_bar * 2:
+    if len(beats) < beats_per_bar * 2 or not len(strength):
         return 0, 0.0
-    idx = np.clip((beats * fps).astype(int), 0, min(len(env), len(low)) - 1)
-    ln = low / max(low.max(), 1e-9)
-    en = env / max(env.max(), 1e-9)
-    strength = 0.65 * ln[idx] + 0.35 * en[idx]
-
+    strength = np.asarray(strength, dtype=float)[:len(beats)]
     scores = np.array([strength[p::beats_per_bar].mean() for p in range(beats_per_bar)])
     phase = int(np.argmax(scores))
     srt = np.sort(scores)[::-1]
-    margin = float((srt[0] - srt[1]) / max(srt[0], 1e-9))
+    span = float(srt[0] - srt[-1])
+    margin = float((srt[0] - srt[1]) / max(abs(srt[0]), span, 1e-9))
 
-    # consistency: re-vote inside 8-bar windows
     win = beats_per_bar * 8
     votes = []
     for s in range(0, len(strength) - win + 1, win):
         seg = strength[s:s + win]
-        votes.append(int(np.argmax([seg[p::beats_per_bar].mean() for p in range(beats_per_bar)])))
+        votes.append(int(np.argmax([seg[p::beats_per_bar].mean()
+                                    for p in range(beats_per_bar)])))
     agree = float(np.mean([v == phase for v in votes])) if votes else 1.0
     return phase, float(np.clip(margin * 4.0, 0.0, 1.0) * agree)
+
+
+def refine_phase(x: np.ndarray, sr: int, beats: np.ndarray,
+                 window: float = 0.05) -> np.ndarray:
+    """Slide the whole beat grid onto where the attacks actually are.
+
+    The dynamic programme places beats on peaks of ``onset_strength``, and that
+    envelope reads early -- 19 ms for a hat, 45 ms for a kick, because it is
+    built from a 2048-sample window and a log magnitude. That bias does not
+    matter for finding the tempo. It matters enormously afterwards, because the
+    warp pins these beat times to an exactly periodic grid: every millisecond
+    the grid sits ahead of the music is a millisecond the music ends up behind
+    the kick in the finished remix. On *Body* it was worth 12 ms, which is the
+    entire error budget.
+
+    So: take the whole grid, slide it through +/-``window`` seconds against
+    :func:`features.attack_envelope`, and keep the offset where the attacks line
+    up best. One number for the whole track, because the bias is a property of
+    the detector rather than of any one beat -- shifting beats individually
+    would fit the grid to whatever was loudest and lose the tempo.
+    """
+    if len(beats) < 4:
+        return beats
+    env, fps = F.attack_envelope(x, sr)
+    if env.size < 8 or env.max() <= 0:
+        return beats
+    times = F.attack_times(len(env), fps)
+    offsets = np.linspace(-window, window, 101)
+    inside = beats[(beats > window) & (beats < times[-1] - window)]
+    if len(inside) < 4:
+        return beats
+    scores = [float(np.interp(inside + o, times, env, left=0.0, right=0.0).sum())
+              for o in offsets]
+    return beats + float(offsets[int(np.argmax(scores))])
 
 
 def analyze_beats(x: np.ndarray, sr: int) -> BeatGrid:
@@ -280,7 +363,7 @@ def analyze_beats(x: np.ndarray, sr: int) -> BeatGrid:
             refined = 60.0 / float(np.mean(good))
             if MIN_BPM <= refined <= MAX_BPM:
                 bpm = refined
-    low = F.band_energy(x, sr, 20.0, 160.0)
-    phase, conf = find_downbeats(beats, env, low, fps)
+    beats = refine_phase(x, sr, beats)
+    phase, conf = find_downbeats(beats, bar_phase_strength(x, sr, beats))
     return BeatGrid(bpm=bpm, beats=beats, downbeat_index=phase,
                     tempo_candidates=cands, downbeat_confidence=conf)

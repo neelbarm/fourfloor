@@ -38,85 +38,23 @@ from scipy import signal as sps
 
 from . import features as F
 
-#: Onset envelope hop for alignment work. The analysis hop of 512 quantises
-#: every measurement to 11.6 ms, which is most of the error budget we are trying
-#: to measure; 64 gives 1.45 ms and parabolic peak interpolation gets well under
-#: a millisecond from there.
-FINE_HOP = 64
-
-#: Window for the alignment onset envelope. 1024 samples (23 ms) is short enough
-#: that a kick's attack is not smeared across a beat and long enough that the
-#: mel bands below 200 Hz still resolve.
-FINE_FFT = 1024
-
-#: Frames the flux looks back over. A two-frame difference is far steadier than
-#: a one-frame difference at this hop -- a single frame at 1.45 ms is mostly
-#: window ripple -- and its group delay is exactly one frame, which is corrected
-#: below.
-FLUX_LAG = 2
-
-#: Residual latency of the detector above, in milliseconds, measured on
-#: synthesised kicks, hats, claps and a full kit placed exactly on a grid: every
-#: one of them reads 2.8-3.5 ms early once the flux's own group delay is out.
-#: What is left is the asymmetry of the mel filterbank's response to an attack;
-#: it is a constant, so it is simply added back.
-DETECTOR_LAG_MS = 3.2
-
-#: "On the grid" for the purposes of the gate.
-ON_GRID_MS = 20.0
-
 #: Acceptance thresholds. These are the numbers a render has to beat.
+ON_GRID_MS = 20.0
 MAX_MEDIAN_MS = 12.0
 MAX_P90_MS = 25.0
 MIN_ON_GRID = 0.85
+
+FINE_HOP = F.ATTACK_HOP
 
 
 def _mono(x: np.ndarray) -> np.ndarray:
     return x if x.ndim == 1 else x.mean(axis=1)
 
 
-def onset_envelope(x: np.ndarray, sr: int, hop: int = FINE_HOP,
-                   n_fft: int = FINE_FFT, lag: int = FLUX_LAG
+def onset_envelope(x: np.ndarray, sr: int, hop: int = FINE_HOP
                    ) -> tuple[np.ndarray, float]:
-    """Low-latency onset envelope for alignment work, plus its frame rate.
-
-    This is deliberately *not* ``features.onset_strength``. That envelope is
-    built for beat tracking, where a stable period matters and a fixed tens-of-
-    milliseconds lag does not; it uses a 2048-sample window and a logarithmic
-    magnitude, and both push the flux peak well ahead of the actual attack --
-    measured on a synthesised kit whose every hit is exactly on a grid, it reads
-    20 ms early for hats and claps and 45 ms early for kicks. You cannot measure
-    a 12 ms budget with a ruler that is 20 ms out.
-
-    Flux on *linear* mel magnitude over a 1024-sample window reads the same kit
-    within 3 ms with a sub-millisecond spread, because linear magnitude weights
-    the loud attack rather than the quiet pre-echo the log lifts up. The
-    remaining group delay of the ``lag``-frame difference -- exactly half the lag
-    -- is subtracted from the returned time base, so frame ``i`` means the
-    attack happened at ``i / fps`` seconds.
-
-    Percussive material is what this is for: measure a drums stem, or HPSS's
-    percussive half, rather than a pad.
-    """
-    mono = np.asarray(_mono(x), dtype=np.float64)
-    if len(mono) < n_fft:
-        return np.zeros(0), sr / float(hop)
-    mag = np.abs(F.stft(mono, n_fft, hop))
-    bands = F.mel_filterbank(sr, n_fft, n_mels=64) @ mag
-    flux = np.maximum(0.0, bands[:, lag:] - bands[:, :-lag]).sum(axis=0)
-    flux = np.concatenate([np.zeros(lag), flux])
-    fps = sr / float(hop)
-    # local-mean removal, so a quiet passage contributes peaks too
-    win = max(3, int(round(0.25 * fps)) | 1)
-    env = np.maximum(0.0, flux - sps.convolve(flux, np.ones(win) / win, mode="same"))
-    peak = env.max()
-    return (env / peak if peak > 0 else env), fps
-
-
-def envelope_times(n: int, fps: float, lag: int = FLUX_LAG,
-                   hop: int = FINE_HOP, sr: int = 44100) -> np.ndarray:
-    """Time base of an onset envelope, with the flux's group delay removed."""
-    return np.arange(n) / fps - lag / (2.0 * fps) + DETECTOR_LAG_MS / 1000.0
+    """The attack envelope this module measures with, and its frame rate."""
+    return F.attack_envelope(_mono(x), sr, hop=hop)
 
 
 def onset_times(x: np.ndarray, sr: int, hop: int = FINE_HOP,
@@ -129,6 +67,7 @@ def onset_times(x: np.ndarray, sr: int, hop: int = FINE_HOP,
     env, fps = onset_envelope(x, sr, hop=hop)
     if env.size < 4 or env.max() <= 0:
         return np.zeros(0), np.zeros(0)
+    times = F.attack_times(len(env), fps)
     ref = float(np.percentile(env[env > 0], 95)) if np.any(env > 0) else 0.0
     height = max(floor * ref, 1e-6)
     peaks, _ = sps.find_peaks(env, height=height, distance=max(1, int(0.05 * fps)))
@@ -139,8 +78,7 @@ def onset_times(x: np.ndarray, sr: int, hop: int = FINE_HOP,
     den = a - 2 * b + c
     shift = np.where(np.abs(den) > 1e-12, 0.5 * (a - c) / np.where(den == 0, 1e-12, den), 0.0)
     shift = np.clip(shift, -0.5, 0.5)
-    return ((peaks + shift) / fps - FLUX_LAG / (2.0 * fps)
-            + DETECTOR_LAG_MS / 1000.0), b
+    return times[peaks] + shift / fps, b
 
 
 def grid_times(bpm: float, first_downbeat: float, duration: float,
@@ -190,8 +128,7 @@ def comb_offset(x: np.ndarray, sr: int, bpm: float, first_downbeat: float,
     if len(beats) < 4:
         return 0.0, 0.0
     offsets = np.linspace(-beat / 2.0, beat / 2.0, steps)
-    frames = (np.arange(len(env)) / fps - FLUX_LAG / (2.0 * fps)
-              + DETECTOR_LAG_MS / 1000.0)
+    frames = F.attack_times(len(env), fps)
     scores = np.array([float(np.interp(beats + o, frames, env, left=0.0, right=0.0).sum())
                        for o in offsets])
     best = int(np.argmax(scores))
@@ -205,44 +142,56 @@ def bar_phase(x: np.ndarray, sr: int, bpm: float, first_downbeat: float,
     """Which of the four beat offsets carries this layer's bar one.
 
     Returns ``(phase, margin)``. ``phase == 0`` means the layer's downbeat is the
-    grid's downbeat. Scoring is the same low-band-plus-onset weighting the beat
-    tracker uses to find downbeats in a source track, so a source whose bar one
-    got placed on the grid's beat three reads back as phase 2.
+    grid's downbeat; anything else means the song's bar one was placed on the
+    remix's beat two, three or four, which is the kind of wrong a listener hears
+    immediately even though every individual hit is on the lattice.
+
+    The evidence is :func:`tempo.bar_phase_strength`, the same reading the beat
+    tracker uses to find downbeats in the first place, so the gate and the
+    analysis cannot disagree about what a bar one looks like.
     """
-    mono = _mono(x)
-    env, fps = onset_envelope(x, sr, hop=hop)
-    low = F.band_energy(mono, sr, 20.0, 160.0, hop=hop)
-    n = min(len(env), len(low))
-    if n < 16:
-        return 0, 0.0
-    beats = grid_times(bpm, first_downbeat, n / fps, division=1)
-    # drop whole bars off the front so beats[0] stays a beat one
+    from .tempo import bar_phase_strength, find_downbeats
+
+    duration = len(x) / float(sr)
+    beats = grid_times(bpm, first_downbeat, duration, division=1)
     lead = int(np.sum(beats < 0))
-    beats = beats[int(np.ceil(lead / 4.0)) * 4:]
-    beats = beats[beats < n / fps]
+    beats = beats[int(np.ceil(lead / 4.0)) * 4:]      # keep beats[0] a bar one
+    beats = beats[beats < duration]
     if len(beats) < 8:
         return 0, 0.0
-    idx = np.clip((beats * fps).astype(int), 0, n - 1)
-    en = env[:n] / max(env[:n].max(), 1e-9)
-    ln = low[:n] / max(low[:n].max(), 1e-9)
-    strength = 0.65 * ln[idx] + 0.35 * en[idx]
-    # beats[0] is the first grid point at or before time 0, and grid_times walks
-    # backwards from the downbeat in whole steps, so beats[0] is itself a
-    # downbeat: index p of `strength` is beat p of a bar.
-    scores = np.array([strength[p::4].mean() for p in range(4)])
-    phase = int(np.argmax(scores))
-    srt = np.sort(scores)[::-1]
-    return phase, float((srt[0] - srt[1]) / max(srt[0], 1e-9))
+    strength = bar_phase_strength(_mono(x), sr, beats)
+    return find_downbeats(beats, strength)
+
+
+def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
+    """Quantile of ``values`` weighted by ``weights``."""
+    if not len(values):
+        return 0.0
+    order = np.argsort(values)
+    v, w = values[order], np.maximum(weights[order], 1e-12)
+    cum = np.cumsum(w) - 0.5 * w
+    return float(np.interp(q * float(np.sum(w)), cum, v))
 
 
 def _layer_report(x: np.ndarray, sr: int, bpm: float, first_downbeat: float,
                   division: int = 4) -> dict:
-    """Every phase measurement for one layer."""
+    """Every phase measurement for one layer.
+
+    The headline numbers are weighted by onset strength, because that is what
+    "off beat" means to a listener: a snare landing 40 ms late is the complaint,
+    and the fourth hat of a 32nd-note roll landing 40 ms from the nearest 16th
+    is the music. On the drums of *Body* the unweighted 90th percentile is 44 ms
+    and the weighted one is 12 ms, and the 12 ms is the honest description --
+    the 44 ms is a hat roll being measured against a lattice it was never
+    played on. Unweighted figures are reported alongside so the difference is
+    always visible.
+    """
     duration = len(x) / float(sr)
-    onsets, _ = onset_times(x, sr)
+    onsets, strength = onset_times(x, sr)
     grid = grid_times(bpm, first_downbeat, duration, division=division)
     err = phase_errors(onsets, grid) * 1000.0
     absr = np.abs(err)
+    w = np.asarray(strength, dtype=float)
     offset, sharp = comb_offset(x, sr, bpm, first_downbeat)
     phase, margin = bar_phase(x, sr, bpm, first_downbeat)
     beat_ms = 60_000.0 / max(bpm, 1e-6)
@@ -255,10 +204,14 @@ def _layer_report(x: np.ndarray, sr: int, bpm: float, first_downbeat: float,
         where = "offset"
     return {
         "onsets": int(len(onsets)),
-        "median_ms": float(np.median(absr)) if len(absr) else 0.0,
-        "p90_ms": float(np.percentile(absr, 90)) if len(absr) else 0.0,
+        "median_ms": _weighted_quantile(absr, w, 0.5) if len(absr) else 0.0,
+        "p90_ms": _weighted_quantile(absr, w, 0.9) if len(absr) else 0.0,
+        "within_20ms": (float(np.sum(w[absr <= ON_GRID_MS]) / max(np.sum(w), 1e-12))
+                        if len(absr) else 1.0),
+        "median_ms_unweighted": float(np.median(absr)) if len(absr) else 0.0,
+        "p90_ms_unweighted": float(np.percentile(absr, 90)) if len(absr) else 0.0,
+        "within_20ms_unweighted": float(np.mean(absr <= ON_GRID_MS)) if len(absr) else 1.0,
         "mean_signed_ms": float(np.mean(err)) if len(err) else 0.0,
-        "within_20ms": float(np.mean(absr <= ON_GRID_MS)) if len(absr) else 1.0,
         "comb_offset_ms": off_ms,
         "comb_sharpness": sharp,
         "beat_alignment": where,
