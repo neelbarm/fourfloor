@@ -268,5 +268,4 @@ No copyrighted audio is included in this repository.
 
 ---
 
-Planned by Claude Fable 5.1, built by a Claude Opus agent in one evening with
-Claude Code.
+
