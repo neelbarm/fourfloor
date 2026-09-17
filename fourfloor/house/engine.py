@@ -45,6 +45,50 @@ LOOP_SEAM_BEATS = 0.5
 #: about and removes the whole family of them.
 LAND_MS = 6.0
 
+#: A drop is cut in, not faded in: the source starts at level on beat 1 behind
+#: nothing more than a de-click ramp. Measuring twenty drops across six
+#: commercial house remixes says the same thing -- a drop is a +4.9 dB step,
+#: eighteen of the twenty have no drum gap in front of them at all, and the
+#: monotonic filter ramps that do appear last a median 0.13 beats. So: a step,
+#: no vacuum, no ride into it.
+SLAM_MS = 4.0
+
+#: Beats over which a section sweeps and thins on its way into a breakdown.
+#: Leaving a drop is the one boundary the references do ride: the centroid
+#: climbs about 412 Hz across it while the kit's low end is taken away. They
+#: are gentle about the level, though -- a drop exits only 2.9 dB down, with
+#: its last bar of kick played complete -- so the thinning here is spectral
+#: first and a small trim second.
+EXIT_SWEEP_BEATS = 3.0
+
+#: Where the source's exit low-pass lands. A breakdown opens its own filter
+#: from here, so the two meet at the same cutoff and the sweep is continuous
+#: across the boundary instead of stepping at it.
+EXIT_LOWPASS_HZ = 4200.0
+
+#: Where the kit's exit high-pass climbs to, and how far the kit is pulled
+#: back, over those same beats.
+EXIT_KIT_HIGHPASS_HZ = 420.0
+EXIT_KIT_DUCK_DB = -3.0
+
+#: How long a filter or gain move is given to resolve onto a downbeat. Short
+#: enough to read as "on the beat", long enough not to be a step.
+RESOLVE_MS = 8.0
+
+#: The riser covers the build's last two bars, not the whole build. The
+#: references keep their risers short and strong -- 1.9 to 3.4 dB per beat of
+#: 4-16 kHz over the last two bars -- rather than riding one for eight.
+RISER_BARS = 2
+
+#: The riser's decay past the drop downbeat. Ending a full-scale noise sweep on
+#: a sample boundary is the loudest click in the whole render.
+RISER_TAIL_BEATS = 0.5
+
+#: Reverb thrown across a drop-to-breakdown boundary, so the kit stops but the
+#: pad and vocal carry over rather than being guillotined.
+THROW_SPILL_GAIN = 0.5
+THROW_SPILL_SECONDS = 1.6
+
 
 @dataclass
 class Stems:
@@ -117,6 +161,15 @@ def _loop_to(src: np.ndarray, start: int, want: int, period: int, sr: int,
             keep, blend = _equal_power(t, out.ndim == 2)
             out[mask] = out[mask] * keep + alt * blend
     return out
+
+
+def _width(x: np.ndarray) -> float:
+    """Side-over-mid RMS: 0 is mono, the references sit at 0.16 in a drop."""
+    if x.ndim != 2 or x.shape[1] < 2:
+        return 0.0
+    mid = (x[:, 0] + x[:, 1]) * 0.5
+    side = (x[:, 0] - x[:, 1]) * 0.5
+    return float(DY.rms(side) / max(DY.rms(mid), 1e-9))
 
 
 def _land(x: np.ndarray, sr: int, ms: float = LAND_MS) -> np.ndarray:
@@ -216,20 +269,107 @@ class Engine:
         return (root + self.semitones) % 12, minor
 
     # -- layers ----------------------------------------------------------
-    def _xfade_len(self, index: int) -> int:
-        """Crossfade length, in samples, at the boundary *entering* slot ``index``.
+    def _slot(self, index: int) -> Slot | None:
+        slots = self.plan.slots
+        return slots[index] if 0 <= index < len(slots) else None
 
-        One beat, clamped so the fade can never eat more than a quarter of the
-        shorter side. The cut still lands on the downbeat -- the fade is what
-        arrives there, so the incoming slot is at full level on beat 1 and the
-        outgoing one has already gone.
+    def _kind(self, index: int) -> str | None:
+        slot = self._slot(index)
+        return slot.kind if slot is not None else None
+
+    def _has_kick(self, slot: Slot | None) -> bool:
+        """Whether a slot's pattern plays a kick at all.
+
+        Read from the pattern rather than from the slot kind, so a change to the
+        kit's patterns changes what the transitions do with them.
+        """
+        if slot is None:
+            return False
+        pattern = DR.PATTERNS.get(slot.drum_pattern, {})
+        return bool(pattern.get("kick"))
+
+    def _tail_sweep(self, buf: np.ndarray, start: int, end: int, kind: str,
+                    f0: float, f1: float, resolve: bool = False) -> None:
+        """Sweep a filter from ``f0`` to ``f1`` over ``[start, end)``, in place.
+
+        The biquad is given a bar of settling time before ``start`` with the
+        cutoff held at ``f0`` -- at the open value that is very nearly a no-op,
+        but it means the filter arrives at the sweep with the state the material
+        actually implies rather than the zeros a cold ``lfilter`` starts from.
+        With ``resolve`` the sweep continues a few milliseconds past ``end`` and
+        runs back to ``f0``, so the cutoff is open again on the downbeat without
+        the filter state jumping there.
+        """
+        settle = min(self._bar_sample(1), start)
+        back = int(RESOLVE_MS * 0.001 * self.sr) if resolve else 0
+        a, b = start - settle, min(len(buf), end + back)
+        if b - a < 128 or end <= start:
+            return
+        seg = buf[a:b]
+        curve = [np.full(settle, f0), FL.exp_curve(end - start, f0, f1)]
+        if b > end:
+            curve.append(FL.exp_curve(b - end, f1, f0))
+        wet = FL.sweep(seg, kind, self.sr, np.concatenate(curve), q=0.72, order=2)
+        blend = min(int(0.02 * self.sr), max(settle // 2, 0))
+        if blend > 1:
+            keep, come = _equal_power(np.linspace(0.0, 1.0, blend, dtype=np.float32),
+                                      wet.ndim == 2)
+            wet[:blend] = seg[:blend] * keep + wet[:blend] * come
+        buf[a:b] = wet
+
+    def _duck_into(self, buf: np.ndarray, at: int, beats: float, depth_db: float,
+                   recover: bool = True) -> None:
+        """Ramp a bus down over the beats before ``at``, in place.
+
+        With ``recover`` the last few milliseconds run back to unity, so the
+        section that starts on the downbeat starts at full level and the ringing
+        tails of the bar before do not step.
+        """
+        k = int(round(beats * self.beat * self.sr))
+        a = max(0, at - k)
+        if at - a < 64:
+            return
+        depth = 10.0 ** (depth_db / 20.0)
+        n = at - a
+        curve = 1.0 + (depth - 1.0) * (np.linspace(0.0, 1.0, n, dtype=np.float32) ** 1.4)
+        back = min(int(RESOLVE_MS * 0.001 * self.sr), n // 2)
+        if recover and back > 1:
+            curve[-back:] = np.linspace(float(curve[-back]), 1.0, back, dtype=np.float32)
+        buf[a:at] *= curve[:, None] if buf.ndim == 2 else curve
+
+    def _beat_fade(self, slot: Slot) -> int:
+        """A beat, clamped to a quarter of the slot it has to fit inside."""
+        want = int(round(XFADE_BEATS * self.beat * self.sr))
+        return max(0, min(want, int(slot.bars * self.bar_dur * self.sr / 4.0)))
+
+    def _xfade_len(self, index: int) -> int:
+        """Fade-in length, in samples, at the boundary *entering* slot ``index``.
+
+        One beat for an ordinary boundary: the incoming slot is rendered that
+        much early, at the loop phase it will have, and arrives at full level
+        exactly on beat 1.
+
+        A drop is the exception. There the incoming material is cut in behind
+        nothing but a de-click ramp, because a drop that fades in over a beat is
+        not a drop. The outgoing build still gets its full beat of fade, so the
+        two do not sum to unity across the boundary -- that shortfall is the
+        vacuum in front of the drop, and it is deliberate.
         """
         slots = self.plan.slots
         if index <= 0 or index >= len(slots):
             return 0
-        want = int(round(XFADE_BEATS * self.beat * self.sr))
-        room = min(slots[index - 1].bars, slots[index].bars) * self.bar_dur * self.sr / 4.0
-        return max(0, min(want, int(room)))
+        if slots[index].kind == "drop":
+            return int(SLAM_MS * 0.001 * self.sr)
+        return min(self._beat_fade(slots[index]), self._beat_fade(slots[index - 1]))
+
+    def _fadeout_len(self, index: int) -> int:
+        """Fade-out length at the end of slot ``index``.
+
+        Always a beat: it is the outgoing side of the boundary and it only ever
+        eats into its own slot, so it does not care what comes next.
+        """
+        slot = self._slot(index)
+        return 0 if slot is None else self._beat_fade(slot)
 
     def _sweep_over(self, spec: tuple[float, float] | None, want: int,
                     pre: int) -> np.ndarray | None:
@@ -266,9 +406,8 @@ class Engine:
             a = self._bar_sample(slot.start_bar)
             want = self._bar_sample(slot.end_bar) - a
             pre = self._xfade_len(i)
-            post = self._xfade_len(i + 1) if i < last else \
-                min(int(round(XFADE_BEATS * self.beat * self.sr)), want // 4)
-            head = 0 if i > 0 else min(int(round(XFADE_BEATS * self.beat * self.sr)), want // 4)
+            post = self._fadeout_len(i)
+            head = 0 if i > 0 else self._beat_fade(slot)
 
             period = int(round(max(slot.source_bars, 1) * self.beat_multiple
                                * self.bar_dur * self.sr))
@@ -293,6 +432,9 @@ class Engine:
                     seg = np.concatenate([seg[: pre + cut], chopped])[: pre + want]
             if slot.reverb_throw:
                 seg = self._throw(seg, slot)
+            if self._kind(i + 1) == "breakdown":
+                self._exit_to_breakdown(seg, self.plan.slots[i + 1], want)
+                self._spill_throw(harm, seg, a + want, slot.source_gain)
 
             for n_fade, at_head in ((pre or head, True), (post, False)):
                 if n_fade <= 1:
@@ -319,6 +461,65 @@ class Engine:
         out[tail_start:] += wet * 0.55 * ramp
         return out
 
+    def _exit_to_breakdown(self, seg: np.ndarray, nxt: Slot, want: int) -> None:
+        """Sweep the source down into the cutoff the breakdown opens from.
+
+        A breakdown used to arrive as a step: the outgoing section ran to the
+        boundary wide open and the breakdown's own filter started at 4.2 kHz on
+        the next sample. Sweeping the last three beats down to exactly where the
+        breakdown starts makes the two halves one continuous move.
+        """
+        if nxt.lowpass is None and nxt.highpass is not None:
+            return
+        land = nxt.lowpass[0] if nxt.lowpass else EXIT_LOWPASS_HZ
+        k = min(int(round(EXIT_SWEEP_BEATS * self.beat * self.sr)), want // 2)
+        if k < 128:
+            return
+        self._tail_sweep(seg, len(seg) - k, len(seg), "lowpass", self.sr * 0.49, land)
+
+    def _spill_throw(self, harm: np.ndarray, seg: np.ndarray, boundary: int,
+                     gain: float) -> None:
+        """Throw the last bar into reverb that carries past the boundary.
+
+        The wet tail is added to the bed directly rather than to the slot, so it
+        is not caught by the slot's own fade-out: the kit stops on the downbeat
+        and the pad and vocal ring on into the breakdown.
+        """
+        bar = self._bar_sample(1)
+        tail = np.asarray(seg[max(0, len(seg) - bar):], dtype=np.float32)
+        if len(tail) < 256:
+            return
+        pad = np.concatenate([tail, np.zeros((int(THROW_SPILL_SECONDS * self.sr), 2),
+                                             dtype=np.float32)])
+        wet = RV.convolve(pad, self.ir)
+        ramp = np.linspace(0.0, 1.0, len(tail), dtype=np.float32) ** 1.5
+        wet[:len(tail)] *= ramp[:, None]
+        add_at(harm, wet, boundary - len(tail), gain * THROW_SPILL_GAIN)
+
+    def shape_kit_transitions(self, drums: np.ndarray) -> None:
+        """Thin and sweep the kit across section boundaries, in place.
+
+        Two gestures, both measured off a commercial house remix of one of the
+        test sources rather than chosen by ear:
+
+        - into a breakdown the kit does not stop dead. Over three beats it loses
+          about 7 dB and a rising high-pass takes its low end away, which is why
+          the reference's spectral centroid climbs into the boundary while its
+          drum level falls. The filter resolves back open on the downbeat.
+        Nothing is done in front of a drop on purpose: eighteen of twenty
+        reference drops have no drum gap at all, so the kit plays its last bar
+        complete and the drop arrives as a step on top of it.
+        """
+        for i, slot in enumerate(self.plan.slots[:-1]):
+            nxt = self.plan.slots[i + 1]
+            b = self._bar_sample(nxt.start_bar)
+            if nxt.kind == "breakdown" and self._has_kick(slot):
+                k = int(round(EXIT_SWEEP_BEATS * self.beat * self.sr))
+                self._tail_sweep(drums, b - k, b, "highpass", 20.0,
+                                 EXIT_KIT_HIGHPASS_HZ, resolve=True)
+                self._duck_into(drums, b, EXIT_SWEEP_BEATS, EXIT_KIT_DUCK_DB)
+
+
     def render_drums(self) -> tuple[np.ndarray, list[float]]:
         """Synthesise the kit across the whole arrangement.
 
@@ -328,8 +529,9 @@ class Engine:
         kick_times: list[float] = []
         step_dur = self.bar_dur / 16.0
 
-        for slot in self.plan.slots:
+        for i, slot in enumerate(self.plan.slots):
             pattern = DR.PATTERNS.get(slot.drum_pattern, DR.PATTERNS["drop"])
+            entering = slot.kind == "build" and not self._has_kick(self._slot(i - 1))
             for b in range(slot.bars):
                 bar_index = slot.start_bar + b
                 bar_t = bar_index * self.bar_dur
@@ -340,15 +542,18 @@ class Engine:
                     sample = self.voices.get(voice)
                     if sample is None:
                         continue
+                    gate = self._entry_gain(voice, b, slot.bars) if entering else 1.0
+                    if gate <= 0.0:
+                        continue
                     for step, vel in steps:
                         if last_of_phrase and voice in ("hat", "shaker") and step >= 12:
                             continue      # clear room for the fill
                         t = self.kit.step_time(bar_t, step, step_dur)
-                        v = vel * (0.92 + 0.16 * self.rng.random())
+                        v = vel * gate * (0.92 + 0.16 * self.rng.random())
                         add_at(out, to_stereo(sample), int(round(t * self.sr)), v)
                         if voice == "kick":
                             kick_times.append(t)
-                if last_of_phrase:
+                if last_of_phrase and not (entering and b < slot.bars - 2):
                     self._fill(out, bar_t, step_dur)
             if slot.riser:
                 self._riser(out, slot)
@@ -356,6 +561,25 @@ class Engine:
                 add_at(out, to_stereo(self.impact),
                        self._bar_sample(slot.start_bar), 0.9)
         return out, sorted(kick_times)
+
+    def _entry_gain(self, voice: str, bar: int, bars: int) -> float:
+        """How much of a voice plays, ``bar`` bars into a build that follows a
+        section with no kick.
+
+        Coming out of a breakdown the whole kit used to appear at once on the
+        build's first downbeat, which is the loudest edit in the arrangement.
+        The parts come back in the order a DJ brings them back: hats from the
+        top, rising; the clap at the half way point; the kick for the last eight
+        beats, so it arrives as the build's own last gesture rather than as a
+        surprise.
+        """
+        if voice == "kick":
+            return 1.0 if bar >= max(0, bars - 2) else 0.0
+        if voice == "clap":
+            return 0.0 if bar < 1 else float(0.7 + 0.3 * (bar / max(bars - 1, 1)))
+        if voice in ("hat", "ohat", "shaker"):
+            return float(0.8 + 0.2 * (bar / max(bars - 1, 1)))
+        return 1.0
 
     def _fill(self, out: np.ndarray, bar_t: float, step_dur: float) -> None:
         """Tom/perc fill over the last beat of a phrase."""
@@ -366,11 +590,29 @@ class Engine:
                    int(round(t * self.sr)), 0.5 + 0.12 * i)
 
     def _riser(self, out: np.ndarray, slot: Slot) -> None:
-        """Noise riser filling a build slot, ending exactly on the next downbeat."""
-        a = self._bar_sample(slot.start_bar)
-        seconds = slot.bars * self.bar_dur
-        r = DR.riser_noise(self.sr, seconds)
-        add_at(out, to_stereo(r), a, 0.62)
+        """Noise riser over the build's last two bars, peaking on the next downbeat.
+
+        Two changes from the eight-bar ride this used to be. It is short: the
+        references run their risers over the last two bars and only on about one
+        drop in three, and long monotonic ramps into a drop do not appear in the
+        corpus at all. And it lands: stopping a full-scale noise sweep on a
+        sample boundary is a full-amplitude step, and was the single loudest
+        click in the render. It now starts from silence, peaks on the downbeat
+        and washes out over half a beat past it.
+        """
+        bars = min(RISER_BARS, slot.bars)
+        a = self._bar_sample(slot.end_bar - bars)
+        tail = int(round(RISER_TAIL_BEATS * self.beat * self.sr))
+        r = to_stereo(DR.riser_noise(self.sr, bars * self.bar_dur))
+        lead = min(int(0.01 * self.sr), len(r) // 8)
+        if lead > 1:
+            r = np.array(r, dtype=np.float32, copy=True)
+            r[:lead] *= np.linspace(0.0, 1.0, lead, dtype=np.float32)[:, None]
+        if tail > 8:
+            wash = r[len(r) - tail:] * np.linspace(1.0, 0.0, tail,
+                                                   dtype=np.float32)[:, None] ** 2.0
+            r = np.concatenate([r, wash])
+        add_at(out, r, a, 0.74)
 
     def render_bass(self, kick_times: list[float]) -> np.ndarray:
         """Rolling offbeat bass following the per-bar chord roots."""
@@ -405,6 +647,7 @@ class Engine:
         """Full render. Returns ``(audio, metrics)``."""
         harm, perc = self.render_source()
         drums, kick_times = self.render_drums()
+        self.shape_kit_transitions(drums)
         bassline = self.render_bass(kick_times)
 
         # sidechain: one envelope per depth value used by the plan
@@ -452,29 +695,36 @@ class Engine:
         """
         if not self.buses:
             return []
-        harm = self.buses["harmonic"] + self.buses["percussive"]
+        harm = self.buses["harmonic"]
         kit = self.buses["drums"]
+        bed = kit + self.buses["bass"] + self.buses["percussive"]
+        mix = harm + bed
         full = (0.0, self.sr * 0.5)
         report: list[dict] = []
         for slot in self.plan.slots:
             a, b = self._bar_sample(slot.start_bar), self._bar_sample(slot.end_bar)
-            hv = DY.band_rms_db(harm[a:b], self.sr, DY.VOCAL_BAND)
-            kv = DY.band_rms_db(kit[a:b], self.sr, DY.VOCAL_BAND)
-            hp = DY.band_rms_db(harm[a:b], self.sr, DY.PRESENCE_BAND)
-            kp = DY.band_rms_db(kit[a:b], self.sr, DY.PRESENCE_BAND)
-            hf = DY.band_rms_db(harm[a:b], self.sr, full)
-            kf = DY.band_rms_db(kit[a:b], self.sr, full)
-            report.append({
-                "slot": slot.index, "kind": slot.kind,
-                "start": round(slot.start_bar * self.bar_dur, 3),
-                "source_vocal_band_db": round(hv, 2),
-                "kit_vocal_band_db": round(kv, 2),
-                "vocal_band_margin_db": round(hv - kv, 2),
-                "source_presence_db": round(hp, 2),
-                "kit_presence_db": round(kp, 2),
-                "presence_margin_db": round(hp - kp, 2),
-                "source_full_band_db": round(hf, 2),
-                "kit_full_band_db": round(kf, 2),
-                "full_band_margin_db": round(hf - kf, 2),
-            })
+            row = {"slot": slot.index, "kind": slot.kind,
+                   "start": round(slot.start_bar * self.bar_dur, 3)}
+            for name, buf in (("source", harm), ("kit", kit), ("bed", bed)):
+                row[f"{name}_vocal_band_db"] = round(
+                    DY.band_rms_db(buf[a:b], self.sr, DY.VOCAL_BAND), 2)
+                row[f"{name}_presence_db"] = round(
+                    DY.band_rms_db(buf[a:b], self.sr, DY.PRESENCE_BAND), 2)
+                row[f"{name}_full_band_db"] = round(
+                    DY.band_rms_db(buf[a:b], self.sr, full), 2)
+            row["vocal_band_margin_db"] = round(
+                row["source_vocal_band_db"] - row["kit_vocal_band_db"], 2)
+            row["presence_margin_db"] = round(
+                row["source_presence_db"] - row["kit_presence_db"], 2)
+            row["full_band_margin_db"] = round(
+                row["source_full_band_db"] - row["kit_full_band_db"], 2)
+            # The reference spec's axis: the source against everything else in
+            # the mix, not against the kit alone.
+            row["source_minus_bed_vocal_db"] = round(
+                row["source_vocal_band_db"] - row["bed_vocal_band_db"], 2)
+            row["source_minus_bed_full_db"] = round(
+                row["source_full_band_db"] - row["bed_full_band_db"], 2)
+            row["rms_db"] = round(DY.rms_db(mix[a:b]), 2)
+            row["width"] = round(_width(mix[a:b]), 3)
+            report.append(row)
         return report
