@@ -51,7 +51,12 @@ class Style:
 
     @classmethod
     def load(cls, path: str | Path) -> "Style":
-        data = json.loads(Path(path).read_text(encoding="utf8"))
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path} is not a valid style profile: {exc}") from None
+        if not isinstance(data, dict):
+            raise ValueError(f"{path} is not a valid style profile: expected a JSON object")
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in data.items() if k in known})
 

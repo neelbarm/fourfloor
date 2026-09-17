@@ -18,6 +18,11 @@ from .house.engine import Engine, Stems
 from .stems import separate
 from .style import Style
 
+#: The session schema promises a tempo a DJ tool can trust, and validates this
+#: same window; reject an impossible target before any work happens.
+MIN_TARGET_BPM = 60.0
+MAX_TARGET_BPM = 200.0
+
 
 @dataclass
 class RemixOptions:
@@ -125,6 +130,21 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     opts = opts or RemixOptions()
     out = Path(out)
     step = progress or (lambda *_a, **_k: None)
+
+    # Check everything cheap before decoding: a bad flag used to surface either
+    # as a numpy error deep in the render or as a session-schema failure after
+    # a full minute of work, with a half-written mp3 left behind.
+    if opts.target_bpm is not None and not (MIN_TARGET_BPM <= opts.target_bpm <= MAX_TARGET_BPM):
+        raise ValueError(
+            f"--bpm {opts.target_bpm:g} is out of range; fourfloor targets "
+            f"{MIN_TARGET_BPM:g}-{MAX_TARGET_BPM:g} BPM"
+        )
+    if opts.swing is not None and not (0.0 <= opts.swing <= 0.66):
+        raise ValueError(f"--swing {opts.swing:g} is out of range; use 0 to 0.66")
+    if out.suffix.lower() not in (".mp3", ".wav"):
+        raise ValueError(
+            f"output must end in .mp3 or .wav, got {out.name!r}"
+        )
 
     step("analyse", "decoding and analysing the source")
     clip = decode(path)

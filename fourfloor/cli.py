@@ -282,7 +282,15 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\n" + ui.error(c, "interrupted"), file=sys.stderr)
         return 130
-    except (RuntimeError, FileNotFoundError, ValueError, NotADirectoryError) as exc:
+    except FileNotFoundError as exc:
+        # str(FileNotFoundError(path)) is just the path, which reads as if the
+        # tool printed a stray filename and gave up.
+        print(ui.error(c, f"no such file: {exc}"), file=sys.stderr)
+        return 1
+    except NotADirectoryError as exc:
+        print(ui.error(c, f"not a folder: {exc}"), file=sys.stderr)
+        return 1
+    except (RuntimeError, ValueError) as exc:
         print(ui.error(c, str(exc)), file=sys.stderr)
         return 1
 
