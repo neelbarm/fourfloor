@@ -92,3 +92,35 @@ def fixture_path() -> Path:
     if not FIXTURE.is_file():
         pytest.skip(f"fixture missing: {FIXTURE}")
     return FIXTURE
+
+
+@pytest.fixture(scope="session")
+def fixture_analysis(fixture_path):
+    """Analysis of the bundled fixture, shared across the suite."""
+    from fourfloor.analysis import analyze
+    return analyze(fixture_path)
+
+
+@pytest.fixture(scope="session")
+def quiet_clip(tmp_path_factory) -> Path:
+    """A very quiet synthetic source: -66 dBFS peak, with a beat to track.
+
+    Quiet and near-silent sources are where normalisation and the energy curve
+    are most likely to divide by something close to zero.
+    """
+    import soundfile as sf
+
+    x = click_track(100.0, seconds=20.0) * 0.0005
+    path = tmp_path_factory.mktemp("quiet") / "quiet.wav"
+    sf.write(str(path), np.stack([x, x], axis=1), SR, subtype="PCM_24")
+    return path
+
+
+@pytest.fixture(scope="module")
+def remix_of_a_quiet_clip(quiet_clip, tmp_path_factory):
+    """One short remix of that clip, reused by the non-finite / level checks."""
+    from fourfloor.remix import RemixOptions, remix
+
+    out = tmp_path_factory.mktemp("quietmix") / "quiet.house.mp3"
+    return remix(quiet_clip, out, RemixOptions(target_bpm=124.0, length="2:00",
+                                               wav=False))
