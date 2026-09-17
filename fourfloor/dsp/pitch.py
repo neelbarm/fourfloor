@@ -49,6 +49,48 @@ def pitch_shift(x: np.ndarray, semitones: float) -> np.ndarray:
     return out[:n]
 
 
+def f0_autocorr(x: np.ndarray, sr: int, fmin: float = 35.0, fmax: float = 180.0,
+                clarity: float = 0.35) -> float:
+    """Fundamental of a short monophonic segment, or 0.0 if it is not pitched.
+
+    Normalised autocorrelation with parabolic interpolation on the peak. A bass
+    line is about the most favourable signal there is for this -- one note at a
+    time, strong fundamental, few partials -- which is exactly why it is worth
+    asking the recording what note is playing instead of asking a chromagram
+    what chord it thinks the whole mix implies.
+
+    ``clarity`` is how periodic the segment has to be before an answer is
+    returned at all. A bass drop, a sub-less passage or a gap comes back as 0.0
+    and the caller should play nothing rather than guess.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if x.ndim == 2:
+        x = x.mean(axis=1)
+    n = len(x)
+    if n < 4 * int(sr / max(fmin, 1e-6)):
+        return 0.0
+    x = x - x.mean()
+    energy = float(np.dot(x, x))
+    if energy <= 1e-9:
+        return 0.0
+    spec = np.fft.rfft(x, 2 * n)
+    ac = np.fft.irfft(spec * np.conj(spec))[:n]
+    lo = max(1, int(sr / fmax))
+    hi = min(n - 2, int(sr / fmin))
+    if hi <= lo + 1:
+        return 0.0
+    window = ac[lo:hi + 1] / max(ac[0], 1e-12)
+    k = int(np.argmax(window))
+    if window[k] < clarity:
+        return 0.0
+    lag = lo + k
+    a, b, c = ac[lag - 1], ac[lag], ac[lag + 1]
+    den = a - 2 * b + c
+    if abs(den) > 1e-12:
+        lag = lag + float(np.clip(0.5 * (a - c) / den, -0.5, 0.5))
+    return float(sr / max(lag, 1e-9))
+
+
 @dataclass(frozen=True)
 class TempoPlan:
     """How a source tempo is mapped onto the target grid."""

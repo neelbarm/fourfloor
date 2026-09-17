@@ -16,6 +16,7 @@ from .dsp.pitch import TempoPlan, plan_tempo
 from .house.engine import Engine, Stems
 from .stems import separate
 from .style import Style
+from . import kit as kits
 from .warp import WarpMap, build as build_warp
 
 #: The session schema promises a tempo a DJ tool can trust, and validates this
@@ -38,6 +39,12 @@ class RemixOptions:
     producer: bool = False
     seed: int = 0
     wav: bool = True
+    kit: str | None = None
+    """Name of a sampled drum kit, ``"none"`` for the synthesised one, or
+    ``None`` for the most recently built kit if there is one."""
+    bass: str = "source"
+    """``source`` uses the song's own bass; ``synth`` builds one from chords."""
+    kick_reinforce: bool = True
     keep_layers: bool = False
     """Hold on to the engine's individual buses so the alignment gate can
     measure the source layer without the kit shouting over it."""
@@ -54,6 +61,8 @@ class RemixResult:
     analysis: Analysis
     tempo_plan: TempoPlan
     warp: WarpMap | None
+    kit_name: str | None
+    bass_source: str
     semitones: int
     target_key: KeyEstimate
     paths: dict[str, Path]
@@ -126,6 +135,8 @@ def validate_options(opts: RemixOptions, out: str | Path) -> None:
         )
     if opts.stems not in ("hpss", "demucs"):
         raise ValueError(f"--stems {opts.stems!r} is not an engine; use hpss or demucs")
+    if opts.bass not in ("source", "synth"):
+        raise ValueError(f"--bass {opts.bass!r} is not a bass; use source or synth")
     if opts.length:
         arrange.parse_length(opts.length)          # raises with its own message
     if opts.key and opts.key.lower() != "auto":
@@ -160,7 +171,7 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     warped, wmap = build_warp(a, target_bpm, tempo.beat_multiple, semitones)
 
     step("separate", f"{opts.stems} separation")
-    stems = separate(warped, a.sr, opts.stems)
+    stems = separate(warped, a.sr, opts.stems, want_bass=(opts.bass != "synth"))
 
     step("arrange", f"{opts.form} form")
     length = arrange.parse_length(opts.length) if opts.length else (
@@ -185,10 +196,13 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     if problems:
         raise RuntimeError("arrangement failed validation: " + "; ".join(problems))
 
-    step("render", f"{p.total_bars} bars, {arrange.fmt_time(p.duration)}")
+    drum_kit = kits.resolve(opts.kit)
+    step("render", f"{p.total_bars} bars, {arrange.fmt_time(p.duration)}"
+                   + (f", {drum_kit.name} kit" if drum_kit else ""))
     engine = Engine(sr=a.sr, plan=p, stems=stems, chords=a.chords, semitones=semitones,
                     swing=swing, beat_multiple=tempo.beat_multiple,
-                    src_bar_dur=a.bar_dur, seed=opts.seed, warp=wmap)
+                    src_bar_dur=a.bar_dur, seed=opts.seed, warp=wmap,
+                    drum_kit=drum_kit, kick_reinforce=opts.kick_reinforce)
     audio, metrics = engine.render()
     layers = engine.layers if opts.keep_layers else {}
     spans = list(engine.source_spans)
@@ -215,6 +229,8 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
             "key_confidence": round(a.key.confidence, 3),
             "duration": round(a.duration, 2),
             "separation": stems.source_name,
+            "drums": (drum_kit.name if drum_kit else "synth"),
+            "bass": stems.bass_name,
         },
         tempo_plan=tempo.to_dict(),
     )
@@ -228,6 +244,8 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     paths["plan"] = plan_path
 
     return RemixResult(audio=audio, sr=a.sr, plan=p, session=sess, analysis=a,
-                       tempo_plan=tempo, warp=wmap, semitones=semitones, target_key=target_key,
+                       tempo_plan=tempo, warp=wmap,
+                       kit_name=(drum_kit.name if drum_kit else None),
+                       bass_source=stems.bass_name, semitones=semitones, target_key=target_key,
                        paths=paths, metrics=metrics, warnings=warnings,
                        layers=layers, source_spans=spans)

@@ -73,11 +73,17 @@ def test_sidechain_pumping_is_visible_at_the_beat_period(remixed) -> None:
     sr = clip.sr
     drop = next(s for s in remixed.session["sections"] if s["kind"] == "drop")
     seg = clip.mono[int(drop["start"] * sr): int(drop["end"] * sr)]
-    env = rms_envelope(seg, hop=256, win=1024)
+    # A 1024-sample window is 23 ms, which is one cycle of a 43 Hz sub: the
+    # envelope it produces wobbles at the sub's own frequency hard enough to
+    # bury the thing being measured. Now that the low end is the song's own
+    # bass rather than a bright synthesised saw, the window has to be long
+    # enough to average a few cycles of it.
+    env = rms_envelope(seg, hop=256, win=4096)
     env = env - env.mean()
     ac = np.correlate(env, env, mode="full")[len(env) - 1:]
     ac /= ac[0]
     lag = int(round(remixed.session["beat_duration_sec"] * sr / 256))
+    assert lag < len(ac) // 2
     assert ac[lag] > 0.5, f"no pumping at the beat period (r={ac[lag]:.2f})"
     assert ac[lag] > ac[lag // 2], "the period should be a beat, not half a beat"
 

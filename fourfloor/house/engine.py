@@ -16,6 +16,7 @@ from ..arrange import Plan, Slot
 from ..audio import add_at, fit, to_stereo, xfade
 from ..dsp import dynamics as DY
 from ..dsp import filters as FL
+from ..dsp import pitch as PI
 from ..dsp import reverb as RV
 from . import bass as BA
 from . import drums as DR
@@ -28,6 +29,11 @@ class Stems:
     harmonic: np.ndarray      # vocals + chords (or demucs vocals + other)
     percussive: np.ndarray    # original drums, kept only as breakdown texture
     source_name: str = "hpss"
+    bass: np.ndarray | None = None
+    """The song's own low end, warped with everything else. When this is here
+    the engine plays it instead of inventing a bassline from a chord estimate,
+    which is the difference between a remix of a song and a remix of a guess."""
+    bass_name: str = "synth"
 
     @property
     def length(self) -> int:
@@ -76,6 +82,31 @@ def _loop_to(src: np.ndarray, start: int, want: int, period: int, sr: int) -> np
         out[pos:pos + n] += seg
         pos += period
     return out
+
+
+#: What each kind of slot does to a sampled drum loop: (level, high-pass Hz).
+#: A record's drums arrive as one finished stereo bus, so the only honest way to
+#: arrange them is the way a DJ does it on a mixer -- with the level and the
+#: filter. The intro is thinned so it does not fight whatever is still playing;
+#: the breakdown keeps only the top of the loop, which is the hats, so the
+#: section breathes without going silent; the drop is the record.
+KIT_SECTION: dict[str, tuple[float, float | None]] = {
+    "intro": (0.55, 220.0),
+    "intro_full": (0.78, 150.0),
+    "build": (0.88, 120.0),
+    "drop": (1.0, None),
+    "drop_var": (1.0, None),
+    "breakdown": (0.34, 3800.0),
+    "outro": (0.72, 150.0),
+}
+
+#: How loud the synthesised kick sits under the loop's own kicks, per section.
+#: A sampled loop from a 2015 record often has less sub than a 2024 system
+#: expects; this puts it back without replacing the loop's character.
+KIT_REINFORCE: dict[str, float] = {
+    "intro": 0.26, "intro_full": 0.36, "build": 0.42,
+    "drop": 0.5, "drop_var": 0.5, "breakdown": 0.0, "outro": 0.34,
+}
 
 
 def _sweep_curve(n: int, spec: tuple[float, float] | None) -> np.ndarray | None:
@@ -134,7 +165,8 @@ class Engine:
 
     def __init__(self, sr: int, plan: Plan, stems: Stems, chords: list[dict],
                  semitones: int = 0, swing: float = 0.08, beat_multiple: float = 1.0,
-                 src_bar_dur: float = 2.0, seed: int = 0, warp=None) -> None:
+                 src_bar_dur: float = 2.0, seed: int = 0, warp=None,
+                 drum_kit=None, kick_reinforce: bool = True) -> None:
         self.sr = sr
         self.plan = plan
         self.stems = stems
@@ -144,6 +176,9 @@ class Engine:
         self.src_bar_dur = src_bar_dur
         self.warp = warp
         self.kit = DR.Kit(sr=sr, swing=swing)
+        self.drum_kit = drum_kit
+        self.kick_reinforce = kick_reinforce
+        self.source_bass_bed: np.ndarray | None = None
         self.rng = np.random.default_rng(seed)
         self.bar_dur = plan.bar_dur
         self.beat = plan.bar_dur / 4.0
@@ -189,6 +224,10 @@ class Engine:
         # a listener compares against the kick -- laid out exactly where the
         # arrangement puts the source.
         perc_ref = np.zeros((self.n, 2), dtype=np.float32)
+        # The song's own low end, laid out through the identical spans so it
+        # cannot drift away from the part of the song it belongs to.
+        bass = (np.zeros((self.n, 2), dtype=np.float32)
+                if self.stems.bass is not None else None)
         self.source_spans = []
         for slot in self.plan.slots:
             a = self._bar_sample(slot.start_bar)
@@ -198,6 +237,9 @@ class Engine:
             start = int(round(slot.source_start * self.sr))
             seg = _loop_to(self.stems.harmonic, start, want, period, self.sr)
             pseg = _loop_to(self.stems.percussive, start, want, period, self.sr)
+            if bass is not None:
+                add_at(bass, _loop_to(self.stems.bass, start, want, period, self.sr),
+                       a, 1.0)
 
             hp = _sweep_curve(want, slot.highpass)
             if hp is not None:
@@ -226,6 +268,7 @@ class Engine:
             if slot.percussive_gain > 0:
                 add_at(perc, pseg, a, slot.percussive_gain)
         self.layers["source_perc"] = perc_ref
+        self.source_bass_bed = bass
         return harm, perc
 
     def _throw(self, seg: np.ndarray, slot: Slot) -> np.ndarray:
@@ -239,9 +282,89 @@ class Engine:
         return out
 
     def render_drums(self) -> tuple[np.ndarray, list[float]]:
+        """Build the drum bus across the whole arrangement.
+
+        Returns the bus and the list of kick times, which drives sidechain. A
+        sampled kit replaces the synthesised pattern entirely when one is
+        available; the risers, impacts and fills sit on top either way.
+        """
+        if self.drum_kit is not None:
+            return self._render_sampled_drums()
+        return self._render_synth_drums()
+
+    def _render_sampled_drums(self) -> tuple[np.ndarray, list[float]]:
+        """Lay a real record's eight bars across the arrangement.
+
+        The loop is stretched to the target tempo once and tiled from bar zero,
+        so its bar one is the remix's bar one and stays there: the tiling is by
+        position, not by appending, which is the only way a loop repeated forty
+        times finishes where the grid says it should.
+        """
+        loop, kick_offsets = self.drum_kit.at_bpm(self.plan.target_bpm)
+        loop = to_stereo(np.asarray(loop, dtype=np.float32))
+        period = len(loop)
+        if period <= 0:
+            return self._render_synth_drums()
+        # `_loop_to` hides each seam in the loop's own head, which is the right
+        # material: the loop was cut at a bar line out of continuous audio.
+        bed = _loop_to(np.concatenate([loop, loop]), 0, self.n, period, self.sr)
+
+        out = np.zeros((self.n, 2), dtype=np.float32)
+        kick_times: list[float] = []
+        for slot in self.plan.slots:
+            a = self._bar_sample(slot.start_bar)
+            b = self._bar_sample(slot.end_bar)
+            gain, hp = KIT_SECTION.get(slot.drum_pattern, KIT_SECTION["drop"])
+            seg = np.array(bed[a:b], dtype=np.float32, copy=True)
+            if hp is not None:
+                seg = FL.apply(seg, "highpass", self.sr, hp, q=0.707, order=2)
+            edge = min(int(0.008 * self.sr), len(seg) // 8)
+            if edge > 1:
+                seg[:edge] *= np.linspace(0.0, 1.0, edge)[:, None]
+                seg[-edge:] *= np.linspace(1.0, 0.0, edge)[:, None]
+            add_at(out, seg, a, gain)
+
+            reinforce = KIT_REINFORCE.get(slot.drum_pattern, 0.0) if self.kick_reinforce else 0.0
+            for t in self._kick_times_in(kick_offsets, period, a, b):
+                if reinforce > 0:
+                    add_at(out, to_stereo(self.kit.samples["kick"]),
+                           int(round(t * self.sr)), reinforce)
+                # A muted breakdown has no kick, so nothing should duck to one.
+                if gain > 0.4:
+                    kick_times.append(t)
+
+            if slot.riser:
+                self._riser(out, slot)
+            if slot.impact:
+                add_at(out, to_stereo(DR.impact(self.sr)),
+                       self._bar_sample(slot.start_bar), 0.9)
+            if slot.fill:
+                last_bar = (slot.start_bar + slot.bars - 1) * self.bar_dur
+                self._fill(out, last_bar, self.bar_dur / 16.0)
+        return out, sorted(kick_times)
+
+    def _kick_times_in(self, offsets: list[float], period: int,
+                       a: int, b: int) -> list[float]:
+        """Absolute times of the loop's own kicks inside a sample span."""
+        if not offsets:
+            return []
+        loop_dur = period / float(self.sr)
+        first = int(np.floor(a / float(period)))
+        last = int(np.ceil(b / float(period)))
+        out = []
+        for k in range(first, last + 1):
+            base = k * loop_dur
+            for o in offsets:
+                t = base + o
+                if a <= t * self.sr < b:
+                    out.append(float(t))
+        return out
+
+    def _render_synth_drums(self) -> tuple[np.ndarray, list[float]]:
         """Synthesise the kit across the whole arrangement.
 
-        Returns the drum bus and the list of kick times, which drives sidechain.
+        The fallback when no kit has been built. Returns the drum bus and the
+        list of kick times, which drives sidechain.
         """
         out = np.zeros((self.n, 2), dtype=np.float32)
         kick_times: list[float] = []
@@ -292,7 +415,91 @@ class Engine:
         add_at(out, to_stereo(r), a, 0.62)
 
     def render_bass(self, kick_times: list[float]) -> np.ndarray:
-        """Rolling offbeat bass following the per-bar chord roots."""
+        """The low end: the song's own, wherever the song has one.
+
+        A synthesised bassline has to be told what note to play, and the only
+        thing available to tell it is a chord estimate off the full mix. On a
+        dense trap record that estimate is wrong often enough to matter, and a
+        wrong bass note under a vocal singing the right one is not a stylistic
+        choice, it is out of tune. So the default is the separated bass stem,
+        warped and arranged exactly like the rest of the song.
+
+        The one thing that does get synthesised is a sub, and only when the
+        song's own bass has little below 80 Hz -- plenty of records do not, and
+        a club system will find nothing there. Even then it follows the pitch
+        the bass stem is actually playing, beat by beat, measured by
+        autocorrelation. It never plays a note the record is not playing.
+        """
+        if self.source_bass_bed is not None:
+            return self._render_source_bass()
+        return self._render_synth_bass()
+
+    def _render_source_bass(self) -> np.ndarray:
+        bed = self.source_bass_bed
+        out = np.zeros((self.n, 2), dtype=np.float32)
+        for slot in self.plan.slots:
+            if not slot.use_bass:
+                continue
+            a, b = self._bar_sample(slot.start_bar), self._bar_sample(slot.end_bar)
+            seg = np.array(bed[a:b], dtype=np.float32, copy=True)
+            edge = min(int(0.012 * self.sr), len(seg) // 8)
+            if edge > 1:
+                seg[:edge] *= np.linspace(0.0, 1.0, edge)[:, None]
+                seg[-edge:] *= np.linspace(1.0, 0.0, edge)[:, None]
+            add_at(out, seg, a, 1.0)
+        out = FL.apply(out, "highpass", self.sr, 28.0, q=0.707, order=2)
+        sub = self._sub_under(out)
+        if sub is not None:
+            out = out + sub
+        return out
+
+    def _sub_under(self, bass: np.ndarray) -> np.ndarray | None:
+        """A sine following the bass stem's own pitch, when the sub is missing.
+
+        Records mixed for phones, and plenty of older ones, have almost nothing
+        below 80 Hz. On a club system that reads as no bass at all. This fills
+        it in at the pitch the record is playing -- one reading per beat, from
+        the bass stem itself -- and does nothing at all where the bass stem is
+        silent or unpitched, which is what stops it inventing a bassline.
+        """
+        mono = bass.mean(axis=1)
+        deep = FL.apply(mono, "lowpass", self.sr, 80.0, q=0.707, order=2)
+        mid = FL.apply(mono, "bandpass", self.sr, 150.0, q=0.5, order=2)
+        deep_rms = float(np.sqrt(np.mean(deep ** 2)))
+        mid_rms = float(np.sqrt(np.mean(mid ** 2)))
+        if mid_rms <= 1e-5 or deep_rms > 0.5 * mid_rms:
+            return None                     # the record has its own sub
+
+        beat_n = int(round(self.beat * self.sr))
+        out = np.zeros(self.n, dtype=np.float32)
+        phase = 0.0
+        for i in range(0, self.n - beat_n, beat_n):
+            seg = mono[i:i + beat_n]
+            if float(np.sqrt(np.mean(seg ** 2))) < 0.2 * mid_rms:
+                phase = 0.0
+                continue
+            f0 = PI.f0_autocorr(seg, self.sr, fmin=35.0, fmax=180.0)
+            if f0 <= 0.0:
+                phase = 0.0
+                continue
+            while f0 > 90.0:
+                f0 *= 0.5                   # put it where a system can move air
+            t = np.arange(beat_n) / self.sr
+            env = np.ones(beat_n, dtype=np.float32)
+            edge = max(8, beat_n // 24)
+            env[:edge] *= np.linspace(0.0, 1.0, edge)
+            env[-edge:] *= np.linspace(1.0, 0.0, edge)
+            tone = np.sin(2.0 * np.pi * f0 * t + phase).astype(np.float32)
+            out[i:i + beat_n] += tone * env * 0.5
+            phase = float((phase + 2.0 * np.pi * f0 * beat_n / self.sr) % (2.0 * np.pi))
+        return to_stereo(out * float(mid_rms) * 2.2)
+
+    def _render_synth_bass(self) -> np.ndarray:
+        """Rolling offbeat bass following the per-bar chord roots.
+
+        The fallback for ``--bass synth``, and for a source nothing could be
+        separated out of.
+        """
         out = np.zeros((self.n, 2), dtype=np.float32)
         for slot in self.plan.slots:
             if not slot.use_bass:
@@ -347,10 +554,18 @@ class Engine:
         # carve 40-90 Hz out of the source so the kick and bass own the sub
         harm = FL.apply(harm, "highpass", self.sr, 105.0, q=0.707, order=2)
 
+        # A separated bass stem arrives at the record's own level, which is
+        # already right against the record's own vocal; a synthesised one is
+        # built at full scale and has to be turned down to sit under anything.
+        # HPSS's "bass" is the whole bottom of the harmonic half rather than an
+        # isolated instrument, so it carries mud demucs would have given to
+        # another stem and comes in lower.
+        bass_gain = {"demucs bass": 0.95, "hpss low band": 0.55}.get(
+            self.stems.bass_name, 0.55) if self.source_bass_bed is not None else 0.55
         source_bus = harm * 1.35 + perc
-        mix = source_bus + drums * 0.72 + bassline * 0.55
+        mix = source_bus + drums * 0.72 + bassline * bass_gain
         self.layers.update({"source": source_bus, "kit": drums * 0.72,
-                            "bass": bassline * 0.55})
+                            "bass": bassline * bass_gain})
         out = DY.master(mix, self.sr, peak_db=-1.0)
 
         metrics = {

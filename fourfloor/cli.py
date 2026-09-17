@@ -54,6 +54,13 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--length", default=None, help="target length, e.g. 4:30")
     r.add_argument("--form", choices=tuple(FORMS), default="club", help="arrangement preset")
     r.add_argument("--swing", type=float, default=None, help="hat swing, 0 to 0.66")
+    r.add_argument("--kit", default=None, metavar="NAME",
+                   help="drum kit built with `fourfloor kit build` "
+                        "(default: the most recent one; 'none' for the synth kit)")
+    r.add_argument("--bass", choices=("source", "synth"), default="source",
+                   help="use the song's own bass stem (default) or synthesise one")
+    r.add_argument("--no-kick-reinforce", action="store_true",
+                   help="do not put a synth kick under a sampled loop's kicks")
     r.add_argument("--producer", action="store_true",
                    help="ask Claude to plan the arrangement (needs ANTHROPIC_API_KEY)")
     r.add_argument("--seed", type=int, default=0, help="randomisation seed")
@@ -61,6 +68,16 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--preview", action="store_true", help="also write preview.html")
     r.add_argument("--json", action="store_true", help="print the session JSON instead of a report")
     r.add_argument("-q", "--quiet", action="store_true")
+
+    k = sub.add_parser("kit", help="build drum kits from real house records")
+    ksub = k.add_subparsers(dest="kit_command", required=True)
+    kb = ksub.add_parser("build", help="sample a kit from a house remix")
+    kb.add_argument("input", help="a house record to take the drums from")
+    kb.add_argument("--name", default=None, help="what to call the kit")
+    kb.add_argument("--bars", type=int, default=8, help="loop length in bars (default 8)")
+    kb.add_argument("--json", action="store_true")
+    kl = ksub.add_parser("list", help="show the kits you have built")
+    kl.add_argument("--json", action="store_true")
 
     i = sub.add_parser("inspect", help="analyse a track and print a report")
     i.add_argument("input", nargs="?")
@@ -120,6 +137,8 @@ def remix_options(args):
         target_bpm=args.bpm, key=args.key, compatible_with=args.compatible_with,
         stems=args.stems, form=args.form, length=args.length, swing=args.swing,
         producer=args.producer, seed=args.seed, wav=not args.no_wav,
+        kit=args.kit, bass=args.bass,
+        kick_reinforce=not getattr(args, "no_kick_reinforce", False),
     )
 
 
@@ -190,6 +209,11 @@ def _remix_report(res, c: ui.C, elapsed: float) -> str:
                                    f"{fmt_time(p.duration)}   {c.grey(shift)}"))
     lines.append(ui.kv(c, "tempo mapping", f"{res.tempo_plan.interpretation}, "
                                            f"stretch x{res.tempo_plan.ratio:.3f}"))
+    lines.append(ui.kv(c, "drums", (f"{c.bold(res.kit_name)} "
+                                    f"{c.grey('(sampled from a real record)')}")
+                       if res.kit_name else c.grey("synthesised kit "
+                                                   "(build one: fourfloor kit build)")))
+    lines.append(ui.kv(c, "bass", res.bass_source))
     lines.append(ui.kv(c, "levels", f"{res.metrics['peak_db']:.2f} dB peak   "
                                     f"{res.metrics['rms_db']:.2f} dB RMS   "
                                     f"{res.metrics['kick_count']} kicks"))
@@ -455,6 +479,54 @@ def cmd_remix(args, c: ui.C) -> int:
     return 0
 
 
+def cmd_kit(args, c: ui.C) -> int:
+    from . import kit as kit_mod
+
+    if args.kit_command == "list":
+        rows = kit_mod.catalogue()
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            print(ui.kv(c, "kits", c.grey("none yet — "
+                                          "`fourfloor kit build <a house remix.mp3>`")))
+            return 0
+        print(ui.header(c, "kits"))
+        print()
+        for i, r in enumerate(rows):
+            tag = c.grey("  (default)") if i == 0 else ""
+            print(ui.kv(c, r["name"], f"{c.grey(r.get('source', '?')[:44])}   "
+                                      f"{r.get('source_bpm', 0):.2f} BPM   "
+                                      f"{r.get('bars', 8)} bars{tag}"))
+        print()
+        return 0
+
+    if not args.json:
+        print(ui.header(c, f"kit from {Path(args.input).name}"))
+        print()
+    progress = ui.Progress(c, quiet=args.json)
+    try:
+        k = kit_mod.build(args.input, name=args.name, bars=args.bars, progress=progress)
+    finally:
+        progress.close()
+    if args.json:
+        print(json.dumps(k.to_dict(), indent=2))
+        return 0
+    print()
+    print(ui.rule(c, "kit"))
+    print()
+    print(ui.kv(c, "name", c.bold(k.name)))
+    print(ui.kv(c, "from", f"{c.grey(k.source)}   {k.source_bpm:.2f} BPM"))
+    print(ui.kv(c, "loop", f"{k.bars} bars at {kit_mod.CANONICAL_BPM:.0f} BPM   "
+                           f"{c.grey(f'{len(k.loop) / k.sr:.2f}s')}"))
+    print(ui.kv(c, "kicks", f"{len(k.kick_beats)} found"))
+    print(ui.kv(c, "saved", c.cyan(str(k.path))))
+    print()
+    print(f"  {c.grey('use it with')} fourfloor remix song.mp3 --kit " + k.name)
+    print()
+    return 0
+
+
 def cmd_learn(args, c: ui.C) -> int:
     from .style import learn
 
@@ -508,7 +580,8 @@ def main(argv: list[str] | None = None) -> int:
         print("  try `fourfloor --help`", file=sys.stderr)
         return 2
     handlers = {"remix": cmd_remix, "inspect": cmd_inspect, "learn": cmd_learn,
-                "preview": cmd_preview, "serve": cmd_serve, "fetch": cmd_fetch}
+                "preview": cmd_preview, "serve": cmd_serve, "fetch": cmd_fetch,
+                "kit": cmd_kit}
     try:
         return handlers[args.command](args, c)
     except KeyboardInterrupt:

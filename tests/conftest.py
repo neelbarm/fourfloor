@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,26 @@ import pytest
 
 SR = 44100
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "lofi-7.mp3"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def isolated_home(tmp_path_factory):
+    """Point ``FOURFLOOR_HOME`` at a temp folder for the whole run.
+
+    Kits live under that home, and the engine uses the most recently built one
+    by default. Without this the suite's results depend on which records the
+    person running it happens to have sampled -- a remix rendered with somebody's
+    kit is a different remix, and a test that passes on a clean machine could
+    fail on a working one.
+    """
+    home = tmp_path_factory.mktemp("fourfloor-home")
+    before = os.environ.get("FOURFLOOR_HOME")
+    os.environ["FOURFLOOR_HOME"] = str(home)
+    yield home
+    if before is None:
+        os.environ.pop("FOURFLOOR_HOME", None)
+    else:
+        os.environ["FOURFLOOR_HOME"] = before
 
 
 @pytest.fixture(scope="session")

@@ -34,14 +34,27 @@ def demucs_available() -> bool:
     return True
 
 
-def separate_hpss(x: np.ndarray, sr: int) -> Stems:
-    """Split into harmonic (vocals + chords) and percussive (original drums)."""
+def separate_hpss(x: np.ndarray, sr: int, want_bass: bool = True) -> Stems:
+    """Split into harmonic (vocals + chords), percussive (drums) and low end.
+
+    HPSS cannot isolate a bass guitar, but the bottom of the harmonic half *is*
+    the bass: below 180 Hz there is almost nothing else in a mix but the bass
+    and the kick's tail, and the kick is being replaced anyway. It is a coarser
+    answer than demucs gives and it is still the song's own low end rather than
+    a synthesiser playing a chord estimate.
+    """
     harm, perc = hpss_stereo(x, sr)
-    return Stems(harmonic=harm, percussive=perc, source_name="hpss")
+    bass = None
+    if want_bass:
+        from .dsp import filters as FL
+        bass = FL.apply(harm, "lowpass", sr, 180.0, q=0.707, order=2)
+        harm = FL.apply(harm, "highpass", sr, 150.0, q=0.707, order=2)
+    return Stems(harmonic=harm, percussive=perc, source_name="hpss",
+                 bass=bass, bass_name="hpss low band" if want_bass else "synth")
 
 
 def separate_demucs(x: np.ndarray, sr: int = SR, model: str = DEMUCS_MODEL,
-                    jobs: int = 2) -> Stems:
+                    jobs: int = 2, want_bass: bool = True) -> Stems:
     """Run demucs and fold its four stems into fourfloor's two buses.
 
     ``x`` is the source *after* the beat-by-beat warp onto the target grid, not
@@ -52,9 +65,14 @@ def separate_demucs(x: np.ndarray, sr: int = SR, model: str = DEMUCS_MODEL,
 
     ``vocals`` and ``other`` become the harmonic bed (the house kit supplies the
     rhythm section); ``drums`` becomes the percussive bed, used only where the
-    plan asks for original-drum texture. The original ``bass`` stem is
-    deliberately discarded -- replacing the low end with a synthesised rolling
-    bass at the target key is the point of the remix.
+    plan asks for original-drum texture; ``bass`` becomes the bass bed.
+
+    That last one used to be thrown away, on the theory that replacing the low
+    end with a synthesised rolling bass at the target key was the point of the
+    remix. It is not. The synthesised bass follows a chord estimate, and a chord
+    estimate off a dense trap mix is frequently wrong -- wrong by a third, which
+    is a wrong chord, played loudly, under the vocal that is telling you what
+    the chord actually is. The song already knows its own bassline.
     """
     if not demucs_available():
         raise RuntimeError(
@@ -92,19 +110,23 @@ def separate_demucs(x: np.ndarray, sr: int = SR, model: str = DEMUCS_MODEL,
         vocals = parts["vocals"] if parts["vocals"] is not None else zero
         other = parts["other"] if parts["other"] is not None else zero
         drums = parts["drums"] if parts["drums"] is not None else zero
+        bass = parts["bass"] if parts["bass"] is not None else zero
         return Stems(harmonic=fit(vocals + other, n).astype(np.float32),
                      percussive=fit(drums, n).astype(np.float32),
-                     source_name="demucs")
+                     source_name="demucs",
+                     bass=fit(bass, n).astype(np.float32) if want_bass else None,
+                     bass_name="demucs bass" if want_bass else "synth")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def separate(x: np.ndarray, sr: int, mode: str = "hpss") -> Stems:
+def separate(x: np.ndarray, sr: int, mode: str = "hpss",
+             want_bass: bool = True) -> Stems:
     """Separate the warped source by ``mode``.
 
     Both engines see the same warped buffer, so the stems they return are
     already on the target grid that the arrangement addresses.
     """
     if mode == "demucs":
-        return separate_demucs(x, sr)
-    return separate_hpss(x, sr)
+        return separate_demucs(x, sr, want_bass=want_bass)
+    return separate_hpss(x, sr, want_bass=want_bass)
