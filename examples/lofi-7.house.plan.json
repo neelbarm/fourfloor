@@ -11,13 +11,13 @@
     "key": "Dm",
     "camelot": "7A",
     "hook": {
-      "start": 35.248,
-      "end": 62.6,
-      "duration": 27.352,
+      "start": 0.0,
+      "end": 23.243,
+      "duration": 23.243,
       "label": "hook",
       "group": 0,
-      "energy": 0.851,
-      "rms_db": -10.81,
+      "energy": 0.89,
+      "rms_db": -10.43,
       "repeats": 2
     },
     "breakdown_source": {
@@ -29,6 +29,20 @@
       "energy": 1.0,
       "rms_db": -9.41,
       "repeats": 1
+    },
+    "phrasing": {
+      "source": "stem+centre",
+      "usable": false,
+      "threshold": 0.157,
+      "contrast_db": 11.31,
+      "voiced_run": 2.252,
+      "gaps": 2,
+      "gap_seconds": 1.28
+    },
+    "cut_quality": {
+      "cuts": 14,
+      "mid_phrase": 0,
+      "clean_fraction": 1.0
     }
   },
   "slots": [
@@ -37,8 +51,8 @@
       "index": 0,
       "start_bar": 0,
       "bars": 16,
-      "source_start": 45.4715,
-      "source_bars": 9,
+      "source_start": 2.9056,
+      "source_bars": 8,
       "source_label": "hook",
       "drum_pattern": "intro",
       "source_gain": 0.42,
@@ -56,15 +70,31 @@
       "reverb_throw": false,
       "fill": false,
       "percussive_gain": 0.0,
-      "note": "DJ intro: kick and hats only, source high-passed so it does not fight the outgoing track"
+      "note": "DJ intro: kick and hats only, source high-passed so it does not fight the outgoing track",
+      "source_end": 33.8734,
+      "cut_in_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against)",
+      "cut_out_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against)",
+      "cut_in_mid_phrase": false,
+      "cut_out_mid_phrase": false,
+      "cut_moved_bars": 0.751,
+      "transition_in": [],
+      "transition_out": [
+        {
+          "kind": "reverse_cymbal",
+          "beats": 2,
+          "beat": 62,
+          "strength": 1.0,
+          "why": "reversed crash resolving on the build downbeat"
+        }
+      ]
     },
     {
       "kind": "build",
       "index": 1,
       "start_bar": 16,
       "bars": 8,
-      "source_start": 45.4715,
-      "source_bars": 9,
+      "source_start": 2.9056,
+      "source_bars": 8,
       "source_label": "hook",
       "drum_pattern": "build",
       "source_gain": 0.6,
@@ -82,15 +112,31 @@
       "reverb_throw": false,
       "fill": true,
       "percussive_gain": 0.0,
-      "note": "riser + beat-aligned vocal chops, high-pass climbing into the drop"
+      "note": "riser + beat-aligned vocal chops, high-pass climbing into the drop",
+      "source_end": 33.8734,
+      "cut_in_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against)",
+      "cut_out_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against)",
+      "cut_in_mid_phrase": false,
+      "cut_out_mid_phrase": false,
+      "cut_moved_bars": 0.751,
+      "transition_in": [],
+      "transition_out": [
+        {
+          "kind": "sweep_up",
+          "beats": 8,
+          "beat": 88,
+          "strength": 0.8,
+          "why": "short, strong riser over the last two bars: +1.9 to +3.4 dB per beat of 4-16 kHz, not a climb across the whole build"
+        }
+      ]
     },
     {
       "kind": "drop",
       "index": 2,
       "start_bar": 24,
       "bars": 40,
-      "source_start": 45.4715,
-      "source_bars": 9,
+      "source_start": 2.9056,
+      "source_bars": 8,
       "source_label": "hook",
       "drum_pattern": "drop",
       "source_gain": 0.82,
@@ -105,7 +151,31 @@
       "reverb_throw": false,
       "fill": true,
       "percussive_gain": 0.12,
-      "note": "hook section, full kit, bass on the detected chord roots"
+      "note": "hook section, full kit, bass on the detected chord roots",
+      "source_end": 33.8734,
+      "cut_in_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against)",
+      "cut_out_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against)",
+      "cut_in_mid_phrase": false,
+      "cut_out_mid_phrase": false,
+      "cut_moved_bars": 0.751,
+      "transition_in": [
+        {
+          "kind": "drop_in",
+          "beats": 1,
+          "beat": 96,
+          "strength": 1.0,
+          "why": "kit lands on the one as a step: every measured build->drop had the kick 0.0 beats off the downbeat, a +4.9 dB jump, no gap"
+        }
+      ],
+      "transition_out": [
+        {
+          "kind": "reverse_cymbal",
+          "beats": 2,
+          "beat": 254,
+          "strength": 1.0,
+          "why": "reversed crash resolving on the breakdown downbeat"
+        }
+      ]
     },
     {
       "kind": "breakdown",
@@ -131,15 +201,39 @@
       "reverb_throw": true,
       "fill": false,
       "percussive_gain": 0.18,
-      "note": "no kick, harmonic part only, filter opening across the section"
+      "note": "no kick, harmonic part only, filter opening across the section",
+      "source_end": 45.4687,
+      "cut_in_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against)",
+      "cut_out_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against)",
+      "cut_in_mid_phrase": false,
+      "cut_out_mid_phrase": false,
+      "cut_moved_bars": 0.0,
+      "transition_in": [
+        {
+          "kind": "drums_out",
+          "beats": 2,
+          "beat": 256,
+          "strength": 1.0,
+          "why": "kick out on the downbeat of the breakdown, two beats of filter sweep over the hole (measured kick-out 0.11 beats, -3.2 dB)"
+        }
+      ],
+      "transition_out": [
+        {
+          "kind": "reverse_cymbal",
+          "beats": 2,
+          "beat": 318,
+          "strength": 1.0,
+          "why": "reversed crash resolving on the build downbeat"
+        }
+      ]
     },
     {
       "kind": "build",
       "index": 4,
       "start_bar": 80,
       "bars": 8,
-      "source_start": 45.4715,
-      "source_bars": 9,
+      "source_start": 33.864,
+      "source_bars": 8,
       "source_label": "hook",
       "drum_pattern": "build",
       "source_gain": 0.6,
@@ -157,15 +251,38 @@
       "reverb_throw": false,
       "fill": true,
       "percussive_gain": 0.0,
-      "note": "riser + beat-aligned vocal chops, high-pass climbing into the drop"
+      "note": "riser + beat-aligned vocal chops, high-pass climbing into the drop",
+      "source_end": 64.8317,
+      "cut_in_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against); walks the source forward from the previous drop rather than repeating it",
+      "cut_out_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against)",
+      "cut_in_mid_phrase": false,
+      "cut_out_mid_phrase": false,
+      "cut_moved_bars": -0.002,
+      "transition_in": [],
+      "transition_out": [
+        {
+          "kind": "sweep_up",
+          "beats": 8,
+          "beat": 344,
+          "strength": 0.8,
+          "why": "short, strong riser over the last two bars: +1.9 to +3.4 dB per beat of 4-16 kHz, not a climb across the whole build"
+        },
+        {
+          "kind": "fill",
+          "beats": 4,
+          "beat": 348,
+          "strength": 1.0,
+          "why": "fill through the last bar of the build into the final drop; only ~1 in 5 reference into-drop boundaries has one, so the first drop stays a clean step"
+        }
+      ]
     },
     {
       "kind": "drop",
       "index": 5,
       "start_bar": 88,
       "bars": 32,
-      "source_start": 45.4715,
-      "source_bars": 9,
+      "source_start": 33.864,
+      "source_bars": 8,
       "source_label": "hook",
       "drum_pattern": "drop_var",
       "source_gain": 0.82,
@@ -180,15 +297,31 @@
       "reverb_throw": false,
       "fill": true,
       "percussive_gain": 0.12,
-      "note": "hook section, full kit, bass on the detected chord roots, offbeat stabs"
+      "note": "hook section, full kit, bass on the detected chord roots, offbeat stabs",
+      "source_end": 64.8317,
+      "cut_in_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against); walks the source forward from the previous drop rather than repeating it",
+      "cut_out_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against)",
+      "cut_in_mid_phrase": false,
+      "cut_out_mid_phrase": false,
+      "cut_moved_bars": -0.002,
+      "transition_in": [
+        {
+          "kind": "drop_in",
+          "beats": 1,
+          "beat": 352,
+          "strength": 1.0,
+          "why": "kit lands on the one as a step: every measured build->drop had the kick 0.0 beats off the downbeat, a +4.9 dB jump, no gap"
+        }
+      ],
+      "transition_out": []
     },
     {
       "kind": "outro",
       "index": 6,
       "start_bar": 120,
       "bars": 16,
-      "source_start": 45.4715,
-      "source_bars": 9,
+      "source_start": 33.864,
+      "source_bars": 8,
       "source_label": "hook",
       "drum_pattern": "outro",
       "source_gain": 0.3,
@@ -206,7 +339,158 @@
       "reverb_throw": false,
       "fill": false,
       "percussive_gain": 0.0,
-      "note": "DJ outro: source filtered away, drums thin out for the next mix"
+      "note": "DJ outro: source filtered away, drums thin out for the next mix",
+      "source_end": 64.8317,
+      "cut_in_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against); walks the source forward from the previous drop rather than repeating it",
+      "cut_out_reason": "nearest downbeat (stem+centre has no vocal contrast to phrase against)",
+      "cut_in_mid_phrase": false,
+      "cut_out_mid_phrase": false,
+      "cut_moved_bars": -0.002,
+      "transition_in": [
+        {
+          "kind": "drums_out",
+          "beats": 2,
+          "beat": 480,
+          "strength": 0.3,
+          "why": "the drop's last bar plays complete; thin the tops for two beats into the mix-out (reference drop exit is only -2.9 dB)"
+        }
+      ],
+      "transition_out": []
+    }
+  ],
+  "transitions": [
+    {
+      "bar": 16,
+      "beat": 64,
+      "time": 30.9677,
+      "from": "intro",
+      "to": "build",
+      "out": [
+        {
+          "kind": "reverse_cymbal",
+          "beats": 2,
+          "beat": 62,
+          "strength": 1.0,
+          "why": "reversed crash resolving on the build downbeat"
+        }
+      ],
+      "in": []
+    },
+    {
+      "bar": 24,
+      "beat": 96,
+      "time": 46.4516,
+      "from": "build",
+      "to": "drop",
+      "out": [
+        {
+          "kind": "sweep_up",
+          "beats": 8,
+          "beat": 88,
+          "strength": 0.8,
+          "why": "short, strong riser over the last two bars: +1.9 to +3.4 dB per beat of 4-16 kHz, not a climb across the whole build"
+        }
+      ],
+      "in": [
+        {
+          "kind": "drop_in",
+          "beats": 1,
+          "beat": 96,
+          "strength": 1.0,
+          "why": "kit lands on the one as a step: every measured build->drop had the kick 0.0 beats off the downbeat, a +4.9 dB jump, no gap"
+        }
+      ]
+    },
+    {
+      "bar": 64,
+      "beat": 256,
+      "time": 123.871,
+      "from": "drop",
+      "to": "breakdown",
+      "out": [
+        {
+          "kind": "reverse_cymbal",
+          "beats": 2,
+          "beat": 254,
+          "strength": 1.0,
+          "why": "reversed crash resolving on the breakdown downbeat"
+        }
+      ],
+      "in": [
+        {
+          "kind": "drums_out",
+          "beats": 2,
+          "beat": 256,
+          "strength": 1.0,
+          "why": "kick out on the downbeat of the breakdown, two beats of filter sweep over the hole (measured kick-out 0.11 beats, -3.2 dB)"
+        }
+      ]
+    },
+    {
+      "bar": 80,
+      "beat": 320,
+      "time": 154.8387,
+      "from": "breakdown",
+      "to": "build",
+      "out": [
+        {
+          "kind": "reverse_cymbal",
+          "beats": 2,
+          "beat": 318,
+          "strength": 1.0,
+          "why": "reversed crash resolving on the build downbeat"
+        }
+      ],
+      "in": []
+    },
+    {
+      "bar": 88,
+      "beat": 352,
+      "time": 170.3226,
+      "from": "build",
+      "to": "drop",
+      "out": [
+        {
+          "kind": "sweep_up",
+          "beats": 8,
+          "beat": 344,
+          "strength": 0.8,
+          "why": "short, strong riser over the last two bars: +1.9 to +3.4 dB per beat of 4-16 kHz, not a climb across the whole build"
+        },
+        {
+          "kind": "fill",
+          "beats": 4,
+          "beat": 348,
+          "strength": 1.0,
+          "why": "fill through the last bar of the build into the final drop; only ~1 in 5 reference into-drop boundaries has one, so the first drop stays a clean step"
+        }
+      ],
+      "in": [
+        {
+          "kind": "drop_in",
+          "beats": 1,
+          "beat": 352,
+          "strength": 1.0,
+          "why": "kit lands on the one as a step: every measured build->drop had the kick 0.0 beats off the downbeat, a +4.9 dB jump, no gap"
+        }
+      ]
+    },
+    {
+      "bar": 120,
+      "beat": 480,
+      "time": 232.2581,
+      "from": "drop",
+      "to": "outro",
+      "out": [],
+      "in": [
+        {
+          "kind": "drums_out",
+          "beats": 2,
+          "beat": 480,
+          "strength": 0.3,
+          "why": "the drop's last bar plays complete; thin the tops for two beats into the mix-out (reference drop exit is only -2.9 dB)"
+        }
+      ]
     }
   ]
 }

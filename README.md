@@ -399,7 +399,7 @@ with no key and no network.
 ## Tests
 
 ```bash
-make test     # 172 tests, ~50s
+make test     # 443 tests, ~50s
 ```
 
 Covers the beat tracker against synthesised click tracks at 90/124/140 BPM and
