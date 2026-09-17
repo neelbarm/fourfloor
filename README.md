@@ -28,7 +28,7 @@ No cloud, no API key, no model download. numpy and scipy, and ffmpeg for codecs.
 git clone https://github.com/neelbarm/fourfloor && cd fourfloor
 brew install ffmpeg python@3.12   # ffmpeg is the codec layer; all the DSP is numpy/scipy
 make setup                        # .venv + deps
-make demo                         # remix the bundled fixture (~50s)
+make demo                         # remix the bundled fixture (~15s)
 open examples/preview.html        # see what it did, and hear it
 ```
 
@@ -248,7 +248,7 @@ with no key and no network.
 ## Tests
 
 ```bash
-make test     # 101 tests, ~90s
+make test     # 101 tests, ~40s
 ```
 
 Covers the beat tracker against synthesised click tracks at 90/124/140 BPM and

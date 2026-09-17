@@ -13,7 +13,7 @@ REFS    ?= $(HOME)/Desktop/Mixpilot
 help:
 	@echo "fourfloor"
 	@echo "  make setup   create .venv and install fourfloor + dev deps"
-	@echo "  make test    run the test suite (~90s)"
+	@echo "  make test    run the test suite (~40s)"
 	@echo "  make demo    remix fixtures/lofi-7.mp3 into examples/"
 	@echo "  make learn   derive a style profile from REFS=<folder of house remixes>"
 	@echo "  make clean   remove build artefacts and generated audio"
