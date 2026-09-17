@@ -21,6 +21,15 @@ from . import bass as BA
 from . import drums as DR
 
 
+#: Bus gains into the master. They are named because the balance report and the
+#: adaptive vocal-band solve both have to measure the buses as the master sees
+#: them, not as they leave their renderers.
+HARM_GAIN = 1.35
+PERC_GAIN = 1.0
+DRUM_GAIN = 0.72
+BASS_GAIN = 0.55
+
+
 @dataclass
 class Stems:
     """The source, pre-warped to the target grid and split into parts."""
@@ -131,6 +140,7 @@ class Engine:
         self.beat = plan.bar_dur / 4.0
         self.n = int(round(plan.total_bars * plan.bar_dur * sr))
         self.ir = RV.synth_ir(sr, seconds=1.6, decay=4.0)
+        self.buses: dict[str, np.ndarray] = {}
 
     # -- helpers ---------------------------------------------------------
     def _bar_sample(self, bar: float) -> int:
@@ -309,12 +319,53 @@ class Engine:
         # carve 40-90 Hz out of the source so the kick and bass own the sub
         harm = FL.apply(harm, "highpass", self.sr, 105.0, q=0.707, order=2)
 
-        mix = harm * 1.35 + perc + drums * 0.72 + bassline * 0.55
+        self.buses = {"harmonic": harm * HARM_GAIN, "percussive": perc * PERC_GAIN,
+                      "drums": drums * DRUM_GAIN, "bass": bassline * BASS_GAIN}
+        mix = sum(self.buses.values())
         out = DY.master(mix, self.sr, peak_db=-1.0)
 
         metrics = {
             "kick_count": len(kick_times),
             "peak_db": float(20 * np.log10(max(float(np.max(np.abs(out))), 1e-6))),
             "rms_db": float(20 * np.log10(max(float(np.sqrt(np.mean(out ** 2))), 1e-6))),
+            "balance": self.balance_report(),
         }
         return out, metrics
+
+    # -- measurement -----------------------------------------------------
+    def balance_report(self) -> list[dict]:
+        """Per-slot source-versus-kit levels, as they arrive at the master bus.
+
+        ``vocal_band_db`` is the gap between the source bed and the house kit
+        inside 300 Hz - 4 kHz: positive means the source is on top, which is
+        where a vocal has to sit to survive a drop. The full-band column is
+        there to show what the kick is doing to the same comparison.
+        """
+        if not self.buses:
+            return []
+        harm = self.buses["harmonic"] + self.buses["percussive"]
+        kit = self.buses["drums"]
+        full = (0.0, self.sr * 0.5)
+        report: list[dict] = []
+        for slot in self.plan.slots:
+            a, b = self._bar_sample(slot.start_bar), self._bar_sample(slot.end_bar)
+            hv = DY.band_rms_db(harm[a:b], self.sr, DY.VOCAL_BAND)
+            kv = DY.band_rms_db(kit[a:b], self.sr, DY.VOCAL_BAND)
+            hp = DY.band_rms_db(harm[a:b], self.sr, DY.PRESENCE_BAND)
+            kp = DY.band_rms_db(kit[a:b], self.sr, DY.PRESENCE_BAND)
+            hf = DY.band_rms_db(harm[a:b], self.sr, full)
+            kf = DY.band_rms_db(kit[a:b], self.sr, full)
+            report.append({
+                "slot": slot.index, "kind": slot.kind,
+                "start": round(slot.start_bar * self.bar_dur, 3),
+                "source_vocal_band_db": round(hv, 2),
+                "kit_vocal_band_db": round(kv, 2),
+                "vocal_band_margin_db": round(hv - kv, 2),
+                "source_presence_db": round(hp, 2),
+                "kit_presence_db": round(kp, 2),
+                "presence_margin_db": round(hp - kp, 2),
+                "source_full_band_db": round(hf, 2),
+                "kit_full_band_db": round(kf, 2),
+                "full_band_margin_db": round(hf - kf, 2),
+            })
+        return report

@@ -200,3 +200,28 @@ def xfade(a: np.ndarray, b: np.ndarray, n: int) -> np.ndarray:
     head = a[:-n] if n < len(a) else a[:0]
     mid = a[len(a) - n:] * fade_out + b[:n] * fade_in
     return np.concatenate([head, mid, b[n:]])
+
+
+def step_score(x: np.ndarray, sr: int, at: float, radius: float = 0.02,
+               window: float = 0.2) -> float:
+    """Largest one-sample jump within ``radius`` of ``at``, over the local RMS.
+
+    A cut, a gain step or a filter that jumps between blocks shows up as a
+    single-sample discontinuity: one derivative sample far larger than anything
+    the band-limited material around it can produce. Dividing by the RMS of a
+    ``window``-wide neighbourhood makes the number comparable between a quiet
+    breakdown and a loud drop, so one threshold covers the whole track.
+    """
+    mono = x.mean(axis=1) if x.ndim == 2 else x
+    n = len(mono)
+    if n < 4:
+        return 0.0
+    i = int(round(at * sr))
+    r, w = max(2, int(radius * sr)), max(4, int(window * sr))
+    a, b = max(0, i - r), min(n, i + r)
+    if b - a < 2:
+        return 0.0
+    jump = float(np.max(np.abs(np.diff(mono[a:b]))))
+    wa, wb = max(0, i - w), min(n, i + w)
+    local = float(np.sqrt(np.mean(np.square(mono[wa:wb]))))
+    return jump / max(local, 1e-9)

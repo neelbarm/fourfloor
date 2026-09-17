@@ -41,6 +41,106 @@ def apply_sidechain(x: np.ndarray, env: np.ndarray) -> np.ndarray:
     return (x * (e[:, None] if x.ndim == 2 else e)).astype(np.float32)
 
 
+#: Where a lead vocal actually lives. Intelligibility is decided here: below it
+#: the kick and bass own the spectrum, above it only air and sibilance.
+VOCAL_BAND = (300.0, 4000.0)
+
+#: The narrower band that carries consonants and "presence". Boosting a vocal
+#: here and cutting the kit by the same amount buys clarity without loudness.
+PRESENCE_BAND = (2000.0, 5000.0)
+
+
+def band_limit(x: np.ndarray, sr: int, lo: float, hi: float,
+               order: int = 2) -> np.ndarray:
+    """Restrict a buffer to ``[lo, hi]`` with 24 dB/oct skirts, for measurement."""
+    y = FL.apply(x, "highpass", sr, lo, q=0.707, order=order)
+    return FL.apply(y, "lowpass", sr, hi, q=0.707, order=order)
+
+
+def rms(x: np.ndarray) -> float:
+    """Plain RMS of a buffer (0.0 when empty)."""
+    return float(np.sqrt(np.mean(np.square(x)))) if len(x) else 0.0
+
+
+def rms_db(x: np.ndarray) -> float:
+    """RMS in dBFS, floored at -120."""
+    return 20.0 * np.log10(max(rms(x), 1e-6))
+
+
+def band_rms(x: np.ndarray, sr: int, band: tuple[float, float] = VOCAL_BAND,
+             n: int = 8192) -> float:
+    """RMS of the part of ``x`` inside ``band``, by averaged periodograms.
+
+    Parseval on Hann-windowed frames, corrected for the window's power loss.
+    Measuring in the frequency domain rather than filtering and taking an RMS
+    is both exact about the band edges and cheap enough to run on every slot of
+    every render.
+    """
+    mono = x.mean(axis=1) if x.ndim == 2 else x
+    if len(mono) < 64:
+        return 0.0
+    n = min(n, 1 << int(np.floor(np.log2(len(mono)))))
+    win = np.hanning(n)
+    wpow = float(np.mean(win ** 2))
+    freqs = np.fft.rfftfreq(n, 1.0 / sr)
+    sel = (freqs >= band[0]) & (freqs < band[1])
+    edge = (freqs == 0) | (freqs == freqs[-1])
+    acc, frames = 0.0, 0
+    for a in range(0, len(mono) - n + 1, n):
+        spec = np.abs(np.fft.rfft(mono[a:a + n] * win)) ** 2
+        power = 2.0 * spec[sel & ~edge].sum() + spec[sel & edge].sum()
+        acc += power / (n * n) / max(wpow, 1e-12)
+        frames += 1
+    return float(np.sqrt(acc / max(frames, 1)))
+
+
+def band_rms_db(x: np.ndarray, sr: int, band: tuple[float, float] = VOCAL_BAND) -> float:
+    """RMS in dBFS of the part of ``x`` inside ``band``."""
+    return 20.0 * np.log10(max(band_rms(x, sr, band), 1e-6))
+
+
+#: Control-rate hop for envelope followers: 256 samples is 5.8 ms at 44.1 kHz,
+#: far finer than any gain move we want to hear and 256x cheaper than running
+#: the one-pole per sample.
+CTRL_HOP = 256
+
+
+def follow(level: np.ndarray, rate: float, attack: float = 0.02,
+           release: float = 0.15) -> np.ndarray:
+    """One-pole attack/release smoothing of a control signal at ``rate`` Hz."""
+    a_att = float(np.exp(-1.0 / max(attack * rate, 1.0)))
+    a_rel = float(np.exp(-1.0 / max(release * rate, 1.0)))
+    out = np.empty(len(level), dtype=np.float32)
+    g = float(level[0]) if len(level) else 0.0
+    for i, v in enumerate(level):
+        a = a_att if v > g else a_rel
+        g = a * g + (1.0 - a) * float(v)
+        out[i] = g
+    return out
+
+
+def band_follower(x: np.ndarray, sr: int, band: tuple[float, float] = VOCAL_BAND,
+                  attack: float = 0.02, release: float = 0.15,
+                  hop: int = CTRL_HOP) -> np.ndarray:
+    """Smoothed per-sample RMS envelope of ``x`` inside ``band``.
+
+    The RMS is taken per ``hop``, smoothed at control rate and interpolated back
+    to one value per sample, which is what a gain curve needs to be free of
+    zipper noise while costing a fraction of a per-sample follower.
+    """
+    n = len(x)
+    if n == 0:
+        return np.zeros(0, dtype=np.float32)
+    mono = x.mean(axis=1) if x.ndim == 2 else x
+    mono = band_limit(mono, sr, band[0], band[1])
+    frames = max(1, n // hop)
+    block = mono[: frames * hop].reshape(frames, hop)
+    level = np.sqrt(np.mean(np.square(block), axis=1))
+    smooth = follow(level, sr / hop, attack=attack, release=release)
+    centres = np.arange(frames) * hop + hop * 0.5
+    return np.interp(np.arange(n), centres, smooth).astype(np.float32)
+
+
 def saturate(x: np.ndarray, drive: float = 1.4) -> np.ndarray:
     """Odd-harmonic soft clip. Normalised so unity input stays near unity out."""
     if drive <= 1.0:
