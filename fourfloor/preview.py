@@ -19,8 +19,18 @@ WAVE_POINTS = 1400
 
 
 def waveform(path: str | Path, points: int = WAVE_POINTS) -> list[float]:
-    """Peak-per-bucket waveform, normalised to [0, 1]."""
-    mono = decode(path).mono
+    """Peak-per-bucket waveform of a file, normalised to [0, 1]."""
+    return waveform_of(decode(path).mono, points)
+
+
+def waveform_of(mono: np.ndarray, points: int = WAVE_POINTS) -> list[float]:
+    """Peak-per-bucket waveform of a buffer already in memory.
+
+    The web app has the rendered audio in hand and the decoded source in hand,
+    so it draws both without paying for a second decode.
+    """
+    if mono.ndim == 2:
+        mono = mono.mean(axis=1)
     if not len(mono):
         return [0.0] * points
     edges = np.linspace(0, len(mono), points + 1).astype(int)

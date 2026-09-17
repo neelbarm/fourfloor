@@ -124,16 +124,20 @@ def warp_source(a: Analysis, tempo: TempoPlan, semitones: int,
     return warped
 
 
-def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
-          style: Style | None = None, progress=None) -> RemixResult:
-    """Turn a song into a house remix and write every output file."""
-    opts = opts or RemixOptions()
-    out = Path(out)
-    step = progress or (lambda *_a, **_k: None)
+#: The phases ``remix`` reports through ``progress``, in order. The web app
+#: draws this list before the job starts, so it lives next to the calls below.
+PHASES = ("analyse", "warp", "separate", "arrange", "render", "write")
 
-    # Check everything cheap before decoding: a bad flag used to surface either
-    # as a numpy error deep in the render or as a session-schema failure after
-    # a full minute of work, with a half-written mp3 left behind.
+
+def validate_options(opts: RemixOptions, out: str | Path) -> None:
+    """Reject an impossible request before any work happens.
+
+    Every check here is cheap and needs no audio, so both the CLI and the web
+    app can run it up front: a bad flag used to surface either as a numpy error
+    deep in the render or as a session-schema failure after a full minute of
+    work, with a half-written mp3 left behind.
+    """
+    out = Path(out)
     if opts.target_bpm is not None and not (MIN_TARGET_BPM <= opts.target_bpm <= MAX_TARGET_BPM):
         raise ValueError(
             f"--bpm {opts.target_bpm:g} is out of range; fourfloor targets "
@@ -145,6 +149,27 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
         raise ValueError(
             f"output must end in .mp3 or .wav, got {out.name!r}"
         )
+    if opts.form not in arrange.FORMS:
+        raise ValueError(
+            f"--form {opts.form!r} is not a form; choose from "
+            + ", ".join(arrange.FORMS)
+        )
+    if opts.stems not in ("hpss", "demucs"):
+        raise ValueError(f"--stems {opts.stems!r} is not an engine; use hpss or demucs")
+    if opts.length:
+        arrange.parse_length(opts.length)          # raises with its own message
+    if opts.key and opts.key.lower() != "auto":
+        parse_key(opts.key)                        # ditto
+
+
+def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
+          style: Style | None = None, progress=None) -> RemixResult:
+    """Turn a song into a house remix and write every output file."""
+    opts = opts or RemixOptions()
+    out = Path(out)
+    step = progress or (lambda *_a, **_k: None)
+
+    validate_options(opts, out)
 
     step("analyse", "decoding and analysing the source")
     clip = decode(path)
