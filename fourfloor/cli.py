@@ -268,6 +268,7 @@ class FetchLine:
         self.quiet = quiet
         self.live = ui.is_tty() and not quiet
         self._step = -1
+        self._last = 0.0
         self._drawn = False
 
     def __call__(self, pct: float, note: str = "") -> None:
@@ -284,6 +285,9 @@ class FetchLine:
             sys.stdout.flush()
             self._drawn = True
             return
+        if pct < self._last - 1:                  # the next track of a playlist
+            self._step = -1
+        self._last = pct
         step = int(pct // 25)
         if step > self._step:
             self._step = step
