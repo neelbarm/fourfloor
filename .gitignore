@@ -1,0 +1,26 @@
+# python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# audio: WAVs are large and regenerable. fixtures/ is the only committed audio,
+# plus the demo mp3/session/plan/preview under examples/.
+*.wav
+!fixtures/*.wav
+*.flac
+*.aiff
+
+# private material: never commit source songs, reference remixes, or anything
+# derived from them
+scratch/
+private/
+styles/learned.json
+*.house.wav
+*.session.wav
+
+# os
+.DS_Store
