@@ -52,6 +52,9 @@ def _request(payload: dict, api_key: str) -> dict:
             "content-type": "application/json",
             "x-api-key": api_key,
             "anthropic-version": API_VERSION,
+            # The SDKs take `betas=[...]` as a parameter and turn it into this
+            # header; over raw HTTP the header is the only place it belongs.
+            "anthropic-beta": FALLBACK_BETA,
         },
         method="POST",
     )
@@ -103,7 +106,6 @@ def apply_producer_plan(analysis: Analysis, plan: Plan,
         # arranging a house track from a structural summary is a light task:
         # low effort keeps the round trip to a few seconds
         "output_config": {"effort": "low"},
-        "betas": [FALLBACK_BETA],
         "fallbacks": "default",
         "system": SYSTEM,
         "messages": [{"role": "user", "content": json.dumps(brief)}],
