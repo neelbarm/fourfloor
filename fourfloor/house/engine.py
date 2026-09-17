@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..arrange import Plan, Slot
-from ..audio import add_at, fit, to_stereo, xfade
+from ..audio import add_at, fit, to_stereo
 from ..dsp import dynamics as DY
 from ..dsp import filters as FL
 from ..dsp import reverb as RV
@@ -29,6 +29,22 @@ PERC_GAIN = 1.0
 DRUM_GAIN = 0.72
 BASS_GAIN = 0.55
 
+#: Source-layer crossfade at a slot boundary, in beats. Milliseconds are the
+#: wrong unit here: a cut between two sections is a musical event, and the ear
+#: reads a fade that lasts a beat as part of the arrangement rather than as a
+#: repair.
+XFADE_BEATS = 1.0
+
+#: How much of a loop's own tail is blended with the bar before its start, so a
+#: repeat continues the line instead of splicing onto it.
+LOOP_SEAM_BEATS = 0.5
+
+#: Every synthesised one-shot is cut off while it is still ringing -- an open
+#: hat at 13% of its peak, a clap at 11%. That truncation is a step, and a step
+#: is a click. Six milliseconds of fade is far shorter than any decay we care
+#: about and removes the whole family of them.
+LAND_MS = 6.0
+
 
 @dataclass
 class Stems:
@@ -43,35 +59,75 @@ class Stems:
         return len(self.harmonic)
 
 
-def _loop_to(src: np.ndarray, start: int, want: int, period: int, sr: int) -> np.ndarray:
+def _gather(src: np.ndarray, idx: np.ndarray) -> np.ndarray:
+    """``src[idx]`` with out-of-range positions reading silence, always a copy."""
+    ok = (idx >= 0) & (idx < len(src))
+    out = src[np.where(ok, idx, 0)]
+    out[~ok] = 0.0
+    return np.asarray(out, dtype=np.float32)
+
+
+def _equal_power(t: np.ndarray, stereo: bool) -> tuple[np.ndarray, np.ndarray]:
+    """Complementary cos/sin gains for a crossfade parameter ``t`` in [0, 1]."""
+    out = np.cos(t * np.pi / 2).astype(np.float32)
+    into = np.sin(t * np.pi / 2).astype(np.float32)
+    return (out[:, None], into[:, None]) if stereo else (out, into)
+
+
+def _loop_to(src: np.ndarray, start: int, want: int, period: int, sr: int,
+             pre: int = 0, seam: int = 0) -> np.ndarray:
     """Take ``want`` samples from ``src`` at ``start``, looping a ``period``-long span.
 
-    Repeats are joined with a 24 ms equal-power crossfade. Because ``period`` is
-    always a whole number of bars the seam lands on a downbeat, so the loop
-    stays in phase with the grid.
+    Positions are computed modulo ``period``, so every repeat sits on exactly the
+    same phase of the bar grid. The previous implementation crossfaded each
+    repeat onto the last with ``xfade``, which returns a buffer shorter than the
+    two inputs by the fade length: the loop lost 24 ms per repeat and walked
+    ahead of the grid by most of a 16th note over a long drop.
+
+    ``pre`` asks for extra samples *before* ``start``, at the loop phase they
+    would have had, so a caller can crossfade a slot boundary with material that
+    belongs to the same loop instead of fading to silence and back.
+
+    ``seam`` smooths the wrap the way a sampler does: the loop's own tail fades
+    into whatever precedes ``start``, so the sample after the wrap continues the
+    line exactly. When the span starts too close to the head of the source to
+    have a "before", the blend mirrors -- the loop's head fades out of the
+    material that follows the loop instead.
     """
-    if want <= 0:
+    total = max(0, pre) + max(0, want)
+    if total <= 0:
         return np.zeros((0, src.shape[1]) if src.ndim == 2 else (0,), dtype=np.float32)
-    period = max(period, int(0.25 * sr))
-    fade = min(int(0.024 * sr), period // 4)
+    period = max(int(period), 64)
+    pre = max(0, min(pre, period))
 
-    def take(a: int, n: int) -> np.ndarray:
-        seg = src[max(0, a): max(0, a) + n]
-        return fit(seg, n)
+    phase = np.mod(np.arange(total, dtype=np.int64) - pre, period)
+    out = _gather(src, start + phase)
 
-    out = take(start, period)
-    while len(out) < want:
-        nxt = take(start, period)
-        out = xfade(out, nxt, fade)
-    # Always hand back a fresh buffer. `fit` and the slicing in `take` return
-    # views when the span already has the right length, and the caller fades
-    # the slot edges in place -- writing straight back into the shared stem and
-    # corrupting it for every later slot that reads the same span.
-    return np.array(fit(out, want), dtype=np.float32, copy=True)
+    seam = int(min(seam, period // 4))
+    if seam > 0:
+        if start >= seam:
+            mask = phase >= period - seam
+            t = (phase[mask] - (period - seam)).astype(np.float32) / seam
+            alt = _gather(src, start + phase[mask] - period)
+        else:
+            mask = phase < seam
+            t = 1.0 - phase[mask].astype(np.float32) / seam
+            alt = _gather(src, start + phase[mask] + period)
+        if mask.any():
+            keep, blend = _equal_power(t, out.ndim == 2)
+            out[mask] = out[mask] * keep + alt * blend
+    return out
 
 
-def _sweep_curve(n: int, spec: tuple[float, float] | None) -> np.ndarray | None:
-    return None if spec is None else FL.exp_curve(n, spec[0], spec[1])
+def _land(x: np.ndarray, sr: int, ms: float = LAND_MS) -> np.ndarray:
+    """Fade the last few milliseconds of a one-shot to zero."""
+    n = min(len(x), max(2, int(ms * 0.001 * sr)))
+    if n < 2:
+        return x
+    out = np.array(x, dtype=np.float32, copy=True)
+    ramp = np.linspace(1.0, 0.0, n, dtype=np.float32)
+    out[-n:] *= ramp[:, None] if out.ndim == 2 else ramp
+    return out
 
 
 def _chop(src: np.ndarray, sr: int, beat: float, bars: int, bar_dur: float,
@@ -141,6 +197,11 @@ class Engine:
         self.n = int(round(plan.total_bars * plan.bar_dur * sr))
         self.ir = RV.synth_ir(sr, seconds=1.6, decay=4.0)
         self.buses: dict[str, np.ndarray] = {}
+        # Land every voice: the kit renders its one-shots to a fixed length and
+        # lets them stop wherever the envelope has got to, which puts a step at
+        # the end of every open hat, clap and tom.
+        self.voices = {k: _land(v, sr) for k, v in self.kit.samples.items()}
+        self.impact = _land(DR.impact(sr), sr)
 
     # -- helpers ---------------------------------------------------------
     def _bar_sample(self, bar: float) -> int:
@@ -155,49 +216,97 @@ class Engine:
         return (root + self.semitones) % 12, minor
 
     # -- layers ----------------------------------------------------------
+    def _xfade_len(self, index: int) -> int:
+        """Crossfade length, in samples, at the boundary *entering* slot ``index``.
+
+        One beat, clamped so the fade can never eat more than a quarter of the
+        shorter side. The cut still lands on the downbeat -- the fade is what
+        arrives there, so the incoming slot is at full level on beat 1 and the
+        outgoing one has already gone.
+        """
+        slots = self.plan.slots
+        if index <= 0 or index >= len(slots):
+            return 0
+        want = int(round(XFADE_BEATS * self.beat * self.sr))
+        room = min(slots[index - 1].bars, slots[index].bars) * self.bar_dur * self.sr / 4.0
+        return max(0, min(want, int(room)))
+
+    def _sweep_over(self, spec: tuple[float, float] | None, want: int,
+                    pre: int) -> np.ndarray | None:
+        """A slot's cutoff curve, held flat across the crossfade lead-in.
+
+        Holding the start value through the lead-in means the biquad has a whole
+        beat of the right material to settle on before anything is audible, so
+        the slot opens with a warmed-up filter rather than with the state a
+        cold ``lfilter`` invents.
+        """
+        if spec is None:
+            return None
+        curve = FL.exp_curve(want, spec[0], spec[1])
+        return curve if pre <= 0 else np.concatenate([np.full(pre, spec[0]), curve])
+
     def render_source(self) -> tuple[np.ndarray, np.ndarray]:
         """Lay the warped source onto the grid, slot by slot, with per-slot FX.
 
         Returns ``(harmonic_bed, percussive_bed)``; the house kit replaces the
         original drums, so the percussive bed is only used as low-level texture
         where the plan asks for it.
+
+        Every slot is rendered a beat early and handed to ``add_at`` a beat
+        early: the lead-in carries the same loop phase the slot will have, and
+        the two sides of a boundary use complementary equal-power gains, so the
+        source layer crossfades across a beat instead of ducking to silence and
+        back through a pair of 12 ms edge fades.
         """
         harm = np.zeros((self.n, 2), dtype=np.float32)
         perc = np.zeros((self.n, 2), dtype=np.float32)
-        for slot in self.plan.slots:
+        seam = int(round(LOOP_SEAM_BEATS * self.beat * self.sr))
+        last = len(self.plan.slots) - 1
+        for i, slot in enumerate(self.plan.slots):
             a = self._bar_sample(slot.start_bar)
             want = self._bar_sample(slot.end_bar) - a
+            pre = self._xfade_len(i)
+            post = self._xfade_len(i + 1) if i < last else \
+                min(int(round(XFADE_BEATS * self.beat * self.sr)), want // 4)
+            head = 0 if i > 0 else min(int(round(XFADE_BEATS * self.beat * self.sr)), want // 4)
+
             period = int(round(max(slot.source_bars, 1) * self.beat_multiple
                                * self.bar_dur * self.sr))
             start = int(round(slot.source_start * self.sr))
-            seg = _loop_to(self.stems.harmonic, start, want, period, self.sr)
-            pseg = _loop_to(self.stems.percussive, start, want, period, self.sr)
+            seg = _loop_to(self.stems.harmonic, start, want, period, self.sr,
+                           pre=pre, seam=seam)
+            pseg = _loop_to(self.stems.percussive, start, want, period, self.sr,
+                            pre=pre, seam=seam)
 
-            hp = _sweep_curve(want, slot.highpass)
+            hp = self._sweep_over(slot.highpass, want, pre)
             if hp is not None:
                 seg = FL.sweep(seg, "highpass", self.sr, hp, q=0.72, order=2)
-            lp = _sweep_curve(want, slot.lowpass)
+            lp = self._sweep_over(slot.lowpass, want, pre)
             if lp is not None:
                 seg = FL.sweep(seg, "lowpass", self.sr, lp, q=0.72, order=2)
 
             if slot.chops:
                 nb = min(4, slot.bars)
-                tail = want - self._bar_sample(nb) + a
-                head = seg[: tail - a] if tail > a else seg
-                chopped = _chop(seg[tail - a:], self.sr, self.beat, nb, self.bar_dur)
-                seg = np.concatenate([head, chopped])[:want]
+                cut = want - self._bar_sample(nb)
+                if cut > 0:
+                    chopped = _chop(seg[pre + cut:], self.sr, self.beat, nb, self.bar_dur)
+                    seg = np.concatenate([seg[: pre + cut], chopped])[: pre + want]
             if slot.reverb_throw:
                 seg = self._throw(seg, slot)
 
-            # fade slot edges so a filter-swept boundary never clicks
-            edge = min(int(0.012 * self.sr), want // 8)
-            if edge > 1:
-                seg[:edge] *= np.linspace(0.0, 1.0, edge)[:, None]
-                seg[-edge:] *= np.linspace(1.0, 0.0, edge)[:, None]
+            for n_fade, at_head in ((pre or head, True), (post, False)):
+                if n_fade <= 1:
+                    continue
+                t = np.linspace(0.0, 1.0, n_fade, dtype=np.float32)
+                out_g, in_g = _equal_power(t, True)
+                if at_head:
+                    seg[:n_fade] *= in_g
+                else:
+                    seg[len(seg) - n_fade:] *= out_g
 
-            add_at(harm, seg, a, slot.source_gain)
+            add_at(harm, seg, a - pre, slot.source_gain)
             if slot.percussive_gain > 0:
-                add_at(perc, pseg, a, slot.percussive_gain)
+                add_at(perc, pseg, a - pre, slot.percussive_gain)
         return harm, perc
 
     def _throw(self, seg: np.ndarray, slot: Slot) -> np.ndarray:
@@ -228,7 +337,7 @@ class Engine:
                 for voice, steps in pattern.items():
                     if voice == "sub":
                         continue
-                    sample = self.kit.samples.get(voice)
+                    sample = self.voices.get(voice)
                     if sample is None:
                         continue
                     for step, vel in steps:
@@ -244,7 +353,7 @@ class Engine:
             if slot.riser:
                 self._riser(out, slot)
             if slot.impact:
-                add_at(out, to_stereo(DR.impact(self.sr)),
+                add_at(out, to_stereo(self.impact),
                        self._bar_sample(slot.start_bar), 0.9)
         return out, sorted(kick_times)
 
@@ -253,7 +362,7 @@ class Engine:
         freqs = (220.0, 180.0, 150.0, 120.0)
         for i, step in enumerate((12, 13, 14, 15)):
             t = bar_t + step * step_dur
-            add_at(out, to_stereo(DR.tom(self.sr, freqs[i], seed=13 + i)),
+            add_at(out, to_stereo(_land(DR.tom(self.sr, freqs[i], seed=13 + i), self.sr)),
                    int(round(t * self.sr)), 0.5 + 0.12 * i)
 
     def _riser(self, out: np.ndarray, slot: Slot) -> None:
