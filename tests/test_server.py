@@ -412,7 +412,7 @@ def test_upload_returns_an_id_and_the_analysis(uploaded) -> None:
     a = uploaded["analysis"]
     assert 60 < a["tempo"]["bpm"] < 200
     assert a["key"]["camelot"] and a["sections"]
-    assert 120 <= uploaded["suggested_bpm"] <= 128
+    assert 124 <= uploaded["suggested_bpm"] <= 132
     assert len(uploaded["wave"]) == 900
     assert uploaded["name"] == "lofi-7.mp3"
 
