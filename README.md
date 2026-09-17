@@ -1,0 +1,250 @@
+# fourfloor
+
+**Put in an mp3 of any song. Get back a house remix — and a session file your DJ software can beat-match and cue against.**
+
+![fourfloor](docs/screenshot.png)
+
+## Why I built this
+
+I have tons of house remixes of original songs on my drive. Some producer took a
+track I love, put it on a four-on-the-floor grid, rebuilt the low end, and made
+it work at 124. I wanted to make my own — and more than that, I wanted my DJ app
+to make one for the *next* track, on the fly, while I'm playing.
+
+So fourfloor does the whole job offline: it works out the tempo, the beat grid,
+the key and the structure of a song, warps it onto a house grid, strips the
+original drums, builds a new kit and bass underneath it, arranges the result into
+a real club form, and writes a `*.session.json` describing exactly where every
+downbeat and cue point is. That last file is the point. My DJ app
+([MixPilot](https://github.com/neelbarmecha)) reads BPM and key from local files;
+now it can read a remix fourfloor just built and sync the transition into it
+without re-analysing a thing.
+
+No cloud, no API key, no model download. numpy and scipy, and ffmpeg for codecs.
+
+## 60-second quickstart
+
+```bash
+git clone https://github.com/neelbarmecha/fourfloor && cd fourfloor
+brew install ffmpeg          # codecs only; all the DSP is numpy/scipy
+make setup                   # .venv + deps
+make demo                    # remix the bundled fixture
+open examples/preview.html   # see what it did, and hear it
+```
+
+Then point it at something of your own:
+
+```bash
+fourfloor inspect ~/Music/song.mp3
+fourfloor remix  ~/Music/song.mp3 -o song.house.mp3 --bpm 124 --preview
+```
+
+## How it works
+
+The pipeline is seven stages. Every one of them is plain numpy/scipy — there is
+no librosa, no torch (unless you opt into demucs), and no pretrained model.
+
+**1. Beat tracking.** A log-mel spectral-flux onset envelope feeds an
+autocorrelation tempo estimate weighted by a log-normal prior over 60–200 BPM,
+with an explicit comb-filter pass to resolve the octave ambiguity that
+autocorrelation always has. Beat positions then come from dynamic programming
+over the envelope, balancing onset strength against deviation from the estimated
+period — Ellis, *Beat Tracking by Dynamic Programming* (JNMR 2007). Downbeats are
+the bar phase whose beat 1 carries the most low-band and onset energy, checked for
+consistency across 8-bar windows. Reported to two decimals, because "124" and
+"123.7" are different tracks to a DJ.
+
+**2. Key and chords.** A tuning-corrected chromagram (the global tuning offset is
+recovered as a magnitude-weighted circular mean of spectral-peak deviations)
+correlated against the 24 rotations of the Krumhansl–Kessler probe-tone profiles.
+The confidence number is the margin to the best key *outside the winner's Camelot
+neighbourhood* — relative-major/minor confusion is harmless when you're mixing, so
+counting it as uncertainty would understate how usable the answer is. Per-bar
+triads come from the same chroma against major/minor templates, and those roots
+are what the bass line plays.
+
+**3. Structure.** Foote checkerboard novelty over a self-similarity matrix built
+from stacked chroma + MFCC features. Peaks give boundaries, snapped to downbeats;
+segments are grouped by feature distance and the most-repeated high-energy group
+is labelled the hook. That is the section the drops are built from.
+
+**4. Phase vocoder.** Standard analysis/resynthesis with two additions that
+matter for remix work: *identity phase locking* (Laroche & Dolson, IEEE TSAP
+1999), so partials stay vertically coherent instead of going phasey, and a
+*transient phase reset* that re-seeds frames whose spectral flux spikes, so a
+kick keeps its attack instead of smearing. Measured: pitch preserved to within
+±10 cents, a click stays inside one sample at 10% of peak, envelope ripple on a
+stretched sine under 3%.
+
+The warp is driven by an arbitrary array of fractional analysis positions, which
+means the source isn't stretched by one global rate — it's warped *beat by beat*
+so every detected beat lands exactly on the target grid, and any tempo drift in
+the original is absorbed along the way.
+
+**Tempo targeting.** Stretching a vocal by 1.55× sounds like a chipmunk in a wind
+tunnel. So fourfloor picks the metrical interpretation with the smallest
+`|log ratio|` among straight, half-time and double-time, and lays the source on
+the grid accordingly. An 80 BPM lofi track into 124 becomes a half-time vocal over
+a 124 kick at a 0.775 stretch — a legitimate house move — rather than a 1.55×
+disaster. It warns when the ratio leaves the 0.8–1.25 window and does it anyway.
+
+**5. Separation.** HPSS by median filtering of the STFT magnitude (Fitzgerald,
+DAFx 2010): horizontal median → harmonic, vertical median → percussive, split
+with soft Wiener masks. The mask is computed once on the mid channel and applied
+to both so the stereo image survives. The house kit *replaces* the original drums;
+the percussive part is kept only as low-level texture where the arrangement asks
+for it. `--stems demucs` swaps in a real four-way neural split (see below).
+
+**6. The house engine.** Everything synthesised in numpy. Kick: a sine with an
+exponential pitch envelope from 190 down to 50 Hz, a sub layer, a highpassed
+beater click, tanh drive. Clap: a four-burst flam into a noise tail, bandpassed at
+the clap formant. Hats: highpassed noise plus six inharmonic partials, swung on
+the odd 16ths. Bass: detuned saws through an envelope-swept low-pass plus a sub
+sine, playing the chord roots the analysis found, transposed by the key shift and
+ducked hard under every kick. Plus risers, impacts, beat-aligned vocal chops,
+convolution reverb throws, and per-slot filter sweeps rendered blockwise with
+interpolated cutoffs and carried filter state so they never click.
+
+The master chain ends with a *matched EQ*: it measures the mix's power in five
+bands and nudges it toward a balance measured from real commercial house remixes.
+That is what stops a synthesised kit from burying the source under sub — it was
+the single biggest quality fix in this build.
+
+**7. Arrangement and handoff.** Integer bars at the target tempo in 8-bar phrases,
+so every cut lands on a downbeat by construction. The default club form is
+16 intro / 8 build / 32 drop / 16 breakdown / 8 build / 32 drop / 16 outro, scaled
+to `--length`. Source sections are mapped onto slots, looped with beat-aligned
+cuts and short crossfades to fill each phrase exactly. Every decision is written
+to `*.plan.json`, and the DJ handoff goes to `*.session.json`.
+
+### The session file
+
+```jsonc
+{
+  "bpm": 124.0,                 // exact: the remix is synthesised on a regular grid
+  "first_downbeat_sec": 0.0,    // so this is genuinely zero, not an estimate
+  "key": "Dm", "camelot": "7A",
+  "semitone_shift": 0,
+  "cues": [ { "name": "drop 1", "bar": 24, "time": 46.45 }, ... ],
+  "energy_per_bar": [ 0.41, 0.44, ... ],
+  "sections": [ { "kind": "drop", "bars": 40, "source_label": "hook", ... } ]
+}
+```
+
+A DJ tool reading this doesn't have to analyse the audio: it knows the tempo is
+exactly 124.00, that bar 1 starts at sample 0, which Camelot code it's in, and
+where every drop and breakdown is. That's everything you need to line up a
+transition automatically.
+
+## CLI reference
+
+```
+fourfloor remix SONG [-o OUT.mp3]
+    --bpm 124                  target tempo (default: learned, or suggested from the source)
+    --key 8A|Am|auto           target key; auto keeps the original
+    --compatible-with T.mp3    shift into a key that mixes with track T (within ±3 semitones)
+    --style style.json         apply a profile from `fourfloor learn`
+    --stems hpss|demucs        separation engine (default hpss)
+    --length 4:30              target length; phrase counts scale to fit
+    --form club|radio|tool     arrangement preset (tool = extended DJ intro/outro)
+    --swing 0.08               hat swing, 0 to 0.66
+    --producer                 let Claude plan the arrangement (optional, see below)
+    --preview                  also write preview.html
+    --json                     print the session JSON instead of a report
+
+fourfloor inspect SONG [--json]      tempo, key, structure timeline, house target
+fourfloor learn FOLDER -o s.json     derive a style profile from a folder of remixes
+                                     (--anonymous omits per-file rows)
+fourfloor preview OUT.mp3            write preview.html next to a finished remix
+```
+
+Outputs per remix: the mp3 (320k) and wav, `*.session.json`, `*.plan.json`, and
+optionally `preview.html`.
+
+## Style learning
+
+`fourfloor learn` measures a folder of house remixes you already like and turns
+them into defaults: median tempo, hi-hat swing (from the lateness of the odd 16th
+onsets), how many bars of DJ intro run before a sustained four-on-the-floor kick
+locks in, breakdown presence and length, spectral tilt and brightness, loudness,
+kick density and typical length.
+
+```bash
+fourfloor learn ~/Desktop/house-refs -o styles/mine.json
+fourfloor remix song.mp3 --style styles/mine.json
+```
+
+`styles/klickaud-refs.json` is a profile learned from five commercial DJ edits —
+aggregate numbers only, no filenames and no audio.
+
+## Optional: demucs stems
+
+```bash
+pip install 'fourfloor[stems]'      # pulls torch, ~900 MB
+fourfloor remix song.mp3 --stems demucs
+```
+
+Runs Hybrid Transformer Demucs (Rouard et al., ICASSP 2023) for a real four-way
+split, which gives a true *vocal house* remix: isolated vocals over a synthesised
+kit and bass, rather than HPSS's harmonic bed. On an M-series Mac it runs around
+8× realtime on CPU. The `bass` stem is deliberately thrown away — replacing the
+low end is the point. Weights download on first run; everything else in fourfloor
+is offline.
+
+## Optional: Claude as the producer
+
+`--producer`, with `ANTHROPIC_API_KEY` set, sends the analysis and the rule-based
+draft plan to Claude and asks it to revise which source section feeds each slot,
+the drum pattern per slot, and the gain — plus a one-line creative note. The
+response is validated field by field and **any** failure (no key, no network, bad
+JSON, an out-of-range value) falls back silently to the deterministic planner. One
+`urllib` call, no SDK dependency. It is genuinely optional: everything above works
+with no key and no network.
+
+## Honest limitations
+
+- **Time-stretching has limits.** Ratios outside 0.8–1.25 are audible. fourfloor
+  warns and proceeds. An 80 BPM source into 124 lands at 0.775 and you can hear it
+  on sustained vocals — that's the trade for not pitching everything up a fourth.
+- **Beat tracking assumes steady 4/4.** Live recordings with real tempo drift are
+  handled by the beat-by-beat warp, but rubato, 3/4, and 6/8 are not. Downbeat
+  confidence is reported; on sparse trap kicks it is often low and honest about it.
+- **Key detection is chroma-based**, so it inherits chroma's problems: heavy
+  808 glide and dense mixes push it around. It reports a confidence — believe it.
+  Relative major/minor is deliberately not counted as an error.
+- **Structural labels are heuristics.** "Hook" means most-repeated-and-loud, which
+  is usually the chorus and sometimes isn't. Read `*.plan.json`; if it picked the
+  wrong section you'll see exactly which one it picked.
+- **HPSS is not stem separation.** It splits sustained from transient, so a
+  sustained synth stays with the vocal and a plucked guitar partly leaks into the
+  "drums". Use `--stems demucs` when you want real vocals.
+- **The arrangement is rule-based**, not musical judgement. It reliably produces a
+  well-formed club track; it will not surprise you.
+- **No true-peak limiting.** Output is normalised to −1.0 dBFS sample peak, which
+  can still overshoot slightly after lossy encoding.
+
+## Tests
+
+```bash
+make test     # 74 tests, ~35s
+```
+
+Covers the beat tracker against synthesised click tracks at 90/124/140 BPM and
+the real fixture, key detection on synthesised progressions in five keys, downbeat
+phase on an accented track, phase-vocoder length/pitch/transient behaviour, HPSS
+energy ratios, arrangement math (every cut on a downbeat, lengths exact), the
+session schema, and a full end-to-end remix asserting duration, peak ≤ −0.9 dBFS,
+RMS in range, kick dominance in the low band, visible sidechain pumping at the
+beat period, and a beat tracker re-reading 124 BPM off the finished file.
+
+## License
+
+MIT © Neel Barmecha. The bundled fixture `fixtures/lofi-7.mp3` and the demo output
+in `examples/` are generated by the sibling
+[groovebox](https://github.com/neelbarmecha/groovebox) project and are MIT too.
+No copyrighted audio is included in this repository.
+
+---
+
+Planned by Claude Fable 5.1, built by a Claude Opus agent in one evening with
+Claude Code.

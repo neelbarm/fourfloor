@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lofi 7 — fourfloor</title>
+<style>
+  :root {
+    --bg: #000000;
+    --panel: rgba(255,255,255,0.055);
+    --panel-line: rgba(255,255,255,0.10);
+    --fg: #f5f5f7;
+    --muted: #86868b;
+    --accent: #ff4d9d;
+    --accent-2: #2ee6d6;
+    --drop: #ff4d9d;
+    --build: #ffb340;
+    --intro: #2ee6d6;
+    --breakdown: #7d8cff;
+    --outro: #6e6e73;
+    --radius: 18px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+                 Roboto, Helvetica, Arial, sans-serif;
+    color: var(--fg);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  .glow {
+    position: fixed; inset: -30% -10% auto -10%; height: 70vh; pointer-events: none;
+    background: radial-gradient(60% 55% at 30% 0%, rgba(255,77,157,0.22), transparent 70%),
+                radial-gradient(50% 50% at 75% 10%, rgba(46,230,214,0.16), transparent 70%);
+    filter: blur(30px); z-index: 0;
+  }
+  .wrap { position: relative; z-index: 1; max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+
+  header { padding: 96px 0 40px; }
+  .eyebrow {
+    font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--muted); font-weight: 590; margin: 0 0 18px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+         box-shadow: 0 0 14px var(--accent); }
+  h1 {
+    font-size: clamp(42px, 8.2vw, 88px); line-height: 0.98; margin: 0 0 20px;
+    font-weight: 700; letter-spacing: -0.038em;
+    background: linear-gradient(180deg, #ffffff 30%, #a9a9b2 130%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .sub { font-size: clamp(17px, 2.2vw, 21px); color: var(--muted); margin: 0; max-width: 62ch;
+         line-height: 1.5; }
+  .sub b { color: var(--fg); font-weight: 590; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(152px, 1fr));
+           gap: 12px; margin: 40px 0 0; }
+  .stat {
+    background: var(--panel); border: 1px solid var(--panel-line);
+    border-radius: var(--radius); padding: 20px 20px 18px;
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+  }
+  .stat .v { font-size: 30px; font-weight: 640; letter-spacing: -0.03em;
+             font-variant-numeric: tabular-nums; }
+  .stat .k { font-size: 12px; color: var(--muted); letter-spacing: 0.07em;
+             text-transform: uppercase; margin-top: 7px; font-weight: 560; }
+  .stat .v.accent { color: var(--accent); }
+  .stat .v.teal { color: var(--accent-2); }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--panel-line);
+    border-radius: 24px; padding: 26px; margin-top: 20px;
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+  }
+  .panel h2 { font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase;
+              color: var(--muted); margin: 0 0 18px; font-weight: 590; }
+
+  audio { width: 100%; height: 38px; margin-bottom: 20px; filter: invert(0.92) hue-rotate(180deg); }
+
+  .canvas-wrap { position: relative; }
+  canvas { width: 100%; height: 190px; display: block; border-radius: 12px; cursor: pointer; }
+  #head { position: absolute; top: 0; bottom: 0; width: 1.5px; background: #fff;
+          box-shadow: 0 0 12px rgba(255,255,255,0.85); pointer-events: none;
+          transform: translateX(0); left: 0; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px; padding: 7px 13px;
+    border-radius: 999px; font-size: 12.5px; font-weight: 560;
+    border: 1px solid var(--panel-line); background: rgba(255,255,255,0.045);
+    cursor: pointer; transition: background .18s ease, transform .18s ease;
+    color: var(--fg);
+  }
+  .chip:hover { background: rgba(255,255,255,0.11); transform: translateY(-1px); }
+  .chip i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .chip small { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  #tip {
+    position: fixed; pointer-events: none; opacity: 0; transform: translate(-50%, -118%);
+    background: rgba(28,28,30,0.92); border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 12px; padding: 11px 14px; font-size: 12.5px; line-height: 1.5;
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    transition: opacity .14s ease; max-width: 300px; z-index: 10;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+  }
+  #tip b { display: block; font-size: 13.5px; margin-bottom: 3px; letter-spacing: -0.01em; }
+  #tip span { color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th { text-align: left; font-weight: 560; color: var(--muted); font-size: 11.5px;
+       letter-spacing: 0.08em; text-transform: uppercase; padding: 0 12px 12px 0; }
+  td { padding: 11px 12px 11px 0; border-top: 1px solid rgba(255,255,255,0.07);
+       font-variant-numeric: tabular-nums; vertical-align: top; }
+  td.note { color: var(--muted); font-variant-numeric: normal; }
+  .tag { display: inline-flex; align-items: center; gap: 6px; font-weight: 590; }
+  .tag i { width: 8px; height: 8px; border-radius: 2px; }
+
+  footer { margin-top: 48px; color: var(--muted); font-size: 13px; line-height: 1.7; }
+  footer code { background: rgba(255,255,255,0.08); padding: 2px 7px; border-radius: 6px;
+                font-size: 12px; }
+  a { color: var(--accent-2); text-decoration: none; }
+  @media (max-width: 640px) {
+    header { padding: 56px 0 28px; }
+    .wrap { padding: 0 16px 64px; }
+    .panel { padding: 18px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="glow"></div>
+<div class="wrap">
+  <header>
+    <p class="eyebrow"><span class="dot"></span> fourfloor house remix</p>
+    <h1>lofi 7</h1>
+    <p class="sub">124.00 BPM &middot; <b>Dm</b> &middot; Camelot <b>7A</b>
+       &middot; 4:23 &middot; built from <b>lofi-7.mp3</b></p>
+    <div class="stats" id="stats"></div>
+  </header>
+
+  <section class="panel">
+    <h2>Player</h2>
+    <audio id="audio" controls preload="metadata" src="lofi-7.house.mp3"></audio>
+    <div class="canvas-wrap">
+      <canvas id="wave"></canvas>
+      <div id="head"></div>
+    </div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Arrangement</h2>
+    <table>
+      <thead><tr><th>Slot</th><th>Time</th><th>Bars</th><th>From source</th><th>Decision</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+
+  <footer>
+    <p>Session file: <code>lofi-7.house.session.json</code> — exact BPM, first-downbeat offset, key,
+       cue points and a per-bar energy curve, so a DJ app can beat-match and cue this
+       remix without re-analysing it.</p>
+    <p>Generated by <a href="https://github.com/">fourfloor</a>.</p>
+  </footer>
+</div>
+
+<div id="tip"></div>
+
+<script>
+const SESSION = {"schema": 2, "generator": "fourfloor", "file": "lofi-7.house.mp3", "bpm": 124.0, "first_downbeat_sec": 0.0, "beats_per_bar": 4, "beat_duration_sec": 0.483871, "key": "Dm", "camelot": "7A", "semitone_shift": 0, "duration": 263.226, "bars": 136, "cues": [{"name": "intro", "bar": 0, "time": 0.0, "kind": "intro"}, {"name": "build 1", "bar": 16, "time": 30.9677, "kind": "build"}, {"name": "drop 1", "bar": 24, "time": 46.4516, "kind": "drop"}, {"name": "breakdown", "bar": 64, "time": 123.871, "kind": "breakdown"}, {"name": "build 2", "bar": 80, "time": 154.8387, "kind": "build"}, {"name": "drop 2", "bar": 88, "time": 170.3226, "kind": "drop"}, {"name": "outro", "bar": 120, "time": 232.2581, "kind": "outro"}, {"name": "end", "bar": 136, "time": 263.2258, "kind": "end"}], "sections": [{"kind": "intro", "start_bar": 0, "bars": 16, "start": 0.0, "end": 30.9677, "source_label": "hook", "source_start": 45.4715, "note": "DJ intro: kick and hats only, source high-passed so it does not fight the outgoing track"}, {"kind": "build", "start_bar": 16, "bars": 8, "start": 30.9677, "end": 46.4516, "source_label": "hook", "source_start": 45.4715, "note": "riser + beat-aligned vocal chops, high-pass climbing into the drop"}, {"kind": "drop", "start_bar": 24, "bars": 40, "start": 46.4516, "end": 123.871, "source_label": "hook", "source_start": 45.4715, "note": "hook section, full kit, bass on the detected chord roots"}, {"kind": "breakdown", "start_bar": 64, "bars": 16, "start": 123.871, "end": 154.8387, "source_label": "verse", "source_start": 29.9848, "note": "no kick, harmonic part only, filter opening across the section"}, {"kind": "build", "start_bar": 80, "bars": 8, "start": 154.8387, "end": 170.3226, "source_label": "hook", "source_start": 45.4715, "note": "riser + beat-aligned vocal chops, high-pass climbing into the drop"}, {"kind": "drop", "start_bar": 88, "bars": 32, "start": 170.3226, "end": 232.2581, "source_label": "hook", "source_start": 45.4715, "note": "hook section, full kit, bass on the detected chord roots, offbeat stabs"}, {"kind": "outro", "start_bar": 120, "bars": 16, "start": 232.2581, "end": 263.2258, "source_label": "hook", "source_start": 45.4715, "note": "DJ outro: source filtered away, drums thin out for the next mix"}], "energy_per_bar": [0.5654, 0.5763, 0.5942, 0.6013, 0.5788, 0.5822, 0.5865, 0.6203, 0.5934, 0.5849, 0.5907, 0.593, 0.5858, 0.6031, 0.5948, 0.5795, 0.6259, 0.6366, 0.6377, 0.6409, 0.6199, 0.6132, 0.6267, 0.6549, 0.6729, 0.7198, 0.6743, 0.7206, 0.6617, 0.7142, 0.6852, 0.7358, 0.6791, 0.7195, 0.6827, 0.698, 0.6695, 0.7116, 0.6466, 0.6628, 0.6679, 0.648, 0.6882, 0.7134, 0.6744, 0.7144, 0.67, 0.7189, 0.6867, 0.735, 0.6912, 0.7178, 0.688, 0.6901, 0.672, 0.7068, 0.6865, 0.6494, 0.6367, 0.6607, 0.6822, 0.7165, 0.6691, 0.7242, 0.3167, 0.564, 0.3967, 0.5686, 0.405, 0.4555, 0.4212, 0.5274, 0.3163, 0.567, 0.394, 0.5705, 0.402, 0.4595, 0.5235, 1.0, 0.6133, 0.63, 0.6146, 0.6415, 0.6038, 0.6235, 0.62, 0.6642, 0.6704, 0.7183, 0.6759, 0.7144, 0.6727, 0.7179, 0.6858, 0.7318, 0.6762, 0.7271, 0.6858, 0.7039, 0.6636, 0.7129, 0.6619, 0.6659, 0.6436, 0.6566, 0.6785, 0.7095, 0.6834, 0.7153, 0.6753, 0.7248, 0.679, 0.7401, 0.6767, 0.7238, 0.6901, 0.6929, 0.6836, 0.7233, 0.5934, 0.6165, 0.5924, 0.6111, 0.5923, 0.5911, 0.5875, 0.6048, 0.5874, 0.5955, 0.5956, 0.5889, 0.5989, 0.6066, 0.5918, 0.5988], "loudness": {"peak_db": -1.0, "rms_db": -8.45}, "tempo_plan": {"source_bpm": 79.98, "target_bpm": 124.0, "beat_multiple": 2.0, "stretch_ratio": 0.7752, "interpretation": "half-time", "warning": "stretch ratio 0.775 is outside the comfortable 0.8-1.25 window; expect audible time-stretch artefacts"}, "source": {"file": "lofi-7.mp3", "bpm": 79.98, "key": "Dm", "camelot": "7A", "key_confidence": 0.649, "duration": 62.6, "separation": "hpss"}};
+const WAVE = [0.9577, 0.6065, 0.9502, 0.8752, 0.4305, 0.9533, 0.5761, 0.9496, 0.8627, 0.5537, 0.9561, 0.6293, 0.9502, 0.9364, 0.6003, 0.9513, 0.8252, 0.4328, 0.9518, 0.5699, 0.9546, 0.9072, 0.4866, 0.955, 0.5721, 0.9566, 0.9341, 0.5968, 0.9531, 0.647, 0.9529, 0.9531, 0.7036, 0.957, 0.8242, 0.5727, 0.9567, 0.7148, 0.9563, 0.893, 0.5181, 0.9423, 0.6125, 0.9555, 0.9235, 0.5815, 0.9561, 0.6908, 0.9382, 0.953, 0.54, 0.9556, 0.7904, 0.4242, 0.9402, 0.5775, 0.949, 0.9321, 0.5935, 0.9568, 0.6157, 0.9429, 0.8916, 0.6953, 0.954, 0.6534, 0.9564, 0.9559, 0.6431, 0.9548, 0.7917, 0.4498, 0.9501, 0.682, 0.9563, 0.9539, 0.7253, 0.9605, 0.8317, 0.94, 0.9281, 0.7561, 0.9516, 0.6784, 0.9308, 0.9529, 0.6507, 0.9555, 0.9218, 0.4746, 0.9557, 0.6776, 0.9556, 0.8756, 0.6155, 0.9336, 0.6384, 0.9512, 0.9557, 0.7364, 0.9509, 0.6583, 0.9299, 0.9466, 0.6345, 0.9483, 0.8587, 0.5424, 0.9555, 0.6728, 0.9506, 0.89, 0.6466, 0.9531, 0.7029, 0.955, 0.9495, 0.6937, 0.9528, 0.7108, 0.9475, 0.9523, 0.6029, 0.9493, 0.8302, 0.513, 0.9552, 0.6359, 0.951, 0.8939, 0.5735, 0.9516, 0.6548, 0.957, 0.9543, 0.732, 0.9389, 0.6954, 0.9511, 0.9565, 0.7803, 0.9541, 0.8576, 0.4661, 0.9569, 0.6896, 0.9487, 0.9014, 0.6638, 0.9535, 0.6229, 0.953, 0.9553, 0.6646, 0.9565, 0.7581, 0.7158, 0.9507, 0.5544, 0.9568, 0.8579, 0.4329, 0.9565, 0.593, 0.9704, 0.9487, 0.8986, 0.964, 0.8041, 0.9756, 0.9602, 0.884, 0.9764, 0.9374, 0.6816, 0.9679, 0.906, 0.9577, 0.9437, 0.8093, 0.9583, 0.9103, 0.9589, 0.9596, 0.9048, 0.954, 0.8911, 0.9728, 0.9598, 0.8439, 0.9826, 0.8652, 0.6767, 0.9721, 0.8519, 0.9585, 0.9404, 0.7673, 0.9859, 0.8689, 0.9793, 0.952, 0.9499, 0.9627, 0.8598, 0.9744, 0.9524, 0.8605, 0.963, 0.9311, 0.6507, 0.9595, 0.83, 0.9638, 0.955, 0.7241, 0.9849, 0.8137, 0.9695, 0.9645, 0.8357, 0.9723, 0.8266, 0.9899, 0.9706, 0.8716, 0.9613, 0.864, 0.7534, 0.9693, 0.9054, 0.9834, 0.9518, 0.7638, 0.9954, 0.9074, 0.9754, 0.9633, 0.8571, 0.9678, 0.9041, 0.992, 0.9652, 0.8753, 0.9671, 0.9655, 0.9479, 0.9743, 0.9393, 0.9746, 0.9655, 0.9669, 0.9712, 0.9444, 0.9758, 0.978, 0.9544, 0.9593, 0.8999, 0.9434, 0.9739, 0.9219, 0.9632, 0.9444, 0.9091, 0.9614, 0.9651, 0.9571, 0.9508, 0.9167, 0.9925, 0.8929, 0.9555, 0.956, 0.9462, 0.9612, 0.9443, 0.9725, 0.9612, 0.9091, 0.969, 0.9581, 0.9042, 0.969, 0.9508, 0.9655, 0.9678, 0.9242, 0.96, 0.8937, 0.9727, 0.9584, 0.9366, 0.9572, 0.9866, 0.9796, 0.9642, 0.9444, 0.9592, 0.9575, 0.9295, 0.9701, 0.9463, 0.9666, 0.9503, 0.9362, 0.969, 0.922, 0.9393, 0.9479, 0.9301, 0.9682, 0.9602, 0.9558, 0.9667, 0.9668, 0.9677, 0.9606, 0.9431, 0.9597, 0.9492, 0.9663, 0.9645, 0.9529, 0.9576, 0.9565, 0.9638, 0.9693, 0.8842, 0.9709, 0.9113, 0.9754, 0.9666, 0.9777, 0.9638, 0.9486, 0.9307, 0.9615, 0.9596, 0.9541, 0.954, 0.9478, 0.9689, 0.954, 0.9621, 0.9481, 0.9412, 0.9762, 0.9791, 0.8822, 0.9615, 0.9084, 0.9687, 0.9587, 0.9595, 0.9557, 0.9705, 0.9708, 0.9566, 0.94, 0.9602, 0.9761, 0.9716, 0.9634, 0.9325, 0.955, 0.9376, 0.8967, 0.9649, 0.9635, 0.9596, 0.9533, 0.8468, 0.9714, 0.9351, 0.9661, 0.954, 0.9856, 0.9664, 0.9071, 0.9655, 0.9592, 0.9822, 0.959, 0.9495, 0.9366, 0.9517, 0.9394, 0.9538, 0.9779, 0.9303, 0.953, 0.8979, 0.9728, 0.9722, 0.952, 0.9533, 0.9727, 0.968, 0.9607, 0.9658, 0.9673, 0.9544, 0.8239, 0.9639, 0.9807, 0.9644, 0.9558, 1.0, 0.9889, 0.9872, 0.9741, 0.957, 0.9656, 0.9673, 0.98, 0.9621, 0.9622, 0.9974, 0.9911, 0.9886, 0.8142, 0.9671, 0.9629, 0.9674, 0.9602, 0.9719, 0.9781, 0.9882, 0.9873, 0.9654, 0.9842, 0.9717, 0.9088, 0.9744, 0.9626, 0.9718, 0.9606, 0.9678, 0.8835, 0.9656, 0.9872, 0.9734, 0.9495, 0.9281, 0.9604, 0.971, 0.9634, 0.9577, 0.9723, 0.9613, 0.9463, 0.9627, 0.9517, 0.9536, 0.9699, 0.968, 0.9668, 0.9533, 0.9607, 0.9635, 0.9728, 0.9016, 0.9639, 0.9424, 0.9763, 0.9642, 0.9292, 0.9597, 0.9553, 0.9455, 0.9568, 0.9273, 0.9665, 0.9256, 0.8548, 0.9602, 0.9773, 0.962, 0.952, 0.9542, 0.9635, 0.952, 0.9621, 0.9594, 0.9082, 0.955, 0.9472, 0.9526, 0.9527, 0.9736, 0.993, 0.957, 0.9818, 0.9541, 0.9279, 0.9645, 0.9658, 0.9489, 0.958, 0.9706, 0.9563, 0.9637, 0.9424, 0.9613, 0.9593, 0.9439, 0.9594, 0.967, 0.947, 0.946, 0.9339, 0.9636, 0.9299, 0.9621, 0.9616, 0.954, 0.9779, 0.9476, 0.9627, 0.9609, 0.9709, 0.97, 0.9644, 0.8774, 0.9554, 0.9645, 0.9661, 0.9424, 0.9474, 0.9617, 0.978, 0.9731, 0.9669, 0.9354, 0.9654, 0.902, 0.9697, 0.9687, 0.9707, 0.9775, 0.9778, 0.9, 0.9879, 0.9533, 0.9564, 0.9495, 0.9664, 0.963, 0.9382, 0.9487, 0.9474, 0.9775, 0.9747, 0.9785, 0.9568, 0.9591, 0.9294, 0.9674, 0.969, 0.8657, 0.9606, 0.9664, 0.9645, 0.9585, 0.9061, 0.957, 0.9848, 0.9667, 0.9594, 0.9543, 0.9571, 0.9684, 0.9445, 0.9631, 0.9545, 0.96, 0.9672, 0.9006, 0.9677, 0.9803, 0.9591, 0.9501, 0.9783, 0.9772, 0.9529, 0.9667, 0.9491, 0.925, 0.9862, 0.9894, 0.9604, 0.9618, 0.996, 0.9631, 0.9675, 0.8259, 0.9772, 0.9721, 0.9667, 0.9602, 0.9677, 0.9628, 0.9936, 0.9901, 0.9634, 0.9811, 0.9668, 0.9781, 0.9666, 0.9627, 0.9769, 0.9654, 0.995, 0.9002, 0.9869, 0.9856, 0.956, 0.9701, 0.9503, 0.9682, 0.9653, 0.9607, 0.9531, 0.9773, 0.9601, 0.9507, 0.9712, 0.9621, 0.9442, 0.9651, 0.96, 0.9642, 0.96, 0.9538, 0.9663, 0.9543, 0.9464, 0.9596, 0.9447, 0.9801, 0.9586, 0.9528, 0.9598, 0.9701, 0.9305, 0.9683, 0.951, 0.9662, 0.9692, 0.9672, 0.9597, 0.9023, 0.9654, 0.9671, 0.9535, 0.9594, 0.9482, 0.9303, 0.5824, 0.5525, 0.4922, 0.4906, 0.4696, 0.6721, 0.5994, 0.7072, 0.7995, 0.7883, 0.6573, 0.8805, 0.8759, 0.9113, 0.9024, 0.9015, 0.8914, 0.9001, 0.9021, 0.8806, 0.9039, 0.8068, 0.6733, 0.6249, 0.3828, 0.7308, 0.6756, 0.6539, 0.7925, 0.74, 0.6967, 0.6895, 0.8358, 0.8668, 0.8733, 0.8625, 0.9394, 0.819, 0.8386, 0.911, 0.9224, 0.9322, 0.6523, 0.7053, 0.724, 0.7049, 0.7086, 0.6018, 0.776, 0.7471, 0.6618, 0.6979, 0.7477, 0.7125, 0.8296, 0.8121, 0.9266, 0.8127, 0.6402, 0.7452, 0.7361, 0.8258, 0.8821, 0.692, 0.6837, 0.4193, 0.6616, 0.818, 0.555, 0.731, 0.57, 0.6094, 0.7453, 0.8397, 0.9503, 0.7949, 0.8488, 0.8832, 0.77, 0.8425, 0.838, 0.7035, 0.6714, 0.542, 0.5035, 0.5072, 0.4883, 0.7232, 0.6472, 0.6474, 0.7591, 0.8635, 0.6609, 0.8805, 0.8879, 0.9097, 0.9078, 0.9115, 0.8954, 0.8997, 0.8625, 0.8554, 0.9135, 0.8145, 0.7251, 0.6322, 0.4186, 0.7928, 0.7058, 0.6494, 0.7932, 0.7812, 0.6383, 0.6964, 0.838, 0.8614, 0.8652, 0.8625, 0.9372, 0.8688, 0.8049, 0.9029, 0.9331, 0.9357, 0.7354, 0.7157, 0.7279, 0.7458, 0.7096, 0.6596, 0.5406, 0.7172, 0.6894, 0.708, 0.7164, 0.7485, 0.7601, 0.8429, 0.9291, 0.9381, 0.6838, 0.796, 0.6609, 0.8028, 0.8795, 0.7091, 0.6268, 0.7553, 0.6305, 0.8369, 0.8992, 0.8917, 0.8221, 0.9313, 0.9412, 0.9651, 0.959, 0.9643, 0.9708, 0.9742, 0.9795, 0.9893, 0.9717, 0.973, 0.9706, 0.8758, 0.6601, 0.9919, 0.8522, 0.9875, 0.9311, 0.8353, 0.964, 0.917, 0.961, 0.9483, 0.8844, 0.9617, 0.9364, 0.9598, 0.9566, 0.9121, 0.9584, 0.9548, 0.7902, 0.9707, 0.8828, 0.9647, 0.9606, 0.8269, 0.9766, 0.8133, 0.9607, 0.9611, 0.8523, 0.9776, 0.922, 0.9568, 0.9616, 0.8761, 0.9654, 0.9461, 0.7581, 0.9669, 0.9178, 0.9599, 0.9359, 0.7836, 0.9612, 0.8449, 0.9746, 0.9536, 0.8137, 0.9832, 0.948, 0.6095, 0.9699, 0.84, 0.9658, 0.9564, 0.7784, 0.9835, 0.8382, 0.9737, 0.9591, 0.8705, 0.9776, 0.8256, 0.9882, 0.9674, 0.8785, 0.9689, 0.9055, 0.6414, 0.9668, 0.9438, 0.9635, 0.9629, 0.7383, 0.9968, 0.8376, 0.9687, 0.9619, 0.8801, 0.972, 0.9589, 0.9698, 0.9632, 0.9562, 0.9841, 0.9639, 0.8521, 0.9685, 0.9462, 0.9642, 0.9636, 0.9463, 0.9688, 0.8751, 0.9501, 0.9869, 0.9735, 0.9782, 0.9501, 0.9672, 0.9575, 0.9723, 0.9587, 0.9441, 0.9291, 0.9698, 0.9391, 0.9577, 0.9545, 0.9461, 0.9735, 0.9489, 0.9656, 0.9466, 0.9138, 0.9587, 0.9654, 0.9604, 0.9662, 0.9495, 0.9676, 0.9704, 0.8977, 0.9643, 0.8937, 0.9696, 0.9599, 0.9586, 0.9713, 0.9901, 0.9619, 0.9672, 0.9346, 0.9653, 0.9606, 0.9549, 0.9462, 0.9514, 0.9596, 0.9659, 0.9366, 0.9627, 0.929, 0.9645, 0.951, 0.9451, 0.9758, 0.9105, 0.9691, 0.9641, 0.9526, 0.9661, 0.9495, 0.9662, 0.9722, 0.9383, 0.9666, 0.9534, 0.954, 0.9611, 0.9527, 0.966, 0.9542, 0.9126, 0.9578, 0.9397, 0.9665, 0.9616, 0.9658, 0.9719, 0.9381, 0.9602, 0.9598, 0.9476, 0.957, 0.9672, 0.9381, 0.9639, 0.9337, 0.9534, 0.9565, 0.9532, 0.9633, 0.9518, 0.9621, 0.956, 0.9198, 0.9681, 0.94, 0.9614, 0.9664, 0.984, 0.9757, 0.9497, 0.933, 0.9582, 0.978, 0.9753, 0.9635, 0.944, 0.9584, 0.9831, 0.957, 0.9682, 0.9818, 0.9623, 0.9205, 0.9665, 0.9717, 0.9377, 0.958, 0.9651, 0.9176, 0.9748, 0.9351, 0.985, 0.9569, 0.9819, 0.9751, 0.9356, 0.9673, 0.9452, 0.9546, 0.9704, 0.9886, 0.9248, 0.9648, 0.9386, 0.9773, 0.994, 0.8199, 0.9523, 0.9575, 0.9713, 0.9584, 0.9567, 0.9669, 0.953, 0.9676, 0.9649, 0.9678, 0.9757, 0.9943, 0.8275, 0.9908, 0.9847, 0.9687, 0.9392, 0.9633, 0.9702, 0.9635, 0.9788, 0.9501, 0.9972, 0.9747, 0.9732, 0.9709, 0.9623, 0.9637, 0.9913, 0.9825, 0.841, 0.963, 0.9933, 0.9707, 0.9643, 0.9665, 0.9652, 0.9473, 0.9689, 0.9637, 0.9831, 0.963, 0.9622, 0.9663, 0.9688, 0.9892, 0.962, 0.9419, 0.8908, 0.9629, 0.9592, 0.9616, 0.9684, 0.9213, 0.9648, 0.9491, 0.9648, 0.9504, 0.9451, 0.9611, 0.9693, 0.9621, 0.9546, 0.9641, 0.9691, 0.9581, 0.8949, 0.9648, 0.9474, 0.9804, 0.9555, 0.9124, 0.9584, 0.9607, 0.9652, 0.9594, 0.9173, 0.9817, 0.9192, 0.9634, 0.9683, 0.9671, 0.967, 0.9503, 0.8615, 0.976, 0.9437, 0.9661, 0.9618, 0.9408, 0.9604, 0.9368, 0.9573, 0.9532, 0.9709, 0.9685, 0.9676, 0.9391, 0.955, 0.9434, 0.9847, 0.9677, 0.9249, 0.9638, 0.9728, 0.9672, 0.959, 0.9623, 0.9628, 0.9642, 0.9603, 0.9727, 0.956, 0.957, 0.9542, 0.9652, 0.9653, 0.943, 0.9611, 0.9459, 0.9665, 0.969, 0.9614, 0.9741, 0.9623, 0.947, 0.9755, 0.9299, 0.96, 0.9525, 0.9627, 0.9635, 0.9502, 0.9651, 0.9562, 0.9801, 0.9937, 0.9679, 0.9363, 0.9669, 0.9017, 0.9735, 0.9616, 0.9612, 0.9694, 0.975, 0.9627, 0.9599, 0.9562, 0.9577, 0.9782, 0.95, 0.9616, 0.9473, 0.9554, 0.9784, 0.9533, 0.9654, 0.9693, 0.9591, 0.9591, 0.9286, 0.9797, 0.9801, 0.9562, 0.9596, 0.9719, 0.9677, 0.977, 0.8243, 0.9758, 0.982, 0.9594, 0.9621, 0.9593, 0.9623, 0.9646, 0.9588, 0.9632, 0.9664, 0.9574, 0.7079, 0.9678, 0.9624, 0.6595, 0.9575, 0.8079, 0.5154, 0.955, 0.5787, 0.953, 0.9398, 0.6482, 0.9558, 0.7525, 0.9547, 0.9151, 0.7215, 0.9556, 0.7411, 0.9567, 0.9561, 0.6139, 0.9701, 0.894, 0.4774, 0.9574, 0.611, 0.9553, 0.9088, 0.4999, 0.958, 0.7196, 0.9528, 0.957, 0.6917, 0.9553, 0.7661, 0.952, 0.9591, 0.6628, 0.9562, 0.811, 0.5741, 0.9605, 0.7207, 0.956, 0.9158, 0.5348, 0.9589, 0.5696, 0.9552, 0.9154, 0.5957, 0.9575, 0.8346, 0.9441, 0.9565, 0.6591, 0.9596, 0.8327, 0.4524, 0.9524, 0.6643, 0.9669, 0.9556, 0.6288, 0.9555, 0.5981, 0.9594, 0.9423, 0.5729, 0.9523, 0.69, 0.9801, 0.9606, 0.7133, 0.9518, 0.8875, 0.6484, 0.9632, 0.5965, 0.9523, 0.9248, 0.5373, 0.9614, 0.6478, 0.955, 0.9558, 0.6248, 0.959, 0.6801, 0.9553, 0.9546, 0.6106, 0.9626, 0.9332, 0.4587, 0.9548, 0.6258, 0.9578, 0.9333, 0.492, 0.9572, 0.6109, 0.9614, 0.9592, 0.6085, 0.956, 0.7338, 0.9632, 0.9543, 0.5065, 0.9623, 0.8652, 0.5048, 0.9626, 0.6613, 0.9559, 0.8903, 0.561, 0.9597, 0.6443, 0.9623, 0.9561, 0.5904, 0.9687, 0.9038, 0.9623, 0.9557, 0.5915, 0.9633, 0.9103, 0.4226, 0.957, 0.6297, 0.9705, 0.957, 0.6156, 0.9575, 0.6372, 0.9647, 0.9561, 0.513, 0.9563, 0.706, 0.9774, 0.9594, 0.6732, 0.9565, 0.8958, 0.5215, 0.965, 0.5335, 0.9597, 0.9321, 0.5941, 0.9648, 0.6994, 0.9583, 0.9564, 0.5929, 0.961, 0.737, 0.3547];
+const COLORS = { intro:'#2ee6d6', build:'#ffb340', drop:'#ff4d9d',
+                 breakdown:'#7d8cff', outro:'#6e6e73', end:'#6e6e73' };
+
+const fmt = s => { const m = Math.floor(s/60), r = Math.round(s%60);
+                   return m + ':' + String(r).padStart(2,'0'); };
+
+/* ---------- count-up stats ---------- */
+const STATS = [
+  { k:'BPM',    v:SESSION.bpm,                         d:2, cls:'accent' },
+  { k:'Key',    t:SESSION.key + ' / ' + SESSION.camelot,     cls:'teal' },
+  { k:'Bars',   v:SESSION.bars,                        d:0 },
+  { k:'Drops',  v:SESSION.sections.filter(s=>s.kind==='drop').length, d:0 },
+  { k:'Peak',   t:SESSION.loudness.peak_db.toFixed(1) + ' dB' },
+  { k:'RMS',    t:SESSION.loudness.rms_db.toFixed(1) + ' dB' },
+];
+const statsEl = document.getElementById('stats');
+STATS.forEach((s, i) => {
+  const el = document.createElement('div');
+  el.className = 'stat';
+  el.innerHTML = `<div class="v ${s.cls||''}">${s.t !== undefined ? s.t : '0'}</div>
+                  <div class="k">${s.k}</div>`;
+  statsEl.appendChild(el);
+  if (s.v === undefined) return;
+  const out = el.querySelector('.v');
+  const dur = 900, t0 = performance.now() + i * 70;
+  const tick = now => {
+    const p = Math.min(1, Math.max(0, (now - t0) / dur));
+    const e = 1 - Math.pow(1 - p, 3);
+    out.textContent = (s.v * e).toFixed(s.d);
+    if (p < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+});
+
+/* ---------- waveform + section map ---------- */
+const cv = document.getElementById('wave');
+const ctx = cv.getContext('2d');
+const total = SESSION.duration;
+let W = 0, H = 0;
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  const mid = H * 0.56, half = H * 0.42;
+
+  /* section bands behind the waveform */
+  SESSION.sections.forEach(s => {
+    const x0 = s.start / total * W, x1 = s.end / total * W;
+    const c = COLORS[s.kind] || '#6e6e73';
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, c + '30'); g.addColorStop(1, c + '06');
+    ctx.fillStyle = g;
+    ctx.fillRect(x0, 0, x1 - x0, H);
+    ctx.fillStyle = c + 'cc';
+    ctx.fillRect(x0, H - 3, Math.max(1, x1 - x0 - 1), 3);
+  });
+
+  /* waveform */
+  const n = WAVE.length;
+  for (let i = 0; i < n; i++) {
+    const x = i / n * W;
+    const sec = i / n * total;
+    const s = SESSION.sections.find(v => sec >= v.start && sec < v.end);
+    ctx.fillStyle = (COLORS[s ? s.kind : 'outro'] || '#6e6e73') + 'e0';
+    const h = Math.max(1, WAVE[i] * half);
+    ctx.fillRect(x, mid - h, Math.max(1, W / n - 0.35), h * 1.35);
+  }
+
+  /* cue markers */
+  ctx.font = '500 10px -apple-system, system-ui, sans-serif';
+  SESSION.cues.forEach(c => {
+    if (c.kind === 'end') return;
+    const x = c.time / total * W;
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillRect(x, 0, 1, H - 3);
+    ctx.fillStyle = 'rgba(255,255,255,0.72)';
+    ctx.fillText(c.name, x + 5, 13);
+  });
+}
+
+/* ---------- playhead ---------- */
+const audio = document.getElementById('audio');
+const head = document.getElementById('head');
+function frame() {
+  const p = (audio.currentTime || 0) / total;
+  head.style.transform = 'translateX(' + (p * W) + 'px)';
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+cv.addEventListener('click', e => {
+  const r = cv.getBoundingClientRect();
+  audio.currentTime = Math.max(0, Math.min(total, (e.clientX - r.left) / r.width * total));
+});
+
+/* ---------- hover tooltip ---------- */
+const tip = document.getElementById('tip');
+cv.addEventListener('mousemove', e => {
+  const r = cv.getBoundingClientRect();
+  const sec = (e.clientX - r.left) / r.width * total;
+  const s = SESSION.sections.find(v => sec >= v.start && sec < v.end);
+  if (!s) { tip.style.opacity = 0; return; }
+  tip.innerHTML = `<b style="color:${COLORS[s.kind]||'#fff'}">${s.kind} &middot; ${s.bars} bars</b>
+    <span>${fmt(s.start)}–${fmt(s.end)} &middot; from the source <b style="color:#f5f5f7">
+    ${s.source_label}</b> at ${fmt(s.source_start)}<br>${s.note}</span>`;
+  tip.style.left = e.clientX + 'px';
+  tip.style.top = r.top + 'px';
+  tip.style.opacity = 1;
+});
+cv.addEventListener('mouseleave', () => { tip.style.opacity = 0; });
+
+/* ---------- legend + table ---------- */
+const legend = document.getElementById('legend');
+SESSION.cues.filter(c => c.kind !== 'end').forEach(c => {
+  const b = document.createElement('button');
+  b.className = 'chip';
+  b.innerHTML = `<i style="background:${COLORS[c.kind]||'#6e6e73'}"></i>${c.name}
+                 <small>${fmt(c.time)}</small>`;
+  b.addEventListener('click', () => { audio.currentTime = c.time; audio.play(); });
+  legend.appendChild(b);
+});
+
+const rows = document.getElementById('rows');
+SESSION.sections.forEach(s => {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td><span class="tag"><i style="background:${COLORS[s.kind]||'#6e6e73'}"></i>
+                  ${s.kind}</span></td>
+                  <td>${fmt(s.start)}</td><td>${s.bars}</td>
+                  <td>${s.source_label} @ ${fmt(s.source_start)}</td>
+                  <td class="note">${s.note}</td>`;
+  rows.appendChild(tr);
+});
+
+window.addEventListener('resize', resize);
+resize();
+</script>
+</body>
+</html>

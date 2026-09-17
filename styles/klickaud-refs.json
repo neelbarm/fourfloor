@@ -1,0 +1,16 @@
+{
+  "bpm": 132.39,
+  "bpm_spread": 2.54,
+  "swing": 0.0258,
+  "intro_bars": 8,
+  "breakdown_ratio": 1.0,
+  "breakdown_bars": 8,
+  "spectral_tilt": -15.105,
+  "brightness_hz": 699.1,
+  "rms_db": -10.58,
+  "peak_db": 1.24,
+  "kick_density": 0.582,
+  "length": 232.7,
+  "n_refs": 5,
+  "schema": 1
+}
