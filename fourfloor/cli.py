@@ -1,4 +1,4 @@
-"""Command line interface: remix, inspect, learn, preview."""
+"""Command line interface: fetch, remix, inspect, learn, preview."""
 
 from __future__ import annotations
 
@@ -40,7 +40,9 @@ def _parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     r = sub.add_parser("remix", help="build a house remix of a song")
-    r.add_argument("input", help="source audio file (mp3, m4a, wav, flac…)")
+    r.add_argument("input", nargs="?", help="source audio file (mp3, m4a, wav, flac…)")
+    r.add_argument("--url", metavar="LINK", default=None,
+                   help="fetch the source from a YouTube or SoundCloud link instead")
     r.add_argument("-o", "--output", help="output path (.mp3 or .wav)")
     r.add_argument("--bpm", type=float, help="target tempo (default: learned or suggested)")
     r.add_argument("--key", help="target key: 'Am', 'F#', '8A' or 'auto'")
@@ -61,8 +63,25 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("-q", "--quiet", action="store_true")
 
     i = sub.add_parser("inspect", help="analyse a track and print a report")
-    i.add_argument("input")
+    i.add_argument("input", nargs="?")
+    i.add_argument("--url", metavar="LINK", default=None,
+                   help="fetch a YouTube or SoundCloud link into a temp folder first")
     i.add_argument("--json", action="store_true")
+
+    f = sub.add_parser("fetch", help="download a track from a link (yt-dlp)")
+    f.add_argument("url", nargs="?", help="a track, playlist or SoundCloud set")
+    f.add_argument("--to", default=None, metavar="DEST",
+                   help="'remixes', 'pairs' or a folder "
+                        "(default: ~/Music/house-refs/remixes)")
+    f.add_argument("--name", default=None, metavar="BODY",
+                   help="name the file yourself; the body of a pair's name")
+    f.add_argument("--as", dest="kind", choices=("original", "remix"), default=None,
+                   help="save this link as one half of a learning pair")
+    f.add_argument("--original", default=None, metavar="LINK",
+                   help="with --remix and --name: fetch both halves of a pair")
+    f.add_argument("--remix", dest="remix_url", default=None, metavar="LINK")
+    f.add_argument("--json", action="store_true")
+    f.add_argument("-q", "--quiet", action="store_true")
 
     l = sub.add_parser("learn", help="derive a style profile from a folder of remixes")
     l.add_argument("folder")
@@ -233,10 +252,154 @@ def _style_report(st: Style, c: ui.C) -> str:
 # commands
 # ---------------------------------------------------------------------------
 
+class FetchLine:
+    """One rewriting progress line: a bar, a percent and what is downloading.
+
+    ``ui.Progress`` draws a list of named phases, which is right for a remix and
+    wrong for a download -- there is one phase and it has a percentage. This
+    keeps the same palette and the same rules: live redraw on a TTY, one plain
+    line per quarter anywhere else, nothing at all when quiet.
+    """
+
+    WIDTH = 26
+
+    def __init__(self, c: ui.C, quiet: bool = False) -> None:
+        self.c = c
+        self.quiet = quiet
+        self.live = ui.is_tty() and not quiet
+        self._step = -1
+        self._drawn = False
+
+    def __call__(self, pct: float, note: str = "") -> None:
+        if self.quiet:
+            return
+        c = self.c
+        pct = max(0.0, min(100.0, float(pct)))
+        if self.live:
+            filled = int(round(pct / 100 * self.WIDTH))
+            bar = c.magenta("━" * filled) + c.dim("━" * (self.WIDTH - filled))
+            label = note if len(note) <= 40 else note[:39] + "…"
+            sys.stdout.write(f"\r  {bar} {c.bold(f'{pct:5.1f}%')}  {c.grey(label)}"
+                             f"\033[K")
+            sys.stdout.flush()
+            self._drawn = True
+            return
+        step = int(pct // 25)
+        if step > self._step:
+            self._step = step
+            print(f"  {pct:5.1f}%  {note}", flush=True)
+
+    def close(self) -> None:
+        if self._drawn:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+            self._drawn = False
+
+
+def _fetch_report(got: list, c: ui.C, dest: Path, elapsed: float) -> str:
+    from . import fetch as fetch_mod
+    from .arrange import fmt_time as _fmt
+
+    lines = ["", ui.rule(c, "fetched"), ""]
+    for f in got:
+        lines.append(ui.kv(c, f.path.name[:28], c.bold((f.title or f.path.stem)[:52]),
+                           pad=30))
+        lines.append(ui.kv(c, "", f"{c.grey(f.site)}   "
+                                  f"{c.grey(f.uploader or 'unknown artist')}   "
+                                  f"{c.cyan(_fmt(f.duration))}   "
+                                  f"{c.grey(fetch_mod.fmt_bytes(f.bytes))}", pad=30))
+    lines.append("")
+    lines.append(ui.kv(c, "folder", c.cyan(str(dest))))
+    lines.append(ui.kv(c, "total", f"{len(got)} file{'s' if len(got) != 1 else ''}   "
+                                   f"{c.grey(fetch_mod.fmt_bytes(fetch_mod.total_bytes(got)))}"))
+    lines.append("")
+    lines.append(f"  {c.green('done')} {c.grey(f'in {elapsed:.1f}s')}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def cmd_fetch(args, c: ui.C) -> int:
+    import time as _time
+
+    from . import fetch as fetch_mod
+
+    pair = bool(args.original or args.remix_url)
+    if pair and not (args.original and args.remix_url and args.name):
+        raise ValueError("a pair needs --original <url> --remix <url> --name <body>")
+    if not pair and not args.url:
+        raise ValueError("give me a link: `fourfloor fetch <url>`")
+    if args.url and pair:
+        raise ValueError("fetch either one link or a --original/--remix pair, not both")
+    if args.kind and not args.name:
+        raise ValueError("--as original/remix needs --name <body> to go with it")
+
+    where = args.to if args.to is not None else ("pairs" if pair or args.kind
+                                                 else "remixes")
+    dest = fetch_mod.resolve_dest(where)
+    for link in ([args.original, args.remix_url] if pair else [args.url]):
+        fetch_mod.check_url(link)                 # refuse a bad link before the banner
+    quiet = args.quiet or args.json
+    if not quiet:
+        print(ui.header(c, "fetch"))
+        print()
+        print(ui.kv(c, "into", c.cyan(str(dest))))
+        print()
+
+    line = FetchLine(c, quiet=quiet)
+    t0 = _time.time()
+    try:
+        if pair:
+            got = fetch_mod.fetch_pair(args.original, args.remix_url, args.name,
+                                       dest_dir=dest, progress=line)
+        else:
+            got = fetch_mod.fetch_all(args.url, dest, name=args.name, kind=args.kind,
+                                      progress=line)
+    finally:
+        line.close()
+
+    if args.json:
+        print(json.dumps({"dest": str(dest), "files": [f.to_dict() for f in got]},
+                         indent=2))
+    elif not quiet:
+        print(_fetch_report(got, c, dest, _time.time() - t0))
+    return 0
+
+
+def _from_link(url: str, c: ui.C, quiet: bool = False):
+    """Fetch ``url`` into a temp folder for a one-shot inspect or remix."""
+    from . import fetch as fetch_mod
+
+    line = FetchLine(c, quiet=quiet)
+    if not quiet:
+        print(ui.kv(c, "link", c.cyan(url)))
+    try:
+        got, cleanup = fetch_mod.fetch_to_temp(url, progress=line)
+    finally:
+        line.close()
+    if not quiet:
+        from .arrange import fmt_time as _fmt
+        print(ui.kv(c, "fetched", f"{c.bold(got.title or got.path.stem)}   "
+                                  f"{c.grey(got.uploader or got.site)}   "
+                                  f"{c.cyan(_fmt(got.duration))}"))
+        print()
+    return got, cleanup
+
+
 def cmd_inspect(args, c: ui.C) -> int:
     from .analysis import analyze
 
-    a = analyze(args.input)
+    if not args.input and not args.url:
+        raise ValueError("give me a file, or `fourfloor inspect --url <link>`")
+    cleanup = None
+    src = args.input
+    if args.url:
+        got, cleanup = _from_link(args.url, c, quiet=args.json)
+        src = got.path
+    try:
+        a = analyze(src)
+    finally:
+        if cleanup is not None:
+            cleanup()
     if args.json:
         print(json.dumps(a.to_dict(), indent=2))
     else:
@@ -247,13 +410,25 @@ def cmd_inspect(args, c: ui.C) -> int:
 def cmd_remix(args, c: ui.C) -> int:
     from .remix import remix
 
-    src = Path(args.input)
-    out = Path(args.output) if args.output else src.with_suffix("").with_name(
-        src.stem + ".house.mp3")
+    if not args.input and not args.url:
+        raise ValueError("give me a file, or `fourfloor remix --url <link>`")
+    quiet = args.quiet or args.json
+    cleanup = None
+    if args.url:
+        if not quiet:
+            print(ui.header(c, "fetch"))
+            print()
+        got, cleanup = _from_link(args.url, c, quiet=quiet)
+        src = got.path
+        # the temp folder goes away, so an unnamed output lands where you are
+        out = Path(args.output) if args.output else Path.cwd() / f"{src.stem}.house.mp3"
+    else:
+        src = Path(args.input)
+        out = Path(args.output) if args.output else src.with_suffix("").with_name(
+            src.stem + ".house.mp3")
     style = Style.load(args.style) if args.style else None
 
     opts = remix_options(args)
-    quiet = args.quiet or args.json
     if not quiet:
         print(ui.header(c, f"remixing {src.name}"))
         print()
@@ -262,6 +437,8 @@ def cmd_remix(args, c: ui.C) -> int:
         res = remix(src, out, opts, style=style, progress=progress)
     finally:
         progress.close()
+        if cleanup is not None:
+            cleanup()
 
     if args.preview:
         from .preview import write_preview
@@ -327,7 +504,7 @@ def main(argv: list[str] | None = None) -> int:
         print("  try `fourfloor --help`", file=sys.stderr)
         return 2
     handlers = {"remix": cmd_remix, "inspect": cmd_inspect, "learn": cmd_learn,
-                "preview": cmd_preview, "serve": cmd_serve}
+                "preview": cmd_preview, "serve": cmd_serve, "fetch": cmd_fetch}
     try:
         return handlers[args.command](args, c)
     except KeyboardInterrupt:
