@@ -302,38 +302,82 @@ def find_downbeats(beats: np.ndarray, strength: np.ndarray,
     return phase, float(np.clip(margin * 4.0, 0.0, 1.0) * agree)
 
 
-def refine_phase(x: np.ndarray, sr: int, beats: np.ndarray,
-                 window: float = 0.05) -> np.ndarray:
-    """Slide the whole beat grid onto where the attacks actually are.
+def refine_phase(x: np.ndarray, sr: int, beats: np.ndarray) -> np.ndarray:
+    """Slide the whole beat grid onto where the music actually is.
 
-    The dynamic programme places beats on peaks of ``onset_strength``, and that
-    envelope reads early -- 19 ms for a hat, 45 ms for a kick, because it is
-    built from a 2048-sample window and a log magnitude. That bias does not
-    matter for finding the tempo. It matters enormously afterwards, because the
-    warp pins these beat times to an exactly periodic grid: every millisecond
-    the grid sits ahead of the music is a millisecond the music ends up behind
-    the kick in the finished remix. On *Body* it was worth 12 ms, which is the
-    entire error budget.
+    Two problems, one operation. The small one: the dynamic programme places
+    beats on peaks of ``onset_strength``, and that envelope reads early -- 19 ms
+    for a hat, 45 ms for a kick, because it is built from a 2048-sample window
+    and a log magnitude. That bias does not matter for finding a tempo and
+    matters enormously afterwards, because the warp pins these beat times to an
+    exactly periodic grid: every millisecond the grid sits ahead of the music is
+    a millisecond the music ends up behind the kick in the finished remix. On
+    *Body* it was worth 12 ms.
 
-    So: take the whole grid, slide it through +/-``window`` seconds against
-    :func:`features.attack_envelope`, and keep the offset where the attacks line
-    up best. One number for the whole track, because the bias is a property of
-    the detector rather than of any one beat -- shifting beats individually
-    would fit the grid to whatever was loudest and lose the tempo.
+    The large one: in house, and anything else with open hats on the offbeats,
+    the sharpest thing in the bar is not on the beat. The tracker follows the
+    hats and hands back a grid half a beat out -- two of the three records this
+    was tried on were tracked that way, kick squarely between the beats. A
+    remix built on that grid is half a beat wrong from the first bar, which is
+    not a subtle complaint.
+
+    So the search runs over a whole beat, not a few milliseconds, and in two
+    stages. The coarse stage scores with :func:`features.kick_envelope`
+    alongside the attack envelope and decides *which* phase: the kick envelope
+    is what breaks the tie, because an open hat can be five times sharper than
+    the kick it sits between but it is not in the bottom two octaves. A gentle
+    preference for not moving keeps the answer where the tracker put it when the
+    evidence is level.
+
+    The fine stage then settles the last few milliseconds using the attack
+    envelope alone. The kick envelope must not be allowed near that decision:
+    it is built from a 46 ms analysis window and reads a kick's rise early by
+    well over ten, and a grid dragged 14 ms forward is 14 ms of the budget gone
+    for the sake of a tie-break that has already been won.
     """
     if len(beats) < 4:
         return beats
     env, fps = F.attack_envelope(x, sr)
+    kick, _ = F.kick_envelope(x, sr)
     if env.size < 8 or env.max() <= 0:
         return beats
-    times = F.attack_times(len(env), fps)
-    offsets = np.linspace(-window, window, 101)
-    inside = beats[(beats > window) & (beats < times[-1] - window)]
+    n = min(len(env), len(kick)) if len(kick) else len(env)
+    times = F.attack_times(n, fps)
+    env = env[:n]
+    kick = kick[:n] if len(kick) else np.zeros(n)
+    period = float(np.median(np.diff(beats)))
+    half = period / 2.0
+    offsets = np.linspace(-half, half, 121)
+    inside = beats[(beats > half) & (beats < times[-1] - half)]
     if len(inside) < 4:
         return beats
-    scores = [float(np.interp(inside + o, times, env, left=0.0, right=0.0).sum())
-              for o in offsets]
-    return beats + float(offsets[int(np.argmax(scores))])
+    def mean_at(sig: np.ndarray, o: float) -> float:
+        return float(np.interp(inside + o, times, sig, left=0.0, right=0.0).mean())
+
+    ev = np.array([mean_at(env, o) for o in offsets])
+    kv = np.array([mean_at(kick, o) for o in offsets]) if kick.any() else np.zeros(len(offsets))
+
+    # Trust the kick envelope for *which* phase whenever it actually has a
+    # phase -- a four-on-the-floor record's kick profile over a beat peaks
+    # twenty times above its floor. Normalise both curves first: the attack
+    # envelope's numbers are an order of magnitude larger and adding them raw
+    # means the hats decide.
+    contrast = float(kv.max() / max(kv.min(), 1e-9)) if kv.max() > 0 else 0.0
+    coarse = ev / max(ev.max(), 1e-9)
+    if contrast >= 3.0:
+        coarse = kv / kv.max() + 0.35 * coarse
+    coarse = coarse * (1.0 - 0.12 * np.abs(offsets) / half)    # prefer staying put
+    shift = float(offsets[int(np.argmax(coarse))])
+
+    # ...and the attack envelope for exactly where. The kick envelope reads a
+    # kick 17-40 ms late -- the bottom two octaves take that long to develop and
+    # it is measuring a rise over a 46 ms window -- so letting it place the grid
+    # as well as choose its phase drags every beat late by that much.
+    fine = np.linspace(shift - 0.030, shift + 0.030, 61)
+    shift = float(fine[int(np.argmax([mean_at(env, o) for o in fine]))])
+
+    moved = beats + shift
+    return moved[moved >= 0.0]
 
 
 def analyze_beats(x: np.ndarray, sr: int) -> BeatGrid:

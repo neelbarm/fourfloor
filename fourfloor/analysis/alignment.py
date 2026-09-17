@@ -44,6 +44,11 @@ MAX_MEDIAN_MS = 12.0
 MAX_P90_MS = 25.0
 MIN_ON_GRID = 0.85
 
+#: How much louder the offbeat has to be than the beat before a layer counts as
+#: playing half a beat out. House offbeat hats routinely beat the kick by a
+#: fifth in an onset envelope without anything being wrong.
+HALF_BEAT_RATIO = 1.35
+
 FINE_HOP = F.ATTACK_HOP
 
 
@@ -110,31 +115,63 @@ def phase_errors(onsets: np.ndarray, grid: np.ndarray) -> np.ndarray:
 
 
 def comb_offset(x: np.ndarray, sr: int, bpm: float, first_downbeat: float,
-                hop: int = FINE_HOP, steps: int = 241) -> tuple[float, float]:
+                hop: int = FINE_HOP, steps: int = 121) -> tuple[float, float, float]:
     """Global phase of a layer against the beat comb.
 
-    Returns ``(offset_seconds, sharpness)``. The offset is where a comb of beat
-    impulses best explains the onset envelope, searched over +/- half a beat;
-    sharpness is how much better the winner is than the mean of the sweep, which
-    tells you whether the answer means anything (a pad has no sharpness).
+    Returns ``(offset_seconds, sharpness, half_beat_ratio)``. The offset is
+    where a comb of beat impulses best explains the onset envelope, searched
+    over +/- a quarter beat; sharpness is how much better the winner is than the
+    mean of the sweep, which says whether the answer means anything at all (a
+    pad has no sharpness).
+
+    The half-beat question is asked separately, as a ratio rather than by
+    widening the search, because widening it does not work. House offbeat hats
+    are sharper than the kicks they sit between, so a comb allowed to roam half
+    a beat happily lands on the offbeat of a loop that is perfectly on the grid
+    -- two of the three kits built from real records did exactly that. A ratio
+    with a threshold asks the real question: is the offbeat *so much* stronger
+    that the layer is genuinely playing on the "and"?
     """
     env, fps = onset_envelope(x, sr, hop=hop)
     if env.size < 8 or env.max() <= 0:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
+    kick, _ = F.kick_envelope(_mono(x), sr, hop=hop)
+    n = min(len(env), len(kick)) if len(kick) else len(env)
+    env, kick = env[:n], (kick[:n] if len(kick) else np.zeros(n))
     beat = 60.0 / max(bpm, 1e-6)
-    duration = len(env) / fps
+    duration = n / fps
     beats = grid_times(bpm, first_downbeat, duration, division=1)
     beats = beats[(beats >= 0) & (beats < duration)]
     if len(beats) < 4:
-        return 0.0, 0.0
-    offsets = np.linspace(-beat / 2.0, beat / 2.0, steps)
-    frames = F.attack_times(len(env), fps)
-    scores = np.array([float(np.interp(beats + o, frames, env, left=0.0, right=0.0).sum())
-                       for o in offsets])
+        return 0.0, 0.0, 0.0
+    frames = F.attack_times(n, fps)
+
+    def comb_of(sig: np.ndarray, o: float) -> float:
+        return float(np.interp(beats + o, frames, sig, left=0.0, right=0.0).sum())
+
+    # Ask the kick where the beat is whenever the kick has an opinion. Summed
+    # over the whole spectrum a house open hat beats the kick it sits between
+    # five to one, so a comb reading the attack envelope calls a perfectly
+    # gridded loop half a beat out -- which is what two of three kits built
+    # from real records did. The kick envelope's profile over a beat peaks
+    # twenty times above its floor on a four-on-the-floor record, and is flat
+    # on something with no kick, which is exactly when to ignore it.
+    sweep = np.linspace(-beat / 2.0, beat / 2.0, 49)
+    kc = np.array([comb_of(kick, o) for o in sweep])
+    use_kick = kc.max() > 0 and kc.max() / max(kc.min(), 1e-9) >= 3.0
+    sig = kick / max(float(kick.max()), 1e-9) if use_kick else env
+
+    def comb(o: float) -> float:
+        return comb_of(sig, o)
+
+    offsets = np.linspace(-beat / 4.0, beat / 4.0, steps)
+    scores = np.array([comb(o) for o in offsets])
     best = int(np.argmax(scores))
     mean = float(scores.mean())
     sharp = (scores[best] - mean) / max(scores[best], 1e-9)
-    return float(offsets[best]), float(sharp)
+    on_grid = max(comb(0.0), 1e-9)
+    half = max(comb(beat / 2.0), comb(-beat / 2.0))
+    return float(offsets[best]), float(sharp), float(half / on_grid)
 
 
 def bar_phase(x: np.ndarray, sr: int, bpm: float, first_downbeat: float,
@@ -192,14 +229,14 @@ def _layer_report(x: np.ndarray, sr: int, bpm: float, first_downbeat: float,
     err = phase_errors(onsets, grid) * 1000.0
     absr = np.abs(err)
     w = np.asarray(strength, dtype=float)
-    offset, sharp = comb_offset(x, sr, bpm, first_downbeat)
+    offset, sharp, half_ratio = comb_offset(x, sr, bpm, first_downbeat)
     phase, margin = bar_phase(x, sr, bpm, first_downbeat)
     beat_ms = 60_000.0 / max(bpm, 1e-6)
     off_ms = offset * 1000.0
-    if abs(off_ms) < 0.18 * beat_ms:
-        where = "grid"
-    elif abs(abs(off_ms) - 0.5 * beat_ms) < 0.18 * beat_ms:
+    if half_ratio > HALF_BEAT_RATIO:
         where = "half-beat"
+    elif abs(off_ms) < 0.10 * beat_ms:
+        where = "grid"
     else:
         where = "offset"
     return {
@@ -214,6 +251,7 @@ def _layer_report(x: np.ndarray, sr: int, bpm: float, first_downbeat: float,
         "mean_signed_ms": float(np.mean(err)) if len(err) else 0.0,
         "comb_offset_ms": off_ms,
         "comb_sharpness": sharp,
+        "half_beat_ratio": half_ratio,
         "beat_alignment": where,
         "bar_phase": phase,
         "bar_phase_margin": margin,

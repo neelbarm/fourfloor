@@ -123,8 +123,8 @@ ATTACK_LATENCY = 0.0032
 
 
 def attack_envelope(x: np.ndarray, sr: int, hop: int = ATTACK_HOP,
-                    n_fft: int = ATTACK_FFT, lag: int = ATTACK_LAG
-                    ) -> tuple[np.ndarray, float]:
+                    n_fft: int = ATTACK_FFT, lag: int = ATTACK_LAG,
+                    fmax: float | None = None) -> tuple[np.ndarray, float]:
     """A *when exactly* onset envelope, and its frame rate.
 
     :func:`onset_strength` answers "how strong is the rhythm here", which is what
@@ -141,13 +141,20 @@ def attack_envelope(x: np.ndarray, sr: int, hop: int = ATTACK_HOP,
     difference and the filterbank's own latency are both removed from the time
     base, so frame ``i`` means "an attack at ``i / fps`` seconds".
 
+    ``fmax`` restricts the filterbank to the bottom of the spectrum. That is how
+    you ask "where is the kick", as opposed to "where is anything": summed over
+    the whole spectrum, a house open hat outruns the kick it sits between by
+    five to one, because the hat's attack is spread over forty mel bands and the
+    kick's over two.
+
     Use it to place things. Use :func:`onset_strength` to find the pulse.
     """
     x = np.asarray(x, dtype=np.float64)
     if len(x) < n_fft:
         return np.zeros(0), sr / float(hop)
     mag = np.abs(stft(x, n_fft, hop))
-    bands = mel_filterbank(sr, n_fft, n_mels=64) @ mag
+    n_mels = 64 if fmax is None else 16
+    bands = mel_filterbank(sr, n_fft, n_mels=n_mels, fmax=fmax) @ mag
     flux = np.maximum(0.0, bands[:, lag:] - bands[:, :-lag]).sum(axis=0)
     flux = np.concatenate([np.zeros(lag), flux])
     fps = sr / float(hop)
@@ -155,6 +162,44 @@ def attack_envelope(x: np.ndarray, sr: int, hop: int = ATTACK_HOP,
     env = np.maximum(0.0, flux - sps.convolve(flux, np.ones(win) / win, mode="same"))
     peak = env.max()
     return (env / peak if peak > 0 else env), fps
+
+
+#: How late :func:`kick_envelope` reads, in seconds, measured on a synthesised
+#: kick placed exactly on a 124 and a 128 BPM grid. A kick's bottom two octaves
+#: take this long to develop, and the envelope is a rise measured over a 46 ms
+#: window on top of that. Real kicks scatter roughly +/-10 ms around it, which
+#: is why this envelope is used to decide *which* beat, never exactly where.
+KICK_LATENCY = 0.018
+
+
+def kick_envelope(x: np.ndarray, sr: int, hop: int = ATTACK_HOP, lag: int = 8,
+                  lo: float = 30.0, hi: float = 130.0) -> tuple[np.ndarray, float]:
+    """Where the *kick* hits: rectified rise of the 30-130 Hz band.
+
+    A kick's attack occupies two mel bands and a house open hat occupies forty,
+    so any envelope summed over the spectrum is a hi-hat detector with a kick
+    somewhere underneath it. Looking only at the bottom of the spectrum, and at
+    the *rise* rather than the level -- the level is mostly the bassline, which
+    in house plays the offbeats -- gives an envelope that answers "where is the
+    four on the floor" and nothing else.
+
+    The lag is longer than :func:`attack_envelope` uses because a kick takes
+    tens of milliseconds to develop. The envelope's whole latency, group delay
+    and all, is :data:`KICK_LATENCY`, and it is already removed from the time
+    base :func:`attack_times` gives, so the two envelopes share one clock.
+    """
+    low = band_energy(np.asarray(x, dtype=np.float64), sr, lo, hi, hop=hop)
+    if len(low) <= lag:
+        return np.zeros(0), sr / float(hop)
+    flux = np.concatenate([np.zeros(lag), np.maximum(0.0, low[lag:] - low[:-lag])])
+    # Slide the whole envelope earlier by its measured latency, so that reading
+    # it on the time base `attack_times` hands out means the same thing it means
+    # for `attack_envelope`.
+    shift = max(0, int(round(KICK_LATENCY * sr / hop)))
+    if shift:
+        flux = np.concatenate([flux[shift:], np.zeros(shift)])
+    peak = flux.max()
+    return (flux / peak if peak > 0 else flux), sr / float(hop)
 
 
 def attack_times(n: int, fps: float, lag: int = ATTACK_LAG) -> np.ndarray:
