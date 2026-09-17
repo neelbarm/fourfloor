@@ -261,18 +261,23 @@ def analyze_beats(x: np.ndarray, sr: int) -> BeatGrid:
     beats = track_beats(env, fps, bpm)
     if len(beats) >= 8:
         # Re-estimate BPM from the realised grid. The DP can only place beats on
-        # feature frames (11.6 ms), so any single interval -- and therefore the
-        # median -- is quantised to that grid: at 124 BPM the true period is 41.7
-        # frames, the median snaps to 42, and the tempo reads 123.0. Dividing the
-        # *total span* by the number of periods it contains averages the
-        # quantisation away over the whole track, giving a sub-frame estimate,
-        # and is insensitive to a single inserted or dropped beat in the middle.
+        # feature frames (11.6 ms), so every individual interval -- and therefore
+        # the median -- is quantised to that grid: at 124 BPM the true period is
+        # 41.7 frames and the median snaps to 42, reading 123.0.
+        #
+        # Averaging recovers the sub-frame period, because the DP alternates 41
+        # and 42 in the right proportion. Note that dividing the total span by
+        # `round(span / median)` does *not* work: the median's upward bias is a
+        # fixed 0.8% here, so the period count comes out four beats short over a
+        # four-minute track and the estimate sticks at the median. Intervals far
+        # from the period are trimmed first so one dropped or doubled beat in the
+        # middle cannot drag the mean; the spurious beats the DP used to leave at
+        # each end are already gone, trimmed in `track_beats`.
         iois = np.diff(beats)
         coarse = float(np.median(iois))
-        span = float(beats[-1] - beats[0])
-        n_periods = int(round(span / coarse)) if coarse > 0 else 0
-        if n_periods >= 4:
-            refined = 60.0 / (span / n_periods)
+        good = iois[(iois > 0.7 * coarse) & (iois < 1.4 * coarse)]
+        if len(good) >= 4:
+            refined = 60.0 / float(np.mean(good))
             if MIN_BPM <= refined <= MAX_BPM:
                 bpm = refined
     low = F.band_energy(x, sr, 20.0, 160.0)
