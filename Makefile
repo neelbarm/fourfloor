@@ -14,7 +14,7 @@ PORT    ?= 4444
 help:
 	@echo "fourfloor"
 	@echo "  make setup   create .venv and install fourfloor + dev deps"
-	@echo "  make test    run the test suite (~70s)"
+	@echo "  make test    run the test suite (172 tests, ~50s)"
 	@echo "  make serve   run the web app at http://127.0.0.1:4444"
 	@echo "  make demo    remix fixtures/lofi-7.mp3 into examples/"
 	@echo "  make learn   derive a style profile from REFS=<folder of house remixes>"
