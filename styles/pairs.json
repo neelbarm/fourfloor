@@ -1,0 +1,22 @@
+{
+  "bpm": 130.01,
+  "bpm_spread": 0.0,
+  "swing": 0.1791,
+  "intro_bars": 8,
+  "breakdown_ratio": 1.0,
+  "breakdown_bars": 16,
+  "spectral_tilt": -15.002,
+  "brightness_hz": 943.4,
+  "rms_db": -9.04,
+  "peak_db": 3.78,
+  "kick_density": 0.559,
+  "length": 225.2,
+  "n_refs": 1,
+  "n_pairs": 1,
+  "tempo_ratio": 0.8905,
+  "beat_multiple": 1.0,
+  "semitone_shift": 0.0,
+  "vocal_band_margin_db": -0.48,
+  "presence_margin_db": -5.26,
+  "schema": 1
+}

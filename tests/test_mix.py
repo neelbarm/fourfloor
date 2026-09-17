@@ -328,3 +328,38 @@ def test_sidechain_recovers_in_the_window_the_references_use(sr: int) -> None:
     after = env[bottom:]
     back = int(np.argmax(after >= 10.0 ** (-1.0 / 20.0))) / sr
     assert 0.080 <= back <= 0.110, f"recovered in {back * 1000:.0f} ms"
+
+
+# ---------------------------------------------------------------------------
+# what a pair teaches
+# ---------------------------------------------------------------------------
+
+def test_a_pair_is_found_by_its_naming_convention(tmp_path) -> None:
+    from fourfloor.style import find_pairs
+
+    (tmp_path / "pairs").mkdir()
+    for name in ("midnight.original.mp3", "midnight.remix.mp3", "orphan.remix.mp3"):
+        (tmp_path / "pairs" / name).write_bytes(b"")
+    (tmp_path / "loose.original.wav").write_bytes(b"")
+    (tmp_path / "loose.remix.wav").write_bytes(b"")
+
+    found = {name for name, _, _ in find_pairs(tmp_path)}
+    assert found == {"midnight", "loose"}, "a half-pair must not be reported as a pair"
+
+
+def test_chroma_rotation_reads_a_transposition_and_ignores_a_loud_bar() -> None:
+    """The estimator has to survive one section being much louder than the rest.
+
+    Averaging raw chromagrams lets a loud passage outvote everything else, which
+    is how the A/B pair used to develop this read as transposed a fourth when
+    both tracks are in C minor. Normalising each frame first fixes it.
+    """
+    from fourfloor.style import chroma_shift
+
+    rng = np.random.default_rng(11)
+    base = np.abs(rng.standard_normal((12, 400))) + 0.1
+    loud = base.copy()
+    loud[:, :50] *= 40.0                      # one very loud passage
+    assert chroma_shift(base, loud) == 0
+    assert chroma_shift(base, np.roll(loud, 3, axis=0)) == 3
+    assert chroma_shift(base, np.roll(loud, -2, axis=0)) == -2

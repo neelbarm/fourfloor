@@ -315,6 +315,30 @@ fourfloor remix song.mp3 --style styles/mine.json
 `styles/klickaud-refs.json` is a profile learned from five commercial DJ edits —
 aggregate numbers only, no filenames and no audio.
 
+**Pairs teach it more than references do.** A folder of finished house records
+shows you what one looks like; a folder of *pairs* shows you what a remixer
+**changed**. Name two files `<name>.original.mp3` and `<name>.remix.mp3`, in the
+folder you are learning from or in a `pairs/` subfolder of it (which is exactly
+where `fourfloor fetch --original … --remix …` puts them), and `learn` measures
+the difference as well as the remix:
+
+| learned from a pair | what it answers |
+| --- | --- |
+| `tempo_ratio`, `beat_multiple`, `stretch_ratio` | which tempo they landed on, and whether they read the source straight, half- or double-time |
+| `semitone_shift` | whether the key moved at all, by chroma-rotation correlation rather than by trusting two independent key detections |
+| `vocal_band_margin_db` | how far the harmonic content sits over the drums in 300 Hz – 4 kHz, the band that decides whether a vocal survives |
+| `presence_margin_db` | the same comparison at 2 – 5 kHz, where consonants and hi-hats fight |
+
+```bash
+fourfloor learn ~/Music/house-refs -o styles/pairs.json --anonymous
+```
+
+`styles/pairs.json` is that profile for the one pair available here. It reads
+0.8905 (146 → 130 BPM, straight, no half-time trick) and a semitone shift of
+zero: the remix was time-stretched without being repitched, which is why
+fourfloor stretches with a phase vocoder and treats a key change as a separate,
+deliberate step.
+
 ## Optional: demucs stems
 
 ```bash

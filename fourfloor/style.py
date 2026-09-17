@@ -18,6 +18,9 @@ from scipy import signal as sps
 
 from .analysis import F, analyze
 from .audio import decode, find_audio, rms_db
+from .dsp import dynamics as DY
+from .dsp.hpss import hpss_stereo
+from .dsp.pitch import plan_tempo
 
 SCHEMA_VERSION = 1
 
@@ -41,12 +44,23 @@ class Style:
     n_refs: int = 0
     per_track: list[dict] = field(default_factory=list)
 
+    # --- learned from original/remix pairs, when the folder has any
+    n_pairs: int = 0
+    tempo_ratio: float = 0.0           # remix BPM / original BPM
+    beat_multiple: float = 0.0         # 0.5, 1 or 2; 0 when nothing was learned
+    semitone_shift: float = 0.0        # chroma rotation, original -> remix
+    vocal_band_margin_db: float = 0.0  # remix: harmonic vs percussive, 300 Hz-4 kHz
+    presence_margin_db: float = 0.0    # the same comparison at 2-5 kHz
+    per_pair: list[dict] = field(default_factory=list)
+
     def to_dict(self, anonymous: bool = False) -> dict:
         d = asdict(self)
         d["schema"] = SCHEMA_VERSION
         if anonymous:
             d.pop("per_track", None)
+            d.pop("per_pair", None)
             d["n_refs"] = self.n_refs
+            d["n_pairs"] = self.n_pairs
         return d
 
     @classmethod
@@ -202,7 +216,11 @@ def profile_track(path: str | Path) -> dict:
 
 def learn(folder: str | Path, progress=None) -> Style:
     """Analyse every audio file in ``folder`` and aggregate a Style."""
-    files = find_audio(folder)
+    pair_rows, pair_stats = learn_pairs(folder, progress)
+    paired = {p for _, o, r in find_pairs(folder) for p in (o, r)}
+    files = [f for f in find_audio(folder) if f not in paired]
+    remixes = [r for _, _, r in find_pairs(folder)]
+    files = files + [r for r in remixes if r not in files]
     if not files:
         raise RuntimeError(f"no audio files in {folder}")
     step = progress or (lambda *_a, **_k: None)
@@ -235,4 +253,133 @@ def learn(folder: str | Path, progress=None) -> Style:
         length=round(med("duration"), 1),
         n_refs=len(rows),
         per_track=rows,
+        per_pair=pair_rows,
+        **pair_stats,
     )
+
+
+# ---------------------------------------------------------------------------
+# original / remix pairs
+# ---------------------------------------------------------------------------
+
+#: How a pair is named on disk. ``fourfloor fetch --pair`` writes this layout
+#: and ``fourfloor learn`` reads it: two files whose names differ only in the
+#: marker, in the folder being learned from or in a ``pairs`` subfolder of it.
+PAIR_MARKERS = ("original", "remix")
+
+#: How much better than "no shift" a rotation has to score before it is
+#: reported as a transposition.
+SHIFT_MARGIN = 0.03
+
+
+def find_pairs(folder: str | Path) -> list[tuple[str, Path, Path]]:
+    """Every ``<name>.original.<ext>`` / ``<name>.remix.<ext>`` couple in a folder.
+
+    A pair is worth far more than two unrelated references: it is the only way
+    to see what a remixer *changed* -- the tempo they landed on, whether they
+    moved the key, how far they pushed the vocal against the kit -- rather than
+    what a finished house record happens to look like.
+
+    Both the folder itself and a ``pairs`` subfolder are searched, because that
+    is where ``fourfloor fetch --pair`` puts them.
+    """
+    root = Path(folder)
+    found: dict[str, dict[str, Path]] = {}
+    for base in (root, root / "pairs"):
+        if not base.is_dir():
+            continue
+        for f in find_audio(base):
+            stem = f.stem
+            for marker in PAIR_MARKERS:
+                if stem.lower().endswith(f".{marker}"):
+                    name = stem[: -len(marker) - 1]
+                    found.setdefault(name, {})[marker] = f
+    return [(name, sides["original"], sides["remix"])
+            for name, sides in sorted(found.items())
+            if set(sides) == set(PAIR_MARKERS)]
+
+
+def chroma_shift(original: np.ndarray, remix: np.ndarray) -> int:
+    """Semitones from one track to another, by chroma-rotation correlation.
+
+    Asking which of the twelve rotations correlates best answers "was this
+    transposed" directly, without depending on both key detections
+    independently landing on the right tonic.
+
+    Two details decide whether it works. Each frame is normalised before the
+    average, so loud bars do not outvote quiet ones -- without that, the A/B
+    pair used to develop this reads as transposed a fourth when both tracks are
+    in fact in C minor. And the winner has to beat "no shift" by a margin:
+    claiming a transposition that did not happen is a worse answer than
+    claiming none, because a remix that stays in key is the common case.
+    """
+    def profile(chroma: np.ndarray) -> np.ndarray:
+        c = np.asarray(chroma, dtype=float)
+        c = c / np.maximum(np.linalg.norm(c, axis=0, keepdims=True), 1e-9)
+        v = c.mean(axis=1)
+        v = v - v.mean()
+        return v / max(float(np.linalg.norm(v)), 1e-9)
+
+    a, b = profile(original), profile(remix)
+    scores = [float(np.dot(np.roll(a, k), b)) for k in range(12)]
+    best = int(np.argmax(scores))
+    if scores[best] - scores[0] < SHIFT_MARGIN:
+        return 0
+    return best - 12 if best > 6 else best
+
+
+def profile_pair(original: str | Path, remix: str | Path) -> dict:
+    """What one remixer did to one song.
+
+    The balance numbers are measured on the remix with fourfloor's own
+    harmonic/percussive split rather than with a separation model, so that what
+    is learned here is directly comparable to what the engine measures while it
+    is mixing -- a target and a measurement that disagree about how the signal
+    was divided are not a target.
+    """
+    a = analyze(original)
+    b = analyze(remix)
+    tempo = plan_tempo(a.grid.bpm, b.grid.bpm)
+    harm, perc = hpss_stereo(b.clip.samples, b.sr)
+    return {
+        "name": Path(remix).stem,
+        "original_bpm": round(a.grid.bpm, 2),
+        "remix_bpm": round(b.grid.bpm, 2),
+        "tempo_ratio": round(b.grid.bpm / max(a.grid.bpm, 1e-6), 4),
+        "beat_multiple": tempo.beat_multiple,
+        "stretch_ratio": round(tempo.ratio, 4),
+        "semitone_shift": chroma_shift(a.chroma, b.chroma),
+        "original_key": a.key.name,
+        "remix_key": b.key.name,
+        "vocal_band_margin_db": round(
+            DY.band_rms_db(harm, b.sr, DY.VOCAL_BAND)
+            - DY.band_rms_db(perc, b.sr, DY.VOCAL_BAND), 2),
+        "presence_margin_db": round(
+            DY.band_rms_db(harm, b.sr, DY.PRESENCE_BAND)
+            - DY.band_rms_db(perc, b.sr, DY.PRESENCE_BAND), 2),
+        "length_ratio": round(b.duration / max(a.duration, 1e-6), 3),
+    }
+
+
+def learn_pairs(folder: str | Path, progress=None) -> tuple[list[dict], dict]:
+    """Profile every pair in a folder and return ``(rows, aggregate)``."""
+    pairs = find_pairs(folder)
+    step = progress or (lambda *_a, **_k: None)
+    rows = []
+    for i, (name, original, remix) in enumerate(pairs, 1):
+        step("learn", f"[pair {i}/{len(pairs)}] {name}")
+        rows.append(profile_pair(original, remix))
+    if not rows:
+        return [], {}
+
+    def med(key: str) -> float:
+        return float(np.median([r[key] for r in rows]))
+
+    return rows, {
+        "n_pairs": len(rows),
+        "tempo_ratio": round(med("tempo_ratio"), 4),
+        "beat_multiple": float(np.median([r["beat_multiple"] for r in rows])),
+        "semitone_shift": round(med("semitone_shift"), 2),
+        "vocal_band_margin_db": round(med("vocal_band_margin_db"), 2),
+        "presence_margin_db": round(med("presence_margin_db"), 2),
+    }
