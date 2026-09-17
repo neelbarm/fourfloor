@@ -6,7 +6,7 @@ VENV    := .venv
 BIN     := $(VENV)/bin
 FIXTURE := fixtures/lofi-7.mp3
 DEMO    := examples/lofi-7.house.mp3
-REFS    ?= $(HOME)/Desktop/Mixpilot
+REFS    ?= $(HOME)/Music/house-refs
 
 .PHONY: help setup test demo learn clean lint
 
