@@ -214,3 +214,456 @@ def energy_per_bar(x: np.ndarray, sr: int, downbeats: np.ndarray, bar_dur: float
         vals.append(float(np.sqrt(np.mean(np.square(seg)))) if len(seg) else 0.0)
     m = max(vals) if vals else 1.0
     return [round(v / max(m, 1e-9), 4) for v in vals]
+
+
+# --------------------------------------------------------------------------
+# Vocal phrasing
+#
+# Foote novelty tells us *where the music changes*; it says nothing about
+# whether a singer happens to be halfway through the word "again" at that
+# moment. Cutting there is the single most audible mistake an automatic edit
+# can make, so the arranger needs a second, independent view of the source: a
+# vocal-activity envelope and the gaps in it.
+# --------------------------------------------------------------------------
+
+#: Band that carries sung fundamentals and the first formants. Below this is
+#: kick and bass; above it is mostly cymbals and sibilance, which are exactly
+#: the things that make a purely broadband envelope look "busy" during a gap.
+VOCAL_BAND = (180.0, 4200.0)
+
+#: A gap shorter than this is a breath or a consonant stop, not a phrase end.
+#: 300 ms is about one 16th note at 124 BPM: long enough that a cut inside it
+#: cannot clip a syllable, short enough that most songs have several per verse.
+GAP_MIN = 0.30
+
+#: How far under the "someone is singing" level a frame has to sit to count as
+#: silence. Measured against the 90th percentile of the envelope so it tracks
+#: the mix rather than an absolute dBFS number.
+GAP_DROP_DB = 13.0
+
+#: Envelope hop. 43 Hz resolves a 300 ms gap to within a frame and costs a
+#: quarter of what the 86 Hz feature rate would.
+ENV_HOP = 1024
+
+#: Below this dynamic range (p90 minus p10, dB) the "vocal" band is a pad, a
+#: loop or a click track rather than a voice, and its gaps mean nothing.
+MIN_CONTRAST_DB = 9.0
+
+#: Fewer gaps than this over a whole track means we found noise-floor dips, not
+#: phrase ends -- an instrumental, a loop, or a master squashed flat.
+MIN_GAPS = 3
+
+#: Shortest median voiced run we will believe is a voice. A sung phrase runs
+#: about a second -- the reference corpus measured 1.05 s in an original and
+#: 1.25 s in its remix -- while a click track, a hat pattern or a plucked loop
+#: is on for tens of milliseconds at a time. Without this, a metronome looks
+#: like the most articulate singer in the world: enormous contrast, dozens of
+#: evenly spaced "phrase gaps", and every one of them meaningless.
+MIN_VOICED_RUN = 0.35
+
+
+@dataclass(frozen=True)
+class PhraseGap:
+    """A stretch of source time with no vocal in it, wide enough to cut in."""
+
+    start: float
+    end: float
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+    @property
+    def mid(self) -> float:
+        return 0.5 * (self.start + self.end)
+
+    def contains(self, t: float, pad: float = 0.0) -> bool:
+        return (self.start - pad) <= t <= (self.end + pad)
+
+    def to_dict(self) -> dict:
+        return {"start": round(self.start, 3), "end": round(self.end, 3),
+                "duration": round(self.duration, 3)}
+
+
+@dataclass
+class VocalMap:
+    """Where the voice is, and where it is not, in one source track.
+
+    ``env`` is a 0-1 activity curve at ``fps`` frames per second; ``gaps`` are
+    the spans where it stays under ``threshold`` for at least ``GAP_MIN``.
+    ``source`` records which signal it was measured from so a plan can say why
+    it trusted (or ignored) the result.
+    """
+
+    env: np.ndarray
+    fps: float
+    threshold: float
+    gaps: list[PhraseGap]
+    source: str
+    duration: float
+    contrast_db: float
+    voiced_run: float = 0.0     # median length of a run above `threshold`
+
+    @property
+    def usable(self) -> bool:
+        """True when the envelope has enough contrast to mean anything.
+
+        An instrumental loop, a click track or a wall-of-sound master gives a
+        near-flat curve; treating its noise floor as "phrase gaps" would snap
+        cuts to arbitrary places with false confidence. When this is False the
+        arranger falls back to plain downbeat alignment and says so.
+        """
+        return (len(self.gaps) >= MIN_GAPS
+                and self.contrast_db >= MIN_CONTRAST_DB
+                and self.voiced_run >= MIN_VOICED_RUN
+                and sum(g.duration for g in self.gaps) >= 0.01 * max(self.duration, 1e-6))
+
+    def _frame(self, t: float) -> int:
+        return int(np.clip(round(t * self.fps), 0, max(len(self.env) - 1, 0)))
+
+    def activity(self, t: float) -> float:
+        """Vocal activity at one instant, 0-1."""
+        if not len(self.env):
+            return 0.0
+        return float(self.env[self._frame(t)])
+
+    def peak_activity(self, a: float, b: float) -> float:
+        """Loudest vocal moment in a span -- the "is this mid-word?" measure.
+
+        A cut sitting inside a syllable has energy on *both* sides of it, so the
+        peak over a short window straddling the cut is high even when the
+        instant itself happens to fall in a glottal dip.
+        """
+        if not len(self.env):
+            return 0.0
+        i, j = self._frame(min(a, b)), self._frame(max(a, b))
+        return float(self.env[i:max(j + 1, i + 1)].max())
+
+    def mean_activity(self, a: float, b: float) -> float:
+        """Average vocal presence over a span -- how much singing it contains."""
+        if not len(self.env) or b <= a:
+            return 0.0
+        i, j = self._frame(a), self._frame(b)
+        return float(self.env[i:max(j + 1, i + 1)].mean())
+
+    def in_gap(self, t: float, pad: float = 0.0) -> bool:
+        return any(g.contains(t, pad) for g in self.gaps)
+
+    def gap_at(self, t: float, pad: float = 0.0) -> PhraseGap | None:
+        for g in self.gaps:
+            if g.contains(t, pad):
+                return g
+        return None
+
+    def phrase_starts(self) -> list[float]:
+        """Times a vocal phrase begins: the end of every gap."""
+        return [g.end for g in self.gaps]
+
+    def phrase_ends(self) -> list[float]:
+        """Times a vocal phrase finishes: the start of every gap."""
+        return [g.start for g in self.gaps]
+
+    def to_dict(self) -> dict:
+        return {
+            "source": self.source,
+            "usable": self.usable,
+            "threshold": round(self.threshold, 4),
+            "contrast_db": round(self.contrast_db, 2),
+            "voiced_run": round(self.voiced_run, 3),
+            "gaps": len(self.gaps),
+            "gap_seconds": round(sum(g.duration for g in self.gaps), 2),
+        }
+
+
+def _centre_magnitude(x: np.ndarray, hop: int) -> np.ndarray:
+    """Magnitude spectrogram of what is panned dead centre.
+
+    ``|mid| - |side|`` per bin. In a commercial stereo master the lead vocal is
+    centred and almost everything else -- pads, guitars, reverb tails, stereo
+    synths -- is spread, so this removes a large part of the *harmonic* backing
+    that band-limiting alone cannot touch. Measured against a Demucs vocal stem
+    on the reference pair it roughly doubles the number of true phrase gaps
+    found, for the cost of one extra STFT.
+    """
+    left, right = x[:, 0].astype(np.float64), x[:, 1].astype(np.float64)
+    mid = np.abs(F.stft(left + right, n_fft=2048, hop=hop))
+    side = np.abs(F.stft(left - right, n_fft=2048, hop=hop))
+    return np.maximum(mid - side, 0.0)
+
+
+def vocal_envelope(x: np.ndarray, sr: int, hop: int = ENV_HOP,
+                   band: tuple[float, float] = VOCAL_BAND) -> tuple[np.ndarray, float]:
+    """A 0-1 curve of how much *voice-like* energy the signal has, over time.
+
+    Two cheap discriminators, multiplied:
+
+    * band energy in ``band``, which throws away the kick, the sub and most of
+      the cymbals before anything else is measured;
+    * tonality, ``1 - flatness``, where flatness is the geometric over the
+      arithmetic mean of the band spectrum (Wiener entropy). A sung note is a
+      handful of loud harmonics over a quiet floor and scores near 1; a snare,
+      a hat or vinyl noise is broadband and scores near 0.
+
+    Running this on a Demucs ``vocals`` stem instead of the full mix makes the
+    first term nearly exact; the second still earns its keep by suppressing the
+    bleed and separation artefacts that stem carries in its quiet moments.
+    """
+    x = np.asarray(x, dtype=np.float32)
+    fps = sr / float(hop)
+    if len(x) < hop * 2:
+        return np.zeros(1, dtype=np.float32), fps
+
+    if x.ndim > 1 and x.shape[1] == 2:
+        spec = _centre_magnitude(x, hop)
+    else:
+        mono = x.mean(axis=1) if x.ndim > 1 else x
+        spec = np.abs(F.stft(mono, n_fft=2048, hop=hop))
+    freqs = np.fft.rfftfreq(2048, 1.0 / sr)
+    lo = int(np.searchsorted(freqs, band[0]))
+    hi = int(np.searchsorted(freqs, band[1]))
+    sub = spec[lo:hi] ** 2
+    if not sub.size:
+        return np.zeros(spec.shape[1], dtype=np.float32), fps
+
+    energy = np.sqrt(sub.mean(axis=0))
+    log_mean = np.exp(np.log(sub + 1e-12).mean(axis=0))
+    flatness = log_mean / np.maximum(sub.mean(axis=0), 1e-12)
+    env = energy * (1.0 - np.clip(flatness, 0.0, 1.0))
+
+    # ~45 ms smoothing: long enough to ride the glottal pulses inside one vowel
+    # (a pitch period is 4-10 ms), short enough that it smears a phrase edge by
+    # less than CUT_GUARD. If the smear were wider than the guard, a cut placed
+    # exactly on a phrase start would read as mid-word, which is the one case
+    # the snapper most wants to say yes to.
+    w = max(1, int(round(0.045 * fps)))
+    if w > 1:
+        env = np.convolve(env, np.ones(w) / w, mode="same")
+    peak = float(np.percentile(env, 99.0))
+    env = env / max(peak, 1e-9)
+    return np.clip(env, 0.0, 1.5).astype(np.float32), fps
+
+
+def find_gaps(env: np.ndarray, fps: float, threshold: float,
+              min_gap: float = GAP_MIN) -> list[PhraseGap]:
+    """Runs of ``env`` below ``threshold`` lasting at least ``min_gap``."""
+    if not len(env):
+        return []
+    quiet = env < threshold
+    gaps: list[PhraseGap] = []
+    start = None
+    for i, q in enumerate(quiet):
+        if q and start is None:
+            start = i
+        elif not q and start is not None:
+            a, b = start / fps, i / fps
+            if b - a >= min_gap:
+                gaps.append(PhraseGap(a, b))
+            start = None
+    if start is not None:
+        a, b = start / fps, len(quiet) / fps
+        if b - a >= min_gap:
+            gaps.append(PhraseGap(a, b))
+    return gaps
+
+
+def voiced_run(env: np.ndarray, fps: float, threshold: float) -> float:
+    """Median length in seconds of a contiguous run above ``threshold``."""
+    if not len(env):
+        return 0.0
+    loud = env >= threshold
+    runs, n = [], 0
+    for v in loud:
+        if v:
+            n += 1
+        elif n:
+            runs.append(n / fps)
+            n = 0
+    if n:
+        runs.append(n / fps)
+    return float(np.median(runs)) if runs else 0.0
+
+
+def vocal_map(x: np.ndarray, sr: int, vocals: np.ndarray | None = None,
+              min_gap: float = GAP_MIN, drop_db: float = GAP_DROP_DB) -> VocalMap:
+    """Build the :class:`VocalMap` the arranger cuts against.
+
+    ``vocals`` is an isolated vocal (or harmonic) stem when one is available --
+    ``fourfloor.stems.separate`` gives you one either way. When it is ``None``
+    the envelope is measured from the full mix, which is noisier but still
+    finds phrase boundaries in anything with a foreground voice.
+
+    The threshold is relative: 13 dB under the 90th percentile of the envelope.
+    An absolute level would find no gaps at all in a loud master and nothing
+    but gaps in a quiet one.
+    """
+    signal = vocals if vocals is not None else x
+    stereo = np.asarray(signal).ndim > 1 and np.asarray(signal).shape[-1] == 2
+    source = ("stem" if vocals is not None else "mix") + ("+centre" if stereo else "")
+    env, fps = vocal_envelope(signal, sr)
+    duration = len(np.asarray(x)) / float(sr)
+
+    if len(env) < 2:
+        return VocalMap(env, fps, 0.0, [], source, duration, 0.0, 0.0)
+    p90 = float(np.percentile(env, 90.0))
+    p10 = float(np.percentile(env, 10.0))
+    # a synthetic source can be digitally silent between events, which would
+    # send the ratio to infinity; cap the usable range at 80 dB
+    contrast = 20.0 * np.log10(max(p90, 1e-9) / max(p10, 1e-4 * p90, 1e-9))
+    threshold = p90 * (10.0 ** (-drop_db / 20.0))
+    gaps = find_gaps(env, fps, threshold, min_gap)
+    return VocalMap(env, fps, threshold, gaps, source, duration, float(contrast),
+                    voiced_run(env, fps, threshold))
+
+
+#: How close to a cut a syllable has to be before the cut counts as mid-word.
+#: 80 ms is under half a sung syllable, so a splice this close to vocal energy
+#: audibly chops a word; further away and the ear hears a phrase boundary.
+CUT_GUARD = 0.08
+
+#: How far either side of a structural boundary we may move a cut, in bars.
+#: Two bars is enough to reach the nearest phrase edge in almost every song and
+#: short enough that the cut still lands where the segmentation meant it to.
+SNAP_WINDOW_BARS = 2.0
+
+
+@dataclass(frozen=True)
+class CutPoint:
+    """One chosen edit point, with the reasoning that produced it."""
+
+    time: float
+    reason: str
+    mid_phrase: bool
+    moved_bars: float
+    cost: float = 0.0          # comparable across candidates; not serialised
+
+    def to_dict(self) -> dict:
+        return {"time": round(self.time, 3), "reason": self.reason,
+                "mid_phrase": self.mid_phrase, "moved_bars": round(self.moved_bars, 2)}
+
+
+def _bar_grid(t: float, downbeats: np.ndarray, bar_dur: float,
+              window_bars: float) -> list[float]:
+    """Downbeat candidates within ``window_bars`` of ``t``.
+
+    Falls back to a synthetic grid hung off ``t`` when the source has no usable
+    downbeat track, so the search window behaves the same either way.
+    """
+    span = window_bars * bar_dur
+    if len(downbeats):
+        near = [float(d) for d in downbeats if abs(d - t) <= span + 1e-6]
+        if near:
+            # always offer the nearest downbeat even if the window missed it
+            nearest = float(downbeats[int(np.argmin(np.abs(downbeats - t)))])
+            if nearest not in near:
+                near.append(nearest)
+            return sorted(near)
+        return [float(downbeats[int(np.argmin(np.abs(downbeats - t)))])]
+    k = int(window_bars)
+    return [t + i * bar_dur for i in range(-k, k + 1)]
+
+
+def _splice_energy(vmap: VocalMap, t: float, role: str, guard: float) -> float:
+    """How much of a word a cut at ``t`` would tear in half.
+
+    A splice is only "mid-word" when the voice is sounding *continuously
+    across* it -- energy on both sides within ``guard``. Testing one side alone
+    gets both ends wrong in the same way: a clean entry at a phrase start is
+    loud immediately after it, and a clean exit at a phrase end is loud
+    immediately before it, so a one-sided test rejects exactly the cuts a human
+    editor would make. Taking the smaller of the two sides passes both and
+    still catches a cut dropped into the middle of a sustained note.
+
+    ``role`` does not change this measurement -- it changes which *bonuses*
+    :func:`snap_cut` applies, since an entry wants a phrase start under it and
+    an exit wants a phrase end.
+    """
+    lead = vmap.peak_activity(t - guard, t - guard * 0.1)
+    tail = vmap.peak_activity(t + guard * 0.1, t + guard)
+    return min(lead, tail)
+
+
+def snap_cut(t: float, downbeats: np.ndarray, vmap: VocalMap, bar_dur: float,
+             role: str = "entry", window_bars: float = SNAP_WINDOW_BARS,
+             guard: float = CUT_GUARD) -> CutPoint:
+    """Move a cut to the best nearby downbeat that is not inside a word.
+
+    Every candidate is a downbeat, so the result is on the grid by
+    construction. Among those, the cost prefers, in order: no vocal energy
+    within ``guard`` of the splice; sitting inside a phrase gap; being a phrase
+    *start* (for an entry) or a phrase *end* (for an exit); and staying close
+    to where the segmentation put the boundary.
+
+    When the source has no usable vocal contrast the cost collapses to the
+    distance term and this is just "snap to the nearest downbeat", which is
+    what the arranger did before -- the difference is that the plan now says so.
+    """
+    cands = _bar_grid(t, downbeats, bar_dur, window_bars)
+    if not cands:
+        return CutPoint(t, "no grid; left where the segmentation put it", False, 0.0, 0.0)
+
+    if not vmap.usable:
+        best = min(cands, key=lambda c: abs(c - t))
+        return CutPoint(best, f"nearest downbeat ({vmap.source} has no vocal "
+                              f"contrast to phrase against)", False,
+                        (best - t) / bar_dur, 0.0)
+
+    beat = bar_dur / 4.0
+    scored: list[tuple[float, float, str, bool]] = []
+    for c in cands:
+        peak = _splice_energy(vmap, c, role, guard)
+        mid = peak > vmap.threshold
+        cost = 1.0 * min(peak / max(vmap.threshold, 1e-9), 4.0)
+        cost += 0.12 * abs(c - t) / bar_dur
+
+        why: list[str] = []
+        gap = vmap.gap_at(c)
+        if gap is not None:
+            cost -= 0.35
+            why.append(f"in a {gap.duration:.2f}s phrase gap")
+        if role == "entry":
+            near = [g for g in vmap.gaps if -0.25 * beat <= c - g.end <= 3.0 * beat]
+            if near:
+                cost -= 0.30
+                why.append(f"phrase starts {abs(c - near[-1].end):.2f}s away")
+        else:
+            near = [g for g in vmap.gaps if -3.0 * beat <= g.start - c <= 0.25 * beat]
+            if near:
+                cost -= 0.30
+                why.append(f"phrase ends {abs(near[0].start - c):.2f}s away")
+        if not why:
+            why.append(f"vocal at {peak / max(vmap.threshold, 1e-9):.1f}x the gap level")
+        scored.append((cost, c, ", ".join(why), mid))
+
+    cost, best, why, mid = min(scored, key=lambda s: (s[0], abs(s[1] - t)))
+    moved = (best - t) / bar_dur
+    move_txt = "on the boundary" if abs(moved) < 1e-6 else f"{moved:+.0f} bar(s)"
+    return CutPoint(best, f"downbeat {move_txt}: {why}", mid, moved, cost)
+
+
+def section_hook_score(sec: Section, vmap: VocalMap, max_repeats: int,
+                       bar_dur: float) -> float:
+    """How much a section behaves like the hook of the song, 0-1.
+
+    Loudness alone picks the densest bar of the master, which in a modern mix
+    is often a bridge or an ad-lib pile-up rather than the part anyone would
+    sing back. Three signals, weighted:
+
+    * **vocal presence** -- a house drop needs a voice over it, and a section
+      that is 70% singing beats one that is 20% singing at the same RMS;
+    * **repetition** -- the hook is, definitionally, the thing that comes back;
+    * **energy** -- still matters, just no longer on its own.
+
+    A short section is discounted: you cannot build a 32-bar drop out of four
+    bars of source without hearing the loop.
+    """
+    presence = vmap.mean_activity(sec.start, sec.end) if vmap.usable else 0.5
+    repeat = (sec.repeats - 1) / max(max_repeats - 1, 1)
+    bars = sec.duration / max(bar_dur, 1e-6)
+    length = float(np.clip(bars / 8.0, 0.0, 1.0))
+    score = 0.34 * float(np.clip(presence * 1.6, 0.0, 1.0)) \
+        + 0.26 * float(np.clip(repeat, 0.0, 1.0)) \
+        + 0.28 * float(np.clip(sec.energy, 0.0, 1.0)) \
+        + 0.12 * length
+    if sec.label == "hook":
+        score += 0.10          # the segmenter's own opinion, as a tie-break
+    return float(score)
