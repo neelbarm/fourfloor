@@ -26,11 +26,15 @@ No cloud, no API key, no model download. numpy and scipy, and ffmpeg for codecs.
 
 ```bash
 git clone https://github.com/neelbarm/fourfloor && cd fourfloor
-brew install ffmpeg          # codecs only; all the DSP is numpy/scipy
-make setup                   # .venv + deps
-make demo                    # remix the bundled fixture
-open examples/preview.html   # see what it did, and hear it
+brew install ffmpeg python@3.12   # ffmpeg is the codec layer; all the DSP is numpy/scipy
+make setup                        # .venv + deps
+make demo                         # remix the bundled fixture (~50s)
+open examples/preview.html        # see what it did, and hear it
 ```
+
+Needs **Python 3.11 or newer** and ffmpeg on `PATH`. `make setup` picks the first
+`python3.12` it finds on `PATH`, falls back to `python3`, and tells you if that
+is too old; point it somewhere else with `make setup PY=/path/to/python3.12`.
 
 Then point it at something of your own:
 
@@ -74,7 +78,7 @@ matter for remix work: *identity phase locking* (Laroche & Dolson, IEEE TSAP
 *transient phase reset* that re-seeds frames whose spectral flux spikes, so a
 kick keeps its attack instead of smearing. Measured: pitch preserved to within
 ±10 cents, a click stays inside one sample at 10% of peak, envelope ripple on a
-stretched sine under 3%.
+stretched sine under 6%.
 
 The warp is driven by an arbitrary array of fractional analysis positions, which
 means the source isn't stretched by one global rate — it's warped *beat by beat*
@@ -140,23 +144,34 @@ transition automatically.
 
 ```
 fourfloor remix SONG [-o OUT.mp3]
-    --bpm 124                  target tempo (default: learned, or suggested from the source)
+    --bpm 124                  target tempo, 60-200 (default: learned, or suggested)
     --key 8A|Am|auto           target key; auto keeps the original
     --compatible-with T.mp3    shift into a key that mixes with track T (within ±3 semitones)
     --style style.json         apply a profile from `fourfloor learn`
     --stems hpss|demucs        separation engine (default hpss)
-    --length 4:30              target length; phrase counts scale to fit
+    --length 4:30              target length (default 4:30); rounds to 8-bar phrases
     --form club|radio|tool     arrangement preset (tool = extended DJ intro/outro)
     --swing 0.08               hat swing, 0 to 0.66
+    --seed 0                   randomisation seed
+    --no-wav                   write only the mp3
     --producer                 let Claude plan the arrangement (optional, see below)
     --preview                  also write preview.html
     --json                     print the session JSON instead of a report
+    -q, --quiet                no progress or report
 
 fourfloor inspect SONG [--json]      tempo, key, structure timeline, house target
-fourfloor learn FOLDER -o s.json     derive a style profile from a folder of remixes
-                                     (--anonymous omits per-file rows)
+fourfloor learn FOLDER -o s.json     derive a style profile from the audio files
+                                     directly inside FOLDER (not recursive;
+                                     --anonymous omits per-file rows)
 fourfloor preview OUT.mp3            write preview.html next to a finished remix
 ```
+
+`-o` must end in `.mp3` or `.wav`. Because the arrangement is built from whole
+8-bar phrases, `--length` lands within half a phrase of what you ask for rather
+than on the second, and it has a floor: every form keeps its two 8-bar builds
+and gives each of its five other slots at least one phrase, so nothing shorter
+than 56 bars — 1:48 at 124 BPM — exists. Ask for less and fourfloor tells you
+what it did instead.
 
 Outputs per remix: the mp3 (320k) and wav, `*.session.json`, `*.plan.json`, and
 optionally `preview.html`.
@@ -222,11 +237,18 @@ with no key and no network.
   well-formed club track; it will not surprise you.
 - **No true-peak limiting.** Output is normalised to −1.0 dBFS sample peak, which
   can still overshoot slightly after lossy encoding.
+- **Everything is held in RAM, and the spectrograms are the expensive part.**
+  The phase vocoder and HPSS both keep full-length complex spectrograms of the
+  whole track, so memory scales with the *source* length, not the output
+  length. Measured peak RSS on an M-series laptop, all at `--length 4:30`:
+  2.0 GB from a 1-minute source (26 s), 2.9 GB from 3 minutes (44 s), 6.5 GB
+  from 10 minutes (6 min). A normal song is comfortable on an 8 GB machine;
+  trim a DJ set or a podcast before feeding it in.
 
 ## Tests
 
 ```bash
-make test     # 74 tests, ~35s
+make test     # 101 tests, ~90s
 ```
 
 Covers the beat tracker against synthesised click tracks at 90/124/140 BPM and
