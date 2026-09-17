@@ -426,20 +426,26 @@ def test_a_command_line_that_makes_no_sense_is_refused(fake, argv, needle) -> No
 
 
 def test_inspect_reads_a_link_and_leaves_nothing_behind(fake, tmp_path) -> None:
-    out = run_cli(["inspect", "--url", url_for("Inspected")])
+    # its own TMPDIR, so "nothing behind" is about this run and nothing else
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    out = run_cli(["inspect", "--url", url_for("Inspected")], {"TMPDIR": str(scratch)})
     assert out.returncode == 0, out.stderr
     assert "tempo" in out.stdout and "BPM" in out.stdout
     assert "Inspected" in out.stdout
-    assert not list(Path(os.environ.get("TMPDIR", "/tmp")).glob("fourfloor-link-*"))
+    assert not list(scratch.iterdir()), "the fetched file outlived the command"
 
 
 def test_remix_from_a_link_writes_the_remix_it_was_asked_for(fake, tmp_path) -> None:
     out_path = tmp_path / "linked.house.mp3"
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
     out = run_cli(["remix", "--url", url_for("Linked"), "-o", str(out_path),
-                   "--length", "1:00", "--bpm", "124", "--no-wav"])
+                   "--length", "1:00", "--bpm", "124", "--no-wav"],
+                  {"TMPDIR": str(scratch)})
     assert out.returncode == 0, out.stderr
     assert out_path.is_file() and out_path.stat().st_size > 10_000
-    assert not list(Path(os.environ.get("TMPDIR", "/tmp")).glob("fourfloor-link-*"))
+    assert not list(scratch.iterdir()), "the fetched file outlived the command"
 
 
 # ---------------------------------------------------------------------------
@@ -452,8 +458,10 @@ def test_a_real_creative_commons_clip_comes_back(tmp_path) -> None:
     """The one test that talks to the internet. Nothing it downloads is kept."""
     if not shutil.which("yt-dlp"):
         pytest.skip("yt-dlp is not installed")
+    # Blender's "Caminandes 3: Llamigos": 2:30, CC-BY, and it has been up for
+    # a decade. Override with FOURFLOOR_NET_URL if it ever is not.
     url = os.environ.get("FOURFLOOR_NET_URL",
-                         "https://www.youtube.com/watch?v=BaW_jenozKc")
+                         "https://www.youtube.com/watch?v=SkVqJ1SGeL0")
     got = fetch.fetch(url, tmp_path, timeout=300)
     assert got.path.is_file() and got.bytes > 20_000
     assert got.title and got.duration > 0

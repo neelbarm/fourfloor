@@ -70,6 +70,60 @@ validation, the same session file — with a browser in front of it:
 No framework, no CDN, no build step: one stdlib HTTP server and three files of
 vanilla HTML, CSS and JavaScript.
 
+## Paste a link
+
+Finding an mp3 is the boring part. If [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+is on your `PATH`, fourfloor will fetch the audio itself — YouTube, YouTube
+Music, SoundCloud (single tracks *and* sets), or anything else yt-dlp reads.
+
+```bash
+brew install yt-dlp            # or: pipx install yt-dlp
+```
+
+In the app, the drop screen has a link field under the orb: paste a URL, press
+**Fetch**, and you land on the same controls screen as if you had dropped the
+file — with a progress bar while it downloads. The key picker's *match a track*
+takes a link too.
+
+In the terminal:
+
+```bash
+fourfloor fetch <url>                      # -> ~/Music/house-refs/remixes/
+fourfloor fetch <url> --to ~/Music/refs    # …or anywhere you like
+fourfloor fetch <playlist-or-set-url>      # every track in it
+
+# one half of a learning pair, or both at once
+fourfloor fetch <url> --name midnight-city --as original
+fourfloor fetch --original <url> --remix <url> --name midnight-city
+
+fourfloor inspect --url <url>              # fetch to a temp folder, analyse, clean up
+fourfloor remix --url <url> -o out.mp3     # same, then remix it
+```
+
+**The pair convention.** `fourfloor learn` reads reference material out of
+`~/Music/house-refs/`: standalone remixes in `remixes/`, and matched
+before/after pairs in `pairs/` as `<name>.original.mp3` next to
+`<name>.remix.mp3`. `fetch --original … --remix … --name midnight-city` writes
+exactly that, so a pair you found on YouTube is one command away from being
+something the style learner can measure.
+
+What it does with the file:
+
+- the **metadata is read first**, so the name on disk is fourfloor's own
+  sanitised version of the title, never whatever the site called it;
+- the download lands in a temporary folder beside the destination and is moved
+  into place only once it is complete;
+- **nothing is ever overwritten** — a name that is taken gets `-2`, `-3`, …;
+- the app only follows public `http(s)` links; `file:`, loopback, link-local
+  and private-network addresses are refused before yt-dlp is started.
+
+> **A plain note about YouTube.** Downloading from YouTube is against its terms
+> of service. This feature exists for private, local analysis of tracks you
+> already have the right to use — nothing fetched is uploaded, shared or
+> redistributed by fourfloor, and none of it is ever committed to this repo.
+> If a download fails with a 403 or "format not available", your yt-dlp is
+> usually out of date: `brew upgrade yt-dlp`.
+
 ## 60-second quickstart
 
 ```bash
@@ -212,8 +266,18 @@ fourfloor remix SONG [-o OUT.mp3]
     --preview                  also write preview.html
     --json                     print the session JSON instead of a report
     -q, --quiet                no progress or report
+    --url LINK                 fetch the source from a link instead of naming a file
+
+fourfloor fetch URL                  download a track with yt-dlp (needs yt-dlp on PATH)
+    --to remixes|pairs|DIR     where it lands (default ~/Music/house-refs/remixes)
+    --name BODY                name it yourself; the body of a pair's name
+    --as original|remix        write <name>.<kind>.mp3, one half of a pair
+    --original U --remix U     fetch both halves of a pair (with --name)
+    --json / -q                print what landed as JSON / say nothing
 
 fourfloor inspect SONG [--json]      tempo, key, structure timeline, house target
+    --url LINK                 analyse a link instead of a file
+
 fourfloor learn FOLDER -o s.json     derive a style profile from the audio files
                                      directly inside FOLDER (not recursive;
                                      --anonymous omits per-file rows)
@@ -327,6 +391,16 @@ read, and the size cap), the id and path rules, the job queue and its replayable
 event stream, and an end-to-end HTTP test that uploads the fixture, starts a
 remix at 124, consumes the SSE stream to completion and downloads the mp3 —
 asserting its duration against the session file the DJ handoff promises.
+
+Link fetching is tested against a fake `yt-dlp` on `PATH` that prints the same
+progress lines the real one does, so playlists, pair naming, collisions,
+timeouts, a missing binary, every refused URL and the whole `POST /api/fetch`
+path are covered without touching the network. One test does fetch a short
+Creative Commons clip for real, and is skipped unless you ask for it:
+
+```bash
+FOURFLOOR_NET_TESTS=1 make test        # or: pytest -k real_creative
+```
 
 ## License
 

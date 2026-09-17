@@ -341,6 +341,16 @@ def is_playlist(info: dict) -> bool:
 # fetching
 # ---------------------------------------------------------------------------
 
+#: Signs that YouTube served a format this yt-dlp cannot actually download.
+#: An older yt-dlp picks a player client whose media URLs now answer 403; the
+#: real fix is updating the binary, and naming another client gets today's
+#: download through in the meantime.
+_STALE_CLIENT = ("403: forbidden", "requested format is not available",
+                 "po token", "the page needs to be reloaded",
+                 "only images are available")
+_FALLBACK_CLIENT = ("--extractor-args", "youtube:player_client=mweb,web")
+
+
 def _download(url: str, into: Path, progress: Progress | None,
               timeout: float, label: str) -> Path:
     """Run the download into ``into`` and return the mp3 it produced."""
@@ -365,7 +375,17 @@ def _download(url: str, into: Path, progress: Progress | None,
             progress(100.0, "converting to mp3")
 
     code, log = _run(cmd, timeout, on_line)
-    if code != 0:
+    if code != 0 and "youtube" in site_of(url) \
+            and any(s in log.lower() for s in _STALE_CLIENT):
+        last = -1.0
+        for f in into.iterdir():                   # a part file from the first try
+            f.unlink(missing_ok=True)
+        code, log = _run([cmd[0], *_FALLBACK_CLIENT, *cmd[1:]], timeout, on_line)
+        if code != 0:
+            raise FetchError(
+                f"{_friendly(log, url)} This usually means yt-dlp is out of date "
+                f"-- `brew upgrade yt-dlp` (or `pipx upgrade yt-dlp`).")
+    elif code != 0:
         raise FetchError(_friendly(log, url))
     mp3s = sorted(into.glob("*.mp3"))
     if not mp3s:
