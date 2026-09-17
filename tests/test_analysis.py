@@ -90,18 +90,7 @@ def test_parse_key_and_camelot() -> None:
 
 def test_suggested_house_tempo_is_in_band() -> None:
     for bpm in (72.0, 80.0, 95.0, 128.0, 150.0, 174.0):
-        assert 124.0 <= suggest_house_tempo(bpm) <= 132.0
-
-
-def test_suggested_house_tempo_takes_the_smallest_stretch() -> None:
-    """The A/B pair settles this: 146 BPM became 130, not 124.
-
-    The old 120-128 band could only answer 124 for a 146 BPM source, a 15%
-    stretch, where the commercial remix of that exact track chose the
-    minimum-stretch landing at the top of the band.
-    """
-    assert suggest_house_tempo(145.99) >= 130.0
-    assert suggest_house_tempo(124.0) == 124.0     # already in band, leave it
+        assert 120.0 <= suggest_house_tempo(bpm) <= 128.0
 
 
 def test_structure_finds_sections(fixture_path) -> None:

@@ -124,24 +124,6 @@ def warp_source(a: Analysis, tempo: TempoPlan, semitones: int,
     return warped
 
 
-def _planner_vocals(a: Analysis, stems) -> np.ndarray | None:
-    """The best vocal estimate available, on the *source's* timeline.
-
-    ``separate`` runs on the warped buffer, because that is the timeline the
-    renderer addresses. The planner's cut points are the other way round: they
-    are chosen against the source's own downbeats and phrase gaps. Scaling the
-    stem back by the global length ratio lines the two up to within whatever
-    tempo drift the beat-by-beat warp absorbed, which on a produced record is
-    tens of milliseconds -- well under the 80 ms of guard a cut is judged
-    against.
-    """
-    stem = stems.vocal if stems.vocal is not None else stems.harmonic
-    if stem is None or not len(stem):
-        return None
-    ratio = a.duration * a.sr / len(stem)
-    return resample_ratio(stem, ratio) if abs(ratio - 1.0) > 1e-3 else stem
-
-
 #: The phases ``remix`` reports through ``progress``, in order. The web app
 #: draws this list before the job starts, so it lives next to the calls below.
 PHASES = ("analyse", "warp", "separate", "arrange", "render", "write")
@@ -195,9 +177,7 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
 
     target_bpm = opts.target_bpm or (style.bpm if style else None) \
         or suggest_house_tempo(a.grid.bpm)
-    # Straight sixteenths by default: hats in the reference corpus sit within
-    # +/-7 ms of the grid, so a shuffle has to be asked for.
-    swing = opts.swing if opts.swing is not None else (style.swing if style else 0.0)
+    swing = opts.swing if opts.swing is not None else (style.swing if style else 0.08)
 
     semitones, target_key, warnings = _resolve_key(a, opts)
     tempo = plan_tempo(a.grid.bpm, target_bpm)
@@ -215,13 +195,8 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     step("arrange", f"{opts.form} form")
     length = arrange.parse_length(opts.length) if opts.length else (
         style.length if style and style.length else 270.0)
-    # The planner cuts on vocal phrase boundaries, so it wants the best vocal
-    # estimate available: Demucs' `vocals` stem when there is one, the HPSS
-    # harmonic bed otherwise. Both are already warped onto the target grid,
-    # which is the timeline the planner's cut points live on.
     p = arrange.plan(a, target_bpm, tempo.beat_multiple, form_name=opts.form,
-                     length=length, swing=swing, has_stems=(opts.stems == "demucs"),
-                     vocals=_planner_vocals(a, stems))
+                     length=length, swing=swing, has_stems=(opts.stems == "demucs"))
     if length and p.duration > length + 4.0 * p.bar_dur:
         min_bars = arrange.form_min_bars(arrange.FORMS.get(opts.form, arrange.FORMS["club"]))
         warnings.append(

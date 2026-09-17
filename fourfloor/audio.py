@@ -200,35 +200,3 @@ def xfade(a: np.ndarray, b: np.ndarray, n: int) -> np.ndarray:
     head = a[:-n] if n < len(a) else a[:0]
     mid = a[len(a) - n:] * fade_out + b[:n] * fade_in
     return np.concatenate([head, mid, b[n:]])
-
-
-def step_score(x: np.ndarray, sr: int, at: float, radius: float = 0.02,
-               window: float = 0.2) -> float:
-    """Largest one-sample jump within ``radius`` of ``at``, against the local
-    distribution of jumps.
-
-    A cut, a gain step or a filter that jumps between blocks shows up as a
-    single derivative sample far outside anything the material around it
-    produces. The comparison has to be with that material's own jumps, not with
-    its RMS: a bar of bright noise over a quiet bed has a large derivative
-    everywhere and no discontinuity anywhere, and dividing by RMS calls that a
-    click. Dividing by the 99th percentile of the jumps in a wider
-    neighbourhood asks the right question -- is this jump unlike its
-    neighbours -- and gives a number near 1 for ordinary material whatever its
-    level or brightness.
-    """
-    mono = x.mean(axis=1) if x.ndim == 2 else x
-    n = len(mono)
-    if n < 8:
-        return 0.0
-    i = int(round(at * sr))
-    r, w = max(2, int(radius * sr)), max(8, int(window * sr))
-    a, b = max(0, i - r), min(n, i + r)
-    wa, wb = max(0, i - w), min(n, i + w)
-    if b - a < 2 or wb - wa < 8:
-        return 0.0
-    peak = float(np.max(np.abs(np.diff(mono[a:b]))))
-    scale = float(np.percentile(np.abs(np.diff(mono[wa:wb])), 99.0))
-    if peak < 1e-5:
-        return 0.0
-    return peak / max(scale, 1e-7)
