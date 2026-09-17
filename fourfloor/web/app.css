@@ -438,6 +438,64 @@ input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.18); }
 .drop-mini:hover { background: rgba(255, 255, 255, 0.08); transform: translateY(-1px); }
 .drop-mini small { color: var(--muted); font-size: 12px; font-weight: 450; }
 
+/* ── the link field ─────────────────────────────────────────────────────── */
+
+.or-link { max-width: 560px; margin: 26px auto 0; }
+.or-link .or {
+  display: block; text-align: center; font-size: 12.5px; color: var(--dim);
+  letter-spacing: 0.04em; margin-bottom: 12px;
+}
+.link-row {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--glass); border: 1px solid var(--line); border-radius: 999px;
+  padding: 5px 5px 5px 18px;
+  backdrop-filter: blur(26px) saturate(170%);
+  -webkit-backdrop-filter: blur(26px) saturate(170%);
+  transition: border-color 260ms var(--ease), background 260ms var(--ease),
+              transform 320ms var(--spring), box-shadow 320ms var(--ease);
+}
+.link-row:focus-within {
+  border-color: var(--line-2); background: rgba(255, 255, 255, 0.085);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 40px rgba(46, 230, 214, 0.10);
+}
+.link-row input {
+  flex: 1 1 auto; min-width: 0; appearance: none; background: none; border: 0;
+  color: var(--ink); font-family: inherit; font-size: 14.5px; font-weight: 520;
+  padding: 11px 0; outline: none;
+}
+.link-row input::placeholder { color: var(--dim); }
+.link-row.busy { opacity: 0.72; }
+.link-go {
+  appearance: none; border: 0; cursor: pointer; font-family: inherit;
+  font-size: 14px; font-weight: 620; color: #061410; white-space: nowrap;
+  border-radius: 999px; padding: 11px 20px;
+  background: linear-gradient(96deg, var(--teal), var(--violet) 78%);
+  background-size: 180% 100%;
+  transition: transform 380ms var(--spring), background-position 900ms var(--ease),
+              filter 300ms var(--ease);
+}
+.link-go:hover { transform: translateY(-1px); background-position: 100% 0; }
+.link-go:active { transform: scale(0.96); }
+.link-go:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.link-go[disabled] { filter: grayscale(0.65) brightness(0.72); cursor: progress; }
+.help.small { font-size: 12px; margin-top: 12px; }
+
+.link-row.mini { margin-top: 12px; border-radius: 14px; padding: 4px 4px 4px 14px; }
+.link-row.mini input { font-size: 13.5px; padding: 9px 0; }
+.link-row.mini .link-go { padding: 9px 15px; font-size: 13px; border-radius: 11px; }
+
+.fetch-progress { max-width: 560px; margin: 0 auto 26px; }
+.slim-bar {
+  height: 4px; border-radius: 999px; overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+.slim-bar i {
+  display: block; height: 100%; width: 0; border-radius: 999px;
+  background: linear-gradient(90deg, var(--teal), var(--violet) 60%, var(--pink));
+  transition: width 320ms var(--ease);
+}
+
 /* ── the button ─────────────────────────────────────────────────────────── */
 
 .cta {
@@ -669,6 +727,9 @@ td.note-cell { color: var(--muted); font-variant-numeric: normal; min-width: 220
   .player-meta { display: none; }
   .orb { width: min(320px, 78vw); }
   .orb-label { font-size: 17px; }
+  .link-row { padding-left: 14px; border-radius: 18px; }
+  .link-row input { font-size: 13.5px; }
+  .link-go { padding: 10px 15px; font-size: 13px; border-radius: 14px; }
 }
 
 /* ── motion off ─────────────────────────────────────────────────────────── */

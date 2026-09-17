@@ -133,8 +133,11 @@ function go(name) {
   if (name === state.screen) { placeCard(name); return Promise.resolve(); }
   if (!REDUCED && document.startViewTransition) {
     try {
-      return document.startViewTransition(() => applyScreen(name)).finished
-        .catch(() => {});
+      const vt = document.startViewTransition(() => applyScreen(name));
+      // starting a screen change while one is still running aborts it, which
+      // rejects `ready`; nobody awaits that, so it would surface as an error
+      if (vt.ready) vt.ready.catch(() => {});
+      return vt.finished.catch(() => {});
     } catch (e) { /* fall through */ }
   }
   const stage = $('#stage');
@@ -505,6 +508,119 @@ async function takeFile(file) {
     state.source = null;
     await go('drop');
   } finally {
+    lede.textContent = 'Beat grid, key, chords and structure — a few seconds.';
+  }
+}
+
+/* ── paste a link ────────────────────────────────────────────────────────── */
+
+/* A fetch is an ordinary job on the same queue as the remixes, so it arrives on
+ * the same SSE stream. This resolves with the source the server made, which is
+ * exactly what /api/upload returns -- so a link and a drop rejoin here and the
+ * rest of the app cannot tell them apart. */
+function followJob(jobId, onEvent) {
+  return new Promise((resolve, reject) => {
+    const es = new EventSource(`/api/jobs/${jobId}/events`);
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      es.close();
+      fn(value);
+    };
+    es.onmessage = e => {
+      let ev = null;
+      try { ev = JSON.parse(e.data); } catch (err) { return; }   /* keep-alive */
+      if (onEvent) onEvent(ev);
+      if (ev.type === 'done') finish(resolve, ev.result);
+      else if (ev.type === 'error') finish(reject, new Error(ev.message));
+    };
+    es.addEventListener('end', () =>
+      finish(reject, new Error('the fetch stopped before it finished')));
+    es.onerror = () => {
+      // EventSource reconnects on its own; ask the job whether it is over.
+      if (settled) return;
+      fetch(`/api/jobs/${jobId}`).then(r => r.json()).then(j => {
+        if (!j || !j.state) return;
+        if (j.state === 'failed') finish(reject, new Error(j.error || 'the fetch failed'));
+        else if (j.state === 'done') {
+          const done = (j.events || []).find(e => e.type === 'done');
+          if (done) finish(resolve, done.result);
+        }
+      }).catch(() => {});
+    };
+  });
+}
+
+function checkLink(url) {
+  const raw = (url || '').trim();
+  if (!raw) return 'Paste a link first.';
+  if (!/^https?:\/\//i.test(raw)) return 'Links start with http:// or https://.';
+  return null;
+}
+
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return 'the link'; }
+}
+
+/* Start a fetch job and report it through `onStep(percent, note)`. */
+async function fetchLink(url, onStep) {
+  const started = await api('/api/fetch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+  return followJob(started.job, ev => {
+    if (!onStep) return;
+    if (ev.type === 'queued' && ev.position > 0) onStep(0, `waiting — ${ev.position} ahead`);
+    else if (ev.type === 'phase' && ev.name === 'fetch') onStep(0, ev.detail || 'reading the link');
+    else if (ev.type === 'phase' && ev.name === 'analyse') onStep(100, 'reading the track');
+    else if (ev.type === 'progress') onStep(ev.percent, ev.detail || '');
+  });
+}
+
+function setFetchBar(pct, note) {
+  $('#fetchProgress').hidden = false;
+  $('#fetchBar').style.width = Math.max(0, Math.min(100, pct)) + '%';
+  $('#fetchNote').textContent = pct > 0 && pct < 100
+    ? `${Math.round(pct)}% — ${note}` : note;
+}
+
+async function takeLink(url) {
+  const problem = checkLink(url);
+  if (problem) { showAlert($('#dropErr'), problem); return; }
+  const btn = $('#linkGo');
+  showAlert($('#dropErr'), '');
+  btn.disabled = true;
+  state.source = null;
+  renderSourcePlaceholder(hostOf(url));
+  $('#srcSub').textContent = 'fetching…';
+  await go('analysing');
+  startScanning();
+  const lede = $('#s-analysing .lede');
+  lede.textContent = 'Downloading the audio, then reading it.';
+  setFetchBar(0, 'reading the link');
+  try {
+    const meta = await fetchLink(url, (pct, note) => {
+      setFetchBar(pct, note);
+      if (note) $('#srcName').textContent = note.length > 48 ? note.slice(0, 47) + '…' : note;
+    });
+    state.source = meta;
+    state.match = null;
+    state.keyMode = 'keep';
+    state.key = 'keep';
+    $('#linkInput').value = '';
+    renderSource(meta);
+    prepareControls(meta);
+    await go('controls');
+  } catch (err) {
+    showAlert($('#dropErr'), err.message);
+    state.source = null;
+    await go('drop');
+  } finally {
+    btn.disabled = false;
+    $('#fetchProgress').hidden = true;
+    $('#fetchBar').style.width = '0%';
     lede.textContent = 'Beat grid, key, chords and structure — a few seconds.';
   }
 }
@@ -918,6 +1034,12 @@ function wireDropZone() {
     input.value = '';
   });
 
+  const link = $('#linkInput');
+  const go = () => takeLink(link.value);
+  $('#linkGo').addEventListener('click', go);
+  link.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+  link.addEventListener('input', () => showAlert($('#dropErr'), ''));
+
   let depth = 0;
   const over = e => {
     if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
@@ -992,6 +1114,39 @@ function wireControls() {
     }
   });
 
+  const matchLink = $('#matchLinkInput'), matchGo = $('#matchLinkGo');
+  const takeMatchLink = async () => {
+    const url = matchLink.value;
+    const problem = checkLink(url);
+    if (problem) { showAlert($('#controlsErr'), problem); return; }
+    showAlert($('#controlsErr'), '');
+    matchGo.disabled = true;
+    $('#matchLabel').textContent = 'fetching ' + hostOf(url) + '…';
+    try {
+      const meta = await fetchLink(url, (pct, note) => {
+        $('#matchMeta').textContent = pct > 0 && pct < 100
+          ? `${Math.round(pct)}% — ${note}` : (note || 'reading it');
+      });
+      state.match = meta;
+      matchLink.value = '';
+      $('#matchLabel').textContent = meta.name;
+      $('#matchMeta').textContent =
+        `${meta.analysis.key.key} ${meta.analysis.key.camelot} · ` +
+        `${meta.analysis.tempo.bpm.toFixed(1)} BPM — the remix is shifted to mix with it`;
+      updateKeyOut();
+    } catch (err) {
+      showAlert($('#controlsErr'), err.message);
+      $('#matchLabel').textContent = 'Choose a track to mix with…';
+      $('#matchMeta').textContent = 'its key is read the same way';
+    } finally {
+      matchGo.disabled = false;
+    }
+  };
+  matchGo.addEventListener('click', takeMatchLink);
+  matchLink.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); takeMatchLink(); }
+  });
+
   $('#remixBtn').addEventListener('click', startRemix);
   $('#backFromJob').addEventListener('click', () => { closeStream(); go('controls'); });
   $('#againBtn').addEventListener('click', () => {
@@ -1059,6 +1214,14 @@ async function init() {
   }
   $('#maxMb').textContent = String(state.config.max_upload_mb);
   $('#libHome').textContent = state.config.home;
+  if (state.config.fetch === false) {
+    // no yt-dlp on this machine: say so once, rather than failing on submit
+    $('#linkInput').disabled = true;
+    $('#linkGo').disabled = true;
+    $('#matchLinkRow').hidden = true;
+    $('#linkHelp').textContent =
+      'links need yt-dlp on this machine — install it with `brew install yt-dlp`';
+  }
   loadLibrary();
 }
 

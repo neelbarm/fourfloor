@@ -14,6 +14,10 @@ The rules it holds to:
   so the app cannot ask for anything ``fourfloor remix`` would refuse.
 * **No path comes from the browser.** Ids are minted in :mod:`fourfloor.store`
   and downloadable names are an allowlist.
+* **A pasted link is a URL, not a fetch instruction.**
+  :func:`fourfloor.fetch.check_url` refuses anything that is not public http(s)
+  before yt-dlp is started, so the link field cannot be used to read a local
+  file or knock on a machine inside the network.
 """
 
 from __future__ import annotations
@@ -121,6 +125,7 @@ class App:
     # -- config -----------------------------------------------------------
 
     def config(self) -> dict:
+        from . import fetch as fetch_mod
         from .stems import demucs_available
 
         # the page shows this path, so show it the way a person writes it
@@ -138,6 +143,7 @@ class App:
             "styles": [{k: v for k, v in s.items() if k != "path"}
                        for s in list_styles(self.lib)],
             "demucs": demucs_available(),
+            "fetch": fetch_mod.available(),
             "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
             "upload_exts": sorted(store.UPLOAD_EXTS),
             "queue_depth": self.queue.depth(),
@@ -175,6 +181,69 @@ class App:
             "wave": waveform_of(a.clip.mono, 900) if a.clip is not None else [],
         }
         self.lib.save_source_meta(sid, meta)
+        return meta
+
+    # -- fetch ------------------------------------------------------------
+
+    def start_fetch(self, payload: dict) -> dict:
+        """Queue a download of a pasted link. It ends where an upload ends.
+
+        The job runs on the same single worker as the remixes, so a link pasted
+        while a remix is rendering waits its turn and says so -- one queue, one
+        event stream, one thing to reason about. Its result is exactly the
+        object ``POST /api/upload`` returns, so the page joins the normal path
+        at the analysis and lands on the controls screen.
+        """
+        from . import fetch as fetch_mod
+
+        try:
+            url = fetch_mod.check_url(str(payload.get("url") or ""))
+        except fetch_mod.FetchError as exc:
+            raise HttpError(400, str(exc)) from None
+        if not fetch_mod.available():
+            raise HttpError(400, "yt-dlp is not installed on this machine, so "
+                                 "fourfloor cannot read a link. `brew install yt-dlp`")
+        jid = store.new_id()
+        job = self.queue.submit(jid, lambda j: self._run_fetch(j, url),
+                                label=fetch_mod.site_of(url))
+        return {"job": jid, "url": url, "site": fetch_mod.site_of(url),
+                "queued": self.queue.depth(), "state": job.state}
+
+    def _run_fetch(self, job, url: str) -> dict:
+        import shutil
+        import tempfile
+
+        from . import fetch as fetch_mod
+
+        job.emit("phase", name="fetch", detail="reading the link")
+        info = fetch_mod.probe(url)
+        if fetch_mod.is_playlist(info):
+            n = len(fetch_mod.entries_of(info))
+            raise fetch_mod.FetchError(
+                f"that link is a set of {n} tracks. The app takes one at a time -- "
+                f"paste a single track, or run `fourfloor fetch` in a terminal.")
+        title = str(info.get("title") or "").strip()
+        job.emit("phase", name="fetch", detail=title or url)
+
+        seen = -1.0
+
+        def progress(pct: float, note: str = "") -> None:
+            nonlocal seen
+            if pct >= seen + 1.0 or pct >= 100.0:
+                seen = pct
+                job.emit("progress", percent=round(pct, 1), detail=note or title)
+
+        tmp = Path(tempfile.mkdtemp(prefix="link-", dir=self.lib.uploads))
+        try:
+            got = fetch_mod.fetch(url, tmp, progress=progress, info=info)
+            job.emit("phase_done", name="fetch", elapsed=round(time.time() - job.started, 2))
+            job.emit("phase", name="analyse", detail=got.title or got.path.stem)
+            meta = self.upload("file", got.path.name, got.path)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        meta = self.lib.save_source_meta(meta["id"], {**meta, "link": got.to_dict()})
+        job.emit("phase_done", name="analyse",
+                 elapsed=round(time.time() - job.started, 2))
         return meta
 
     # -- remix ------------------------------------------------------------
@@ -396,6 +465,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(app.config())
         elif parts == ["upload"] and method == "POST":
             self._upload()
+        elif parts == ["fetch"] and method == "POST":
+            self._json(app.start_fetch(self._body_json()))
         elif parts == ["remix"] and method == "POST":
             self._json(app.start_remix(self._body_json()))
         elif len(parts) == 3 and parts[0] == "jobs" and parts[2] == "events" \

@@ -51,6 +51,18 @@
     <input type="file" id="file" class="visually-hidden"
            accept=".mp3,.m4a,.wav,.flac,.aiff,.aif,audio/mpeg,audio/mp4,audio/wav,audio/flac,audio/aiff">
     <p class="help" id="dropHelp">mp3 · m4a · wav · flac · aiff — up to <b id="maxMb">200</b> MB</p>
+
+    <div class="or-link" id="orLink">
+      <span class="or">or paste a YouTube / SoundCloud link</span>
+      <div class="link-row">
+        <input type="url" id="linkInput" spellcheck="false" inputmode="url"
+               autocomplete="off" placeholder="https://www.youtube.com/watch?v=…"
+               aria-label="Paste a YouTube or SoundCloud link">
+        <button class="link-go" id="linkGo" type="button">Fetch</button>
+      </div>
+      <p class="help small" id="linkHelp">the audio is downloaded to this machine and analysed here</p>
+    </div>
+
     <div class="alert" id="dropErr" role="alert" hidden></div>
   </section>
 
@@ -59,6 +71,10 @@
     <p class="eyebrow"><span class="dot pulse"></span> analysing</p>
     <h2 class="title small">Reading the track.</h2>
     <p class="lede">Beat grid, key, chords and structure — a few seconds.</p>
+    <div class="fetch-progress" id="fetchProgress" hidden>
+      <div class="slim-bar"><i id="fetchBar"></i></div>
+      <p class="note center" id="fetchNote">reading the link…</p>
+    </div>
     <div class="slot" id="slot-analysing"></div>
   </section>
 
@@ -104,6 +120,12 @@
           </button>
           <input type="file" id="matchFile" class="visually-hidden"
                  accept=".mp3,.m4a,.wav,.flac,.aiff,.aif,audio/*">
+          <div class="link-row mini" id="matchLinkRow">
+            <input type="url" id="matchLinkInput" spellcheck="false" inputmode="url"
+                   autocomplete="off" placeholder="…or paste a link to it"
+                   aria-label="Paste a link to the track to mix with">
+            <button class="link-go" id="matchLinkGo" type="button">Fetch</button>
+          </div>
         </div>
       </div>
 
