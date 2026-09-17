@@ -14,8 +14,25 @@ from .style import Style
 VERSION = "0.1.0"
 
 
+class CliError(ValueError):
+    """A command line the parser refused.
+
+    argparse's default is to print usage and call ``sys.exit``, which is right
+    for a terminal and useless to the web app -- it needs the message so it can
+    answer 400 with it. Raising instead means the option rules live in exactly
+    one place: whatever ``fourfloor remix`` refuses, ``fourfloor serve``
+    refuses too, with the same wording.
+    """
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str):        # noqa: D102 - argparse hook
+        raise CliError(message)
+
+
 def _parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    # subparsers inherit this class, so every subcommand raises too
+    p = _Parser(
         prog="fourfloor",
         description="Turn any song into a house remix, with a session file a DJ app can sync to.",
     )
@@ -57,7 +74,34 @@ def _parser() -> argparse.ArgumentParser:
     v = sub.add_parser("preview", help="write a preview.html next to a remix")
     v.add_argument("input", help="a remix mp3/wav that has a .session.json beside it")
     v.add_argument("-o", "--output", default=None)
+
+    s = sub.add_parser("serve", help="run the local web app: drop a song in a browser")
+    s.add_argument("--port", type=int, default=4444, help="port to listen on (default 4444)")
+    s.add_argument("--open", action="store_true", dest="open_browser",
+                   help="open the app in your browser once it is up")
+    s.add_argument("--home", default=None, metavar="DIR",
+                   help="where uploads and remixes live (default ~/.fourfloor)")
     return p
+
+
+def parse_remix_args(argv: list[str]):
+    """Parse a ``remix`` command line, raising :class:`CliError` on a bad flag.
+
+    This is the seam the web app validates through: it renders its form state
+    as the flags a person would have typed, and gets argparse's own answer.
+    """
+    return _parser().parse_args(argv)
+
+
+def remix_options(args):
+    """Build :class:`~fourfloor.remix.RemixOptions` from parsed ``remix`` args."""
+    from .remix import RemixOptions
+
+    return RemixOptions(
+        target_bpm=args.bpm, key=args.key, compatible_with=args.compatible_with,
+        stems=args.stems, form=args.form, length=args.length, swing=args.swing,
+        producer=args.producer, seed=args.seed, wav=not args.no_wav,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -201,18 +245,14 @@ def cmd_inspect(args, c: ui.C) -> int:
 
 
 def cmd_remix(args, c: ui.C) -> int:
-    from .remix import RemixOptions, remix
+    from .remix import remix
 
     src = Path(args.input)
     out = Path(args.output) if args.output else src.with_suffix("").with_name(
         src.stem + ".house.mp3")
     style = Style.load(args.style) if args.style else None
 
-    opts = RemixOptions(
-        target_bpm=args.bpm, key=args.key, compatible_with=args.compatible_with,
-        stems=args.stems, form=args.form, length=args.length, swing=args.swing,
-        producer=args.producer, seed=args.seed, wav=not args.no_wav,
-    )
+    opts = remix_options(args)
     quiet = args.quiet or args.json
     if not quiet:
         print(ui.header(c, f"remixing {src.name}"))
@@ -272,11 +312,22 @@ def cmd_preview(args, c: ui.C) -> int:
     return 0
 
 
+def cmd_serve(args, c: ui.C) -> int:
+    from .server import serve
+
+    return serve(port=args.port, open_browser=args.open_browser, home=args.home, c=c)
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
     c = ui.C(ui.supports_color())
-    handlers = {"remix": cmd_remix, "inspect": cmd_inspect,
-                "learn": cmd_learn, "preview": cmd_preview}
+    try:
+        args = _parser().parse_args(argv)
+    except CliError as exc:
+        print(ui.error(c, str(exc)), file=sys.stderr)
+        print("  try `fourfloor --help`", file=sys.stderr)
+        return 2
+    handlers = {"remix": cmd_remix, "inspect": cmd_inspect, "learn": cmd_learn,
+                "preview": cmd_preview, "serve": cmd_serve}
     try:
         return handlers[args.command](args, c)
     except KeyboardInterrupt:

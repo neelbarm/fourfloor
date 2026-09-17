@@ -44,4 +44,4 @@ Issues = "https://github.com/neelbarm/fourfloor/issues"
 include = ["fourfloor*"]
 
 [tool.setuptools.package-data]
-fourfloor = ["py.typed"]
+fourfloor = ["py.typed", "web/*.html", "web/*.css", "web/*.js", "web/*.svg"]

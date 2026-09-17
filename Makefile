@@ -7,13 +7,15 @@ BIN     := $(VENV)/bin
 FIXTURE := fixtures/lofi-7.mp3
 DEMO    := examples/lofi-7.house.mp3
 REFS    ?= $(HOME)/Music/house-refs
+PORT    ?= 4444
 
-.PHONY: help setup test demo learn clean lint
+.PHONY: help setup test serve demo learn clean lint
 
 help:
 	@echo "fourfloor"
 	@echo "  make setup   create .venv and install fourfloor + dev deps"
-	@echo "  make test    run the test suite (~40s)"
+	@echo "  make test    run the test suite (~70s)"
+	@echo "  make serve   run the web app at http://127.0.0.1:4444"
 	@echo "  make demo    remix fixtures/lofi-7.mp3 into examples/"
 	@echo "  make learn   derive a style profile from REFS=<folder of house remixes>"
 	@echo "  make clean   remove build artefacts and generated audio"
@@ -28,6 +30,10 @@ setup:
 
 test:
 	$(BIN)/python -m pytest
+
+serve:
+	$(BIN)/python -m fourfloor serve --port $(PORT) --open
+
 
 demo:
 	@mkdir -p examples

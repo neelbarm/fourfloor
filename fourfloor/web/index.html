@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en" data-screen="drop">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>fourfloor</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="bg" aria-hidden="true"><i class="bg-a"></i><i class="bg-b"></i><i class="bg-grain"></i></div>
+
+<header class="top">
+  <a class="brand" href="/"><span class="brand-dot"></span> fourfloor</a>
+  <div class="top-right">
+    <span class="queue" id="queueHint" hidden></span>
+    <button class="ghost" id="libToggle" type="button" aria-expanded="false" aria-controls="library">
+      Library <span class="count" id="libCount">0</span>
+    </button>
+  </div>
+</header>
+
+<div class="layout">
+<main class="stage" id="stage">
+
+  <!-- ─── drop ─────────────────────────────────────────────────────────── -->
+  <section class="screen" data-screen="drop" id="s-drop">
+    <p class="eyebrow"><span class="dot"></span> runs on this machine · nothing is uploaded anywhere</p>
+    <h1 class="title">Drop a song.<br><em>Get a house remix.</em></h1>
+    <p class="lede">
+      fourfloor reads the tempo, key and structure, warps the track onto a house grid,
+      builds a new kit and bass underneath it, and hands back a mix plus a session
+      file your DJ software can cue against.
+    </p>
+
+    <button class="orb" id="orb" type="button">
+      <span class="orb-glow"></span>
+      <span class="orb-ring"></span>
+      <span class="orb-ripple" id="orbRipple"></span>
+      <span class="orb-face">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="orb-icon">
+          <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" fill="none" stroke="currentColor"
+                stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" fill="none"
+                stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+        <span class="orb-label">Drop a track<small>or click to choose</small></span>
+      </span>
+    </button>
+    <input type="file" id="file" class="visually-hidden"
+           accept=".mp3,.m4a,.wav,.flac,.aiff,.aif,audio/mpeg,audio/mp4,audio/wav,audio/flac,audio/aiff">
+    <p class="help" id="dropHelp">mp3 · m4a · wav · flac · aiff — up to <b id="maxMb">200</b> MB</p>
+    <div class="alert" id="dropErr" role="alert" hidden></div>
+  </section>
+
+  <!-- ─── analysing ────────────────────────────────────────────────────── -->
+  <section class="screen" data-screen="analysing" id="s-analysing">
+    <p class="eyebrow"><span class="dot pulse"></span> analysing</p>
+    <h2 class="title small">Reading the track.</h2>
+    <p class="lede">Beat grid, key, chords and structure — a few seconds.</p>
+    <div class="slot" id="slot-analysing"></div>
+  </section>
+
+  <!-- ─── controls ─────────────────────────────────────────────────────── -->
+  <section class="screen" data-screen="controls" id="s-controls">
+    <p class="eyebrow"><span class="dot"></span> ready</p>
+    <h2 class="title small">Make it house.</h2>
+    <div class="slot" id="slot-controls"></div>
+
+    <div class="panel controls" id="controls">
+      <div class="field">
+        <div class="field-head">
+          <label for="bpmInput">Target tempo</label>
+          <output class="field-value" id="bpmOut">124.0<i>BPM</i></output>
+        </div>
+        <div class="seg" id="bpmSeg" role="group" aria-label="Tempo presets"><i class="thumb"></i></div>
+        <div class="row">
+          <input type="number" id="bpmInput" min="60" max="200" step="0.5" value="124"
+                 inputmode="decimal" aria-label="Target tempo in BPM">
+          <span class="suffix">BPM</span>
+          <button class="link" id="bpmSuggest" type="button">use the suggestion</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <div class="field-head">
+          <label>Key</label>
+          <output class="field-value" id="keyOut">keep</output>
+        </div>
+        <div class="seg" id="keyModeSeg" role="group" aria-label="Key mode"><i class="thumb"></i></div>
+
+        <div class="key-body" id="keyWheelBody" hidden>
+          <div class="wheel-wrap">
+            <svg id="wheel" viewBox="0 0 320 320" role="group" aria-label="Camelot wheel"></svg>
+          </div>
+          <p class="note" id="wheelNote">Lit segments mix with the source key.</p>
+        </div>
+
+        <div class="key-body" id="keyMatchBody" hidden>
+          <button class="drop-mini" id="matchPick" type="button">
+            <span id="matchLabel">Choose a track to mix with…</span>
+            <small id="matchMeta">its key is read the same way</small>
+          </button>
+          <input type="file" id="matchFile" class="visually-hidden"
+                 accept=".mp3,.m4a,.wav,.flac,.aiff,.aif,audio/*">
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="field">
+          <div class="field-head"><label>Separation</label></div>
+          <div class="seg" id="stemsSeg" role="group" aria-label="Separation engine"><i class="thumb"></i></div>
+        </div>
+        <div class="field">
+          <div class="field-head"><label>Form</label></div>
+          <div class="seg" id="formSeg" role="group" aria-label="Arrangement form"><i class="thumb"></i></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="field">
+          <div class="field-head">
+            <label for="lengthInput">Length</label>
+            <output class="field-value" id="lenOut">4:30</output>
+          </div>
+          <div class="seg" id="lenSeg" role="group" aria-label="Length presets"><i class="thumb"></i></div>
+          <div class="row">
+            <input type="text" id="lengthInput" value="4:30" aria-label="Target length"
+                   inputmode="numeric" spellcheck="false">
+            <span class="suffix">m:ss</span>
+          </div>
+        </div>
+        <div class="field">
+          <div class="field-head">
+            <label for="styleSelect">Style profile</label>
+            <output class="field-value" id="swingOut">swing 0.08</output>
+          </div>
+          <div class="select-wrap">
+            <select id="styleSelect"><option value="">fourfloor default</option></select>
+          </div>
+          <div class="row slider-row">
+            <input type="range" id="swing" min="0" max="0.66" step="0.01" value="0.08"
+                   aria-label="Hi-hat swing">
+          </div>
+        </div>
+      </div>
+
+      <div class="alert" id="controlsErr" role="alert" hidden></div>
+
+      <button class="cta" id="remixBtn" type="button">
+        <span class="cta-glow"></span>
+        <span class="cta-label">Remix</span>
+      </button>
+      <p class="note center" id="ctaNote"></p>
+    </div>
+  </section>
+
+  <!-- ─── remixing ─────────────────────────────────────────────────────── -->
+  <section class="screen" data-screen="remixing" id="s-remixing">
+    <p class="eyebrow"><span class="dot pulse"></span> <span id="jobState">building</span></p>
+    <h2 class="title small" id="remixTitle">Building the remix.</h2>
+    <div class="slot" id="slot-remixing"></div>
+
+    <div class="panel progress-panel">
+      <div class="bar"><i id="bar"></i></div>
+      <ol class="phases" id="phases" aria-live="polite"></ol>
+      <div class="alert" id="jobErr" role="alert" hidden></div>
+      <button class="ghost wide" id="backFromJob" type="button" hidden>Change the settings</button>
+    </div>
+  </section>
+
+  <!-- ─── result ───────────────────────────────────────────────────────── -->
+  <section class="screen" data-screen="result" id="s-result">
+    <p class="eyebrow"><span class="dot"></span> <span id="resultEyebrow">done</span></p>
+    <h2 class="title small" id="resultTitle">Your remix.</h2>
+    <div class="slot" id="slot-result"></div>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="panel player">
+      <div class="player-head">
+        <button class="play" id="play" type="button" aria-label="Play">
+          <svg viewBox="0 0 24 24" class="i-play" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg>
+          <svg viewBox="0 0 24 24" class="i-pause" aria-hidden="true"><path d="M8 5h3v14H8zM13 5h3v14h-3z" fill="currentColor"/></svg>
+        </button>
+        <div class="time"><b id="tNow">0:00</b><span id="tTotal">0:00</span></div>
+        <div class="player-meta" id="playerMeta"></div>
+      </div>
+      <div class="wave-wrap" id="waveWrap">
+        <canvas id="wave" aria-label="Waveform and section map"></canvas>
+        <div class="head" id="head"><i></i></div>
+      </div>
+      <div class="chips" id="chips"></div>
+      <audio id="audio" preload="metadata"></audio>
+    </div>
+
+    <div class="panel downloads">
+      <h3>Files</h3>
+      <div class="dl" id="downloads"></div>
+      <p class="note" id="sessionNote"></p>
+    </div>
+
+    <div class="panel">
+      <h3>Arrangement</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Slot</th><th>Time</th><th>Bars</th><th>From source</th><th>Decision</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="warnings" id="warnings"></div>
+    </div>
+
+    <div class="again">
+      <button class="cta ghost-cta" id="againBtn" type="button">Remix again with different settings</button>
+      <button class="link" id="newTrackBtn" type="button">or drop another track</button>
+    </div>
+  </section>
+
+</main>
+
+<aside class="library" id="library" aria-label="Previous remixes">
+  <h2>Library</h2>
+  <p class="note" id="libEmpty">Remixes you build land here, in <code id="libHome">~/.fourfloor</code>.</p>
+  <ul class="lib-list" id="libList"></ul>
+</aside>
+</div>
+
+<!-- the source card is one node that moves between screens, so it morphs -->
+<div class="card source" id="sourceCard" hidden>
+  <div class="source-head">
+    <div class="source-name">
+      <span class="tag-dot"></span>
+      <b id="srcName">—</b>
+      <small id="srcSub">reading…</small>
+    </div>
+    <div class="source-target" id="srcTargetWrap" hidden>
+      <small>house target</small>
+      <b id="srcTarget">—</b>
+    </div>
+  </div>
+  <div class="source-figs">
+    <div class="fig"><b id="srcBpm">—</b><small>source BPM</small></div>
+    <div class="fig"><b id="srcKey">—</b><small>key</small></div>
+    <div class="fig"><b id="srcCamelot">—</b><small>camelot</small></div>
+    <div class="fig"><b id="srcLen">—</b><small>length</small></div>
+  </div>
+  <div class="source-canvas"><canvas id="srcWave" aria-label="Source structure"></canvas></div>
+  <div class="source-legend" id="srcLegend"></div>
+</div>
+
+<div class="drop-veil" id="veil" aria-hidden="true"><div class="veil-inner">Drop it anywhere</div></div>
+
+<script src="app.js"></script>
+</body>
+</html>
