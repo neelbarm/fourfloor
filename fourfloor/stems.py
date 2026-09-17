@@ -92,9 +92,15 @@ def separate_demucs(x: np.ndarray, sr: int = SR, model: str = DEMUCS_MODEL,
         vocals = parts["vocals"] if parts["vocals"] is not None else zero
         other = parts["other"] if parts["other"] is not None else zero
         drums = parts["drums"] if parts["drums"] is not None else zero
+        # The two are kept apart as well as summed: the engine pushes `other`
+        # down in the drops and gives the presence lift to the vocal alone,
+        # which is what a real remix does and what a single harmonic bed makes
+        # impossible.
         return Stems(harmonic=fit(vocals + other, n).astype(np.float32),
                      percussive=fit(drums, n).astype(np.float32),
-                     source_name="demucs")
+                     source_name="demucs",
+                     vocal=fit(vocals, n).astype(np.float32),
+                     other=fit(other, n).astype(np.float32))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
