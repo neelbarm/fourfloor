@@ -13,9 +13,12 @@ to make one for the *next* track, on the fly, while I'm playing.
 
 So fourfloor does the whole job offline: it works out the tempo, the beat grid,
 the key and the structure of a song, warps it onto a house grid, strips the
-original drums, builds a new kit and bass underneath it, arranges the result into
-a real club form, and writes a `*.session.json` describing exactly where every
-downbeat and cue point is. That last file is the point. My DJ app
+original drums, lays a real house kit under it — eight bars sampled off a record
+you already like — keeps the song's own bass, arranges the result into a real
+club form, and writes a `*.session.json` describing exactly where every downbeat
+and cue point is. Then it measures its own work: there is a gate that reads a
+finished remix and says, in milliseconds, whether the music is sitting on the
+grid it was built on. That last file is the point. My DJ app
 (MixPilot) reads BPM and key from local files;
 now it can read a remix fourfloor just built and sync the transition into it
 without re-analysing a thing.
