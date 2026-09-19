@@ -161,10 +161,31 @@ autocorrelation tempo estimate weighted by a log-normal prior over 60–200 BPM,
 with an explicit comb-filter pass to resolve the octave ambiguity that
 autocorrelation always has. Beat positions then come from dynamic programming
 over the envelope, balancing onset strength against deviation from the estimated
-period — Ellis, *Beat Tracking by Dynamic Programming* (JNMR 2007). Downbeats are
-the bar phase whose beat 1 carries the most low-band and onset energy, checked for
-consistency across 8-bar windows. Reported to two decimals, because "124" and
-"123.7" are different tracks to a DJ.
+period — Ellis, *Beat Tracking by Dynamic Programming* (JNMR 2007).
+
+Then the grid is *slid onto the music*, in two stages, and both of them exist
+because of remixes that came out off beat. The coarse stage searches a whole
+beat and scores with a kick-only envelope — the rectified rise of the bottom two
+octaves, and only the rise, because the level down there is mostly the bassline
+and in house the bassline plays the offbeats. Without it, the tracker follows
+whatever is sharpest, and in house that is the open hat on the offbeat: an open
+hat's attack is spread over forty mel bands and a kick's over two, so it wins by
+five to one. Two of the first three records this was tried on were tracked half a
+beat out, kick squarely between the beats. The fine stage then settles the last
+few milliseconds with an attack envelope that has been calibrated against
+synthesised hits on a known grid; the kick envelope is not allowed near that
+decision, because it reads 18 ms late and a grid dragged 18 ms forward is 18 ms
+the music spends behind the kick in the finished remix.
+
+Downbeats are the bar phase with the most beat-one evidence: low band on the
+beat, onset strength on the beat, a backbeat two or four beats away, and a snare
+*on* the beat as evidence against. The backbeat term is what stops the score
+picking the snare itself, which is what happens on a separated drums stem where
+the 808 has gone to the bass stem and the loudest thing left in the bar is the
+snare — on Don Toliver's *Body* that mistake put bar one two beats late.
+
+Tempo is reported to two decimals, because "124" and "123.7" are different
+tracks to a DJ.
 
 **2. Key and chords.** A tuning-corrected chromagram (the global tuning offset is
 recovered as a magnitude-weighted circular mean of spectral-peak deviations)
@@ -193,6 +214,22 @@ means the source isn't stretched by one global rate — it's warped *beat by bea
 so every detected beat lands exactly on the target grid, and any tempo drift in
 the original is absorbed along the way.
 
+**The warp map.** There is exactly one object that decides where a moment in the
+song ends up in the remix, and both halves of the pipeline read it. `WarpMap`
+pins every detected beat to a target beat and chooses the lead-in so the source's
+*first downbeat lands on a target bar line* — exactly, by construction, for all
+four downbeat parities and for the half- and double-time readings. The arranger
+never computes a warped time itself: it asks `WarpMap.snap` for the nearest
+source downbeat that sits on a bar line, so a slot can only begin where the song
+begins a bar, and the plan validator refuses a plan where one does not.
+
+That sounds like bookkeeping and it was the whole off-beat bug. The warp used to
+place the source's first beat one target beat into the buffer while the arranger
+assumed source second zero was warped second zero and converted section times
+with a straight tempo ratio. On *Body* those two answers differ by 0.88 of a
+beat. Neither half was wrong on its own; they simply never agreed, and nothing
+could see it.
+
 **Tempo targeting.** Stretching a vocal by 1.55× sounds like a chipmunk in a wind
 tunnel. So fourfloor picks the metrical interpretation with the smallest
 `|log ratio|` among straight, half-time and double-time, and lays the source on
@@ -203,19 +240,27 @@ disaster. It warns when the ratio leaves the 0.8–1.25 window and does it anywa
 **5. Separation.** HPSS by median filtering of the STFT magnitude (Fitzgerald,
 DAFx 2010): horizontal median → harmonic, vertical median → percussive, split
 with soft Wiener masks. The mask is computed once on the mid channel and applied
-to both so the stereo image survives. The house kit *replaces* the original drums;
-the percussive part is kept only as low-level texture where the arrangement asks
-for it. `--stems demucs` swaps in a real four-way neural split (see below).
+to both so the stereo image survives. The kit *replaces* the original drums; the
+percussive part is kept only as low-level texture where the arrangement asks for
+it. `--stems demucs` swaps in a real four-way neural split (see below).
 
-**6. The house engine.** Everything synthesised in numpy. Kick: a sine with an
-exponential pitch envelope from 190 down to 50 Hz, a sub layer, a highpassed
-beater click, tanh drive. Clap: a four-burst flam into a noise tail, bandpassed at
-the clap formant. Hats: highpassed noise plus six inharmonic partials, swung on
-the odd 16ths. Bass: detuned saws through an envelope-swept low-pass plus a sub
-sine, playing the chord roots the analysis found, transposed by the key shift and
-ducked hard under every kick. Plus risers, impacts, beat-aligned vocal chops,
+The bass stem is kept and played. See **The low end** below.
+
+**6. The house engine.** Drums come from a real record when you have sampled one
+(see **Real drums** below) and are synthesised in numpy otherwise: kick — a sine
+with an exponential pitch envelope from 190 down to 50 Hz, a sub layer, a
+highpassed beater click, tanh drive; clap — a four-burst flam into a noise tail,
+bandpassed at the clap formant; hats — highpassed noise plus six inharmonic
+partials, swung on the odd 16ths. Plus risers, impacts, beat-aligned vocal chops,
 convolution reverb throws, and per-slot filter sweeps rendered blockwise with
 interpolated cutoffs and carried filter state so they never click.
+
+Loops of source material repeat at exact multiples of their period, which is
+always a whole number of bars, and hide each seam by borrowing the audio that
+follows the loop point. Joining repeats with a crossfade instead — which is what
+this did — returns fewer samples than it was given, so every repetition was 24 ms
+short and a drop three repeats long finished most of a sixteenth note ahead of
+the grid, with the error growing all the way through the track.
 
 The master chain ends with a *matched EQ*: it measures the mix's power in five
 bands and nudges it toward a balance measured from real commercial house remixes.
@@ -225,9 +270,13 @@ the single biggest quality fix in this build.
 **7. Arrangement and handoff.** Integer bars at the target tempo in 8-bar phrases,
 so every cut lands on a downbeat by construction. The default club form is
 16 intro / 8 build / 32 drop / 16 breakdown / 8 build / 32 drop / 16 outro, scaled
-to `--length`. Source sections are mapped onto slots, looped with beat-aligned
-cuts and short crossfades to fill each phrase exactly. Every decision is written
-to `*.plan.json`, and the DJ handoff goes to `*.session.json`.
+to `--length`. Slots are fed contiguous spans that walk forward through the song:
+a 32-bar drop gets 32 bars of the song if the song has them, not four bars looped
+eight times, and the second drop carries on from where the first stopped rather
+than replaying it. The breakdown is required to be a different part of the track
+and at least eight bars of real material. Only one slot's source audio is ever
+live at a time. Every decision is written to `*.plan.json`, and the DJ handoff
+goes to `*.session.json`.
 
 ### The session file
 
@@ -260,6 +309,10 @@ fourfloor remix SONG [-o OUT.mp3]
     --length 4:30              target length (default 4:30); rounds to 8-bar phrases
     --form club|radio|tool     arrangement preset (tool = extended DJ intro/outro)
     --swing 0.08               hat swing, 0 to 0.66
+    --kit NAME|none            drum kit from `fourfloor kit build`
+                               (default: the most recent one; none = synth kit)
+    --bass source|synth        the song's own bass (default) or a synthesised one
+    --no-kick-reinforce        no synth kick under a sampled loop's kicks
     --seed 0                   randomisation seed
     --no-wav                   write only the mp3
     --producer                 let Claude plan the arrangement (optional, see below)
@@ -274,6 +327,11 @@ fourfloor fetch URL                  download a track with yt-dlp (needs yt-dlp 
     --as original|remix        write <name>.<kind>.mp3, one half of a pair
     --original U --remix U     fetch both halves of a pair (with --name)
     --json / -q                print what landed as JSON / say nothing
+
+fourfloor kit build REMIX.mp3        sample a drum kit from a house record
+    --name NAME                what to call it (default: from the filename)
+    --bars 8                   loop length in bars
+fourfloor kit list [--json]          the kits you have built
 
 fourfloor inspect SONG [--json]      tempo, key, structure timeline, house target
     --url LINK                 analyse a link instead of a file
@@ -298,6 +356,117 @@ what it did instead.
 
 Outputs per remix: the mp3 (320k) and wav, `*.session.json`, `*.plan.json`, and
 optionally `preview.html`.
+
+## Real drums
+
+A synthesised kit can be made convincing and this one is not bad, but it will
+never have what a record has: the room, the compressor, the sample the producer
+chose, the small unevenness that makes eight bars sound played rather than
+placed. So take the drums off a house record you already like.
+
+```bash
+fourfloor kit build ~/Music/some-house-remix.mp3 --name murph
+fourfloor kit list
+fourfloor remix song.mp3 -o song.house.mp3 --kit murph
+```
+
+`kit build` separates the record's drums with demucs, finds the cleanest eight
+bars of four-on-the-floor inside it, warps those bars to a canonical 128 BPM
+through the record's *own* beat times, trims to exact bars, normalises, and
+stores them in `~/.fourfloor/kits/<name>/` as `loop.wav` and `meta.json`. Never
+in the repository: a kit is made of somebody else's record.
+
+"Cleanest" is a measurement rather than a guess. A window scores well when it has
+a kick on every one of its thirty-two beats at an even level, when its onsets sit
+on the sixteenth lattice, when it is loud (drops are loud) and when nothing in it
+goes quiet. The four multiply, so eight loud bars with a hole in them lose to
+eight slightly quieter bars without one. The kick test reads the *rise* of the
+bottom two octaves and not their level, because level down there is mostly the
+bassline: the level-based version happily picked the one stretch of a record
+where the beat tracker had slipped half a beat, kick squarely on the offbeat.
+
+At remix time the loop is stretched to the target tempo once and tiled from bar
+zero, so its bar one is the remix's bar one and stays there after forty repeats.
+A record's drums arrive as one finished stereo bus, so the only honest way to
+arrange them is the way a DJ does it on a mixer — with the level and the filter.
+The intro is thinned and high-passed so it does not fight whatever is still
+playing, the breakdown keeps only the top of the loop (which is the hats), the
+build climbs, the drop is the record. A synthesised kick sits underneath the
+loop's own kicks, in the loop's own slightly uneven places, because a loop
+sampled off a 2015 record often has less sub than a 2024 system expects;
+`--no-kick-reinforce` turns that off.
+
+With no kits built, or with `--kit none`, you get the synthesised kit. With
+several, `--kit NAME` picks one and the default is the most recent.
+
+## The low end
+
+By default the remix plays **the song's own bass**: demucs's bass stem, or with
+HPSS the bottom of the harmonic half, warped and arranged through exactly the
+same spans as the rest of the song so it cannot drift away from it.
+
+It used to synthesise one. That bassline had to be told what note to play and the
+only thing available to tell it was a chord estimate off the full mix — and on a
+dense trap record that estimate is wrong often enough to matter. A wrong bass
+note under a vocal singing the right one is not a stylistic choice, it is out of
+tune. `--bass synth` brings the old behaviour back, together with the offbeat
+chord stabs, which were guessing from the same estimate.
+
+One thing is still synthesised: a sub, and only where the record has almost
+nothing below 80 Hz — plenty mixed for phones do not, and a club system finds
+nothing there. Even then it follows the pitch the bass stem is actually playing,
+one autocorrelation reading per beat, and stays silent wherever the stem is
+silent or unpitched. It never plays a note the record is not playing.
+
+## The alignment gate
+
+Neel listened to a build and said "some of it is off beat". That was
+unfalsifiable: nothing in the project looked at a finished render and asked where
+its content sat relative to the grid it was built on. `fourfloor.analysis.alignment`
+does, and it is the reason the rest of this section exists.
+
+```python
+from fourfloor.analysis.alignment import alignment_report
+
+report = alignment_report(audio, sr, bpm, first_downbeat_sec,
+                          source_stem=source_layer, kit_layer=drum_bus,
+                          spans=per_slot_sample_spans)
+report["problems"]        # [] when the render is on its grid
+```
+
+Three independent measurements, because each catches a different failure:
+
+- **Onset phase error** — the distance from each onset to the nearest point of
+  the grid's sixteenth-note lattice, as a median and a 90th percentile in
+  milliseconds, plus the share of onsets within ±20 ms. Weighted by onset
+  strength, because that is what "off beat" means to a listener: a snare landing
+  40 ms late is the complaint, and the fourth hat of a 32nd-note roll landing
+  40 ms from the nearest sixteenth is the music. Unweighted figures come back
+  alongside so the difference is always visible.
+- **Comb phase** — the whole onset envelope cross-correlated against a comb of
+  the beat grid. Catches a layer playing on the "and" of every beat. It asks the
+  *kick* where the beat is whenever the kick has an opinion, for the same reason
+  the beat tracker does.
+- **Bar phase** — which of the four beat offsets carries the layer's bar one.
+  Every hit can be on the lattice and the song can still start its bar on the
+  remix's beat three, which is the kind of wrong you hear immediately.
+
+Plus a structural check with nothing to do with phase: the engine reports one
+sample span per arrangement slot, and no two of them may be live at once.
+
+It measures the buses separately, because in a full mix the kit's onsets swamp
+the source's and every number comes back flattering. The kit is the control: a
+synthesised kit is placed arithmetically and has to read within a couple of
+milliseconds, and if it does not, the grid handed to the gate is wrong and
+nothing else it says means anything. A kit sampled off a record is told apart
+with `kit_is_sampled`, because push and drag is what makes it sound played.
+
+The gate runs in `make test` on the bundled fixture and on a synthetic source
+with the shape of a real record — 146 BPM of hi-hats over a 73 BPM half-time
+feel, with rolls, a bassline and a pad — so the tempo octave, the downbeat parity
+and the warp all have to be right at once. Acceptance: median phase error under
+12 ms, p90 under 25 ms, over 85% of source onsets within ±20 ms of the grid, bar
+one on bar one, and never two slots of source audio at the same time.
 
 ## Style learning
 
@@ -371,6 +540,17 @@ with no key and no network.
 - **Beat tracking assumes steady 4/4.** Live recordings with real tempo drift are
   handled by the beat-by-beat warp, but rubato, 3/4, and 6/8 are not. Downbeat
   confidence is reported; on sparse trap kicks it is often low and honest about it.
+- **A tracker can still slip inside a track.** The beat-phase search corrects the
+  grid once, globally. A record that is tracked correctly for three minutes and
+  slips half a beat for eight bars keeps that slip, and the kit builder will
+  refuse those eight bars rather than sample them — but a remix built from them
+  would inherit the slip in that one section.
+- **Four-on-the-floor has no downbeat.** With a kick on every beat and a clap on
+  two and four, bar one and bar one-plus-two-beats are the same evidence, so the
+  gate's bar-phase reading on a house record is often a coin flip with a margin
+  near zero. It is reported with its margin and only treated as a failure when
+  the margin is real. A sampled loop can therefore start on beat three of its
+  bar; with a four-on-the-floor pattern you will not hear it.
 - **Key detection is chroma-based**, so it inherits chroma's problems: heavy
   808 glide and dense mixes push it around. It reports a confidence — believe it.
   Relative major/minor is deliberately not counted as an error.
@@ -379,7 +559,19 @@ with no key and no network.
   wrong section you'll see exactly which one it picked.
 - **HPSS is not stem separation.** It splits sustained from transient, so a
   sustained synth stays with the vocal and a plucked guitar partly leaks into the
-  "drums". Use `--stems demucs` when you want real vocals.
+  "drums". Use `--stems demucs` when you want real vocals — and real bass: with
+  HPSS the "bass" is simply everything under 180 Hz of the harmonic half, which
+  carries mud demucs would have given to another stem, so it comes in quieter.
+- **The gate measures against a straight lattice.** Swung sixteenths do not live
+  on a sixteenth grid by definition, so a heavily shuffled source reads as "off"
+  against an absolute threshold however well it was warped. The bundled lofi
+  fixture is one: measured against its own detected grid, untouched, it already
+  reads 30 ms median. Its test is therefore relative — the remix has to be
+  *tighter* than the source was — while the absolute gate runs on material with
+  hard transients.
+- **A kit is eight bars.** It repeats. Sections are shaped with level and filter
+  and a kick underneath, which is what a DJ has, but there is no fill, no
+  variation and no second loop; over four minutes you will hear the loop.
 - **The app is single-user and unauthenticated**, which is why it only listens
   on 127.0.0.1. It runs one remix at a time, and a browser tab that is closed
   mid-remix loses the progress stream but not the remix — it finishes and turns
@@ -399,10 +591,32 @@ with no key and no network.
 ## Tests
 
 ```bash
-make test     # 443 tests, ~50s
+make test     # 295 tests, ~6 min
 ```
 
-Covers the beat tracker against synthesised click tracks at 90/124/140 BPM and
+The longest-running of them are full remixes: the alignment gate, the kit and the
+bass are each tested by rendering something and measuring the result, which is
+the only way any of them could have been trusted.
+
+The gate's own tests come first and matter most: material placed exactly on a
+grid has to read as exactly on it, and material moved by a known amount has to
+read as moved by that amount — 40 ms as 40 ms, half a beat as "half-beat", a beat
+as a bar-phase error with every individual hit still on the lattice. Without
+those, a green gate means nothing. Then the bugs that shipped: a warp map that
+puts source downbeats on bar lines for all four parities and all three
+half/double-time readings, a loop that keeps its length and its period, slots
+that start on bar lines, an arrangement that walks forward with its breakdown
+somewhere other than its drops. Then whole renders, against the acceptance
+numbers above.
+
+Kits are covered without paying for demucs — the synthetic house record used as
+a source is already nothing but drums, so the separation is stubbed and
+everything after it is the real path. The bass tests check that the remix plays
+notes the song actually plays, and that a record with its own sub is left alone.
+The suite runs with `FOURFLOOR_HOME` pointed at a temp folder, so a remix
+rendered on a machine with kits on it is the same remix as on a clean one.
+
+It also covers the beat tracker against synthesised click tracks at 90/124/140 BPM and
 the real fixture, key detection on synthesised progressions in five keys, downbeat
 phase on an accented track, phase-vocoder length/pitch/transient behaviour, HPSS
 energy ratios, arrangement math (every cut on a downbeat, lengths exact), the
