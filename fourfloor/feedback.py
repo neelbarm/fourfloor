@@ -432,11 +432,14 @@ def digest(lib, rid: str = "") -> str:
             lines.append(f"  {code}  ({len(marks)})")
 
         for v in data["votes"]:
-            won = "this one" if v.get("prefer") == "a" else (
-                v.get("other_label") or v.get("other") or "the other one")
+            # two renders of one song share a title, so the id always goes in:
+            # "preferred lofi 7" over "lofi 7" tells an engineer nothing
+            other = v.get("other") or "?"
+            label = v.get("other_label") or ""
+            name = f"{label} ({other})" if label else other
+            won = "this one" if v.get("prefer") == "a" else "the other one"
             reason = f'  — {v["reason"]}' if v.get("reason") else ""
-            lines.append(f"  A/B vs {v.get('other_label') or v.get('other')}: "
-                         f"preferred {won}{reason}")
+            lines.append(f"  A/B vs {name}: preferred {won}{reason}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

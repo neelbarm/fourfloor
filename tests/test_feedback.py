@@ -226,7 +226,8 @@ def test_the_digest_groups_by_category_with_bars_and_slots(remix) -> None:
     feedback.add_marker(d, 30 * BAR, "drums-fake", "no swing", rid)
     feedback.add_marker(d, 17 * BAR, "off-beat", "drags", rid)
     feedback.add_rating(d, 3, "nearly", rid)
-    feedback.add_vote(d, store.new_id(), "b", "take 2 breathes",
+    other_id = store.new_id()
+    feedback.add_vote(d, other_id, "b", "take 2 breathes",
                       other_label="take 2", rid=rid)
 
     out = feedback.digest(lib)
@@ -239,7 +240,10 @@ def test_the_digest_groups_by_category_with_bars_and_slots(remix) -> None:
     assert "plastic hats" in out and "no swing" in out
     assert "the arranger said: hook, full kit" in out
     assert "Off-beat  (1)" in out and "[build bars 17-24]" in out
-    assert "preferred take 2" in out and "take 2 breathes" in out
+    # the other side is named *and* identified: two takes of one song share a
+    # title, so "preferred take 2" on its own would not say which file
+    assert f"A/B vs take 2 ({other_id}): preferred the other one" in out
+    assert "take 2 breathes" in out
     # the categories come out in the order the chips are shown, not by count
     assert out.index("Off-beat") < out.index("Drums fake")
 

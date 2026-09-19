@@ -207,14 +207,58 @@
           <svg viewBox="0 0 24 24" class="i-pause" aria-hidden="true"><path d="M8 5h3v14H8zM13 5h3v14h-3z" fill="currentColor"/></svg>
         </button>
         <div class="time"><b id="tNow">0:00</b><span id="tTotal">0:00</span></div>
+        <button class="ghost mark-btn" id="markBtn" type="button"
+                aria-label="Mark this moment">
+          <span class="mark-pin" aria-hidden="true"></span>Mark<kbd>M</kbd>
+        </button>
         <div class="player-meta" id="playerMeta"></div>
       </div>
       <div class="wave-wrap" id="waveWrap">
         <canvas id="wave" aria-label="Waveform and section map"></canvas>
         <div class="head" id="head"><i></i></div>
+        <div class="pins" id="pins"></div>
       </div>
+
+      <!-- what is wrong here: opens at the playhead, closes on Escape -->
+      <div class="pop" id="markPop" role="dialog" aria-modal="false"
+           aria-labelledby="popTitle" hidden>
+        <div class="pop-head">
+          <b id="popTitle">What is wrong here?</b>
+          <span class="pop-at" id="popAt">0:00</span>
+          <button class="pop-x" id="popClose" type="button" aria-label="Cancel this marker">×</button>
+        </div>
+        <div class="pop-chips" id="popChips" role="radiogroup" aria-label="What is wrong"></div>
+        <input type="text" id="popNote" maxlength="400" spellcheck="true"
+               autocomplete="off" placeholder="…or say it in your own words"
+               aria-label="Note about this moment">
+        <button class="pop-save" id="popSave" type="button">Save the note</button>
+      </div>
+
       <div class="chips" id="chips"></div>
+
+      <div class="ab-open">
+        <label class="ab-open-label" for="abPick">Hear it against</label>
+        <div class="select-wrap"><select id="abPick"></select></div>
+        <button class="ghost" id="abGo" type="button">Compare A / B</button>
+      </div>
       <audio id="audio" preload="metadata"></audio>
+    </div>
+
+    <div class="panel ears">
+      <h3>Your ears</h3>
+      <div class="ears-head">
+        <div class="stars" id="stars" role="radiogroup" aria-label="Rate this remix out of 5"></div>
+        <span class="ears-state" id="ratingState">not rated yet</span>
+      </div>
+      <input type="text" id="verdict" class="verdict" maxlength="400" autocomplete="off"
+             placeholder="One line: what would make this a five?"
+             aria-label="One-line verdict">
+      <ul class="marks" id="marks"></ul>
+      <p class="note" id="earsNote">
+        Press <kbd>M</kbd> while it plays to drop a marker where it sounds wrong.
+        Everything here is saved next to the render, and
+        <code>python -m fourfloor.feedback</code> prints it for the engineers.
+      </p>
     </div>
 
     <div class="panel downloads">
@@ -237,6 +281,72 @@
     <div class="again">
       <button class="cta ghost-cta" id="againBtn" type="button">Remix again with different settings</button>
       <button class="link" id="newTrackBtn" type="button">or drop another track</button>
+    </div>
+  </section>
+
+  <!-- ─── compare ──────────────────────────────────────────────────────── -->
+  <section class="screen" data-screen="compare" id="s-compare">
+    <p class="eyebrow"><span class="dot"></span> a / b</p>
+    <h2 class="title small" id="cmpTitle">Two takes, one transport.</h2>
+    <p class="lede" id="cmpLede">
+      Both play at once through one audio graph and you hear one of them.
+      Flipping is a four-millisecond crossfade — nothing restarts, nothing gaps,
+      and your ear is still in the same bar.
+    </p>
+
+    <div class="panel compare">
+      <div class="ab-top">
+        <div class="seg ab-seg" id="abSeg" role="group" aria-label="Which side you hear"><i class="thumb"></i></div>
+        <span class="ab-drift" id="abDrift" aria-live="off">in sync</span>
+      </div>
+
+      <div class="ab-lane" id="laneA" data-side="a">
+        <div class="ab-lane-head">
+          <span class="ab-tag">A</span>
+          <b id="aName">—</b><small id="aSub"></small>
+        </div>
+        <div class="wave-wrap ab-wave">
+          <canvas id="waveA" aria-label="Waveform of take A"></canvas>
+          <div class="head" id="headA"><i></i></div>
+        </div>
+      </div>
+
+      <div class="ab-lane" id="laneB" data-side="b">
+        <div class="ab-lane-head">
+          <span class="ab-tag">B</span>
+          <b id="bName">—</b><small id="bSub"></small>
+        </div>
+        <div class="wave-wrap ab-wave">
+          <canvas id="waveB" aria-label="Waveform of take B"></canvas>
+          <div class="head" id="headB"><i></i></div>
+        </div>
+      </div>
+
+      <div class="ab-transport">
+        <button class="play" id="abPlay" type="button" aria-label="Play both">
+          <svg viewBox="0 0 24 24" class="i-play" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg>
+          <svg viewBox="0 0 24 24" class="i-pause" aria-hidden="true"><path d="M8 5h3v14H8zM13 5h3v14h-3z" fill="currentColor"/></svg>
+        </button>
+        <div class="time"><b id="abNow">0:00</b><span id="abTotal">0:00</span></div>
+        <p class="note ab-hint">
+          <kbd>Tab</kbd> flips which one you hear · <kbd>Space</kbd> plays and pauses both
+        </p>
+      </div>
+
+      <div class="ab-vote">
+        <input type="text" id="voteReason" maxlength="400" autocomplete="off"
+               placeholder="Why? (optional)" aria-label="Why you prefer that one">
+        <div class="ab-vote-row">
+          <button class="ghost" id="voteA" type="button">Prefer A</button>
+          <button class="ghost" id="voteB" type="button">Prefer B</button>
+        </div>
+        <p class="note center" id="voteState"></p>
+      </div>
+
+      <div class="alert" id="cmpErr" role="alert" hidden></div>
+      <audio id="audioA" preload="auto"></audio>
+      <audio id="audioB" preload="auto"></audio>
+      <button class="ghost wide" id="cmpBack" type="button">Back to the remix</button>
     </div>
   </section>
 

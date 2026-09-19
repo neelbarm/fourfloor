@@ -38,10 +38,21 @@ const neighbours = code => {
   return [code, ((n % 12) + 1) + l, (((n - 2 + 12) % 12) + 1) + l, n + other];
 };
 
+/* One colour per feedback category, so a pin on the waveform, a row in the
+ * list and a chip in the popover are all obviously the same thing. */
+const CAT_COLORS = {
+  'off-beat': '#ffb340', 'vocal-buried': '#7d8cff', 'drums-fake': '#ff4d9d',
+  'clash': '#ff6b6b', 'transition': '#c78bff', 'too-loud': '#ff8a3d',
+  'too-quiet': '#5ac8fa', 'boring': '#8b8b93', 'good': '#2ee6d6',
+};
+
 const state = {
   config: null, source: null, match: null, screen: 'drop', detail: null,
   job: null, es: null, key: 'keep', keyMode: 'keep', swingDirty: false,
   raf: 0, playerRaf: 0, revealT0: 0, reveal: 1,
+  feedback: null, pending: null,
+  ab: { a: null, b: null, side: 'a', raf: 0, fixedAt: 0, drift: 0, voted: '',
+        ctx: null, gain: null, noCtx: false },
 };
 
 /* ── small helpers ───────────────────────────────────────────────────────── */
@@ -102,12 +113,13 @@ function showAlert(el, message) {
 const SLOTS = {
   analysing: ['#slot-analysing', false], controls: ['#slot-controls', false],
   remixing: ['#slot-remixing', true], result: ['#slot-result', true],
+  compare: [null, true],
 };
 
 function placeCard(screen) {
   const card = $('#sourceCard');
   const spec = SLOTS[screen];
-  if (!spec || !state.source) { card.hidden = true; return; }
+  if (!spec || !spec[0] || !state.source) { card.hidden = true; return; }
   const host = $(spec[0]);
   card.hidden = false;
   card.classList.toggle('compact', spec[1]);
@@ -125,7 +137,9 @@ function applyScreen(name) {
   if (name === 'controls' || name === 'result') drawSourceWave(1);
   // the canvas has no width until its screen is displayed, so the player loop
   // can only start once this screen is the one on show
-  if (name === 'result') startPlayer();
+  if (name === 'result') { startPlayer(); renderPins(); }
+  else closeMarkPop();
+  if (name === 'compare') startAb(); else stopAb();
   window.scrollTo({ top: 0, behavior: REDUCED ? 'auto' : 'smooth' });
 }
 
@@ -902,6 +916,8 @@ function renderResult(detail, elapsed) {
 
   const warn = (meta.warnings || []).concat(meta.note ? [meta.note] : []);
   $('#warnings').innerHTML = warn.map(w => `<div class="warn">${esc(w)}</div>`).join('');
+
+  renderFeedback(detail);
 }
 
 function drawRemixWave(reveal) {
@@ -974,6 +990,613 @@ function playerFrame(now) {
   state.playerRaf = requestAnimationFrame(playerFrame);
 }
 
+/* ── listening notes ─────────────────────────────────────────────────────── *
+ *
+ * One person on this project can hear, so the point of all of this is to cost
+ * him as little as possible: a key, a chip, a sentence. Nothing is asked twice
+ * and nothing waits for a Save button it does not need — a star posts itself.
+ */
+
+const catLabel = code => {
+  const cats = (state.config && state.config.feedback_categories) || [];
+  const hit = cats.find(c => c.code === code);
+  return hit ? hit.label : code;
+};
+const catColor = code => CAT_COLORS[code] || '#8b8b93';
+
+async function postFeedback(body) {
+  const id = state.detail && state.detail.meta.id;
+  if (!id) throw new Error('no remix is open');
+  const data = await api(`/api/remixes/${id}/feedback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  state.feedback = data;
+  return data;
+}
+
+function markers() {
+  return (state.feedback && state.feedback.markers) || [];
+}
+
+/* -- pins on the waveform ------------------------------------------------- */
+
+function renderPins() {
+  const host = $('#pins');
+  if (!host) return;
+  host.innerHTML = '';
+  if (!state.detail) return;
+  const total = state.detail.session.duration || 1;
+  markers().forEach(m => {
+    const p = Math.max(0, Math.min(1, m.time / total));
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pin' + (p > 0.72 ? ' right' : '');
+    b.style.left = (p * 100) + '%';
+    b.style.setProperty('--pin', catColor(m.category));
+    const where = m.bar ? `bar ${m.bar}` : fmt(m.time);
+    b.setAttribute('aria-label',
+      `${catLabel(m.category)} at ${fmt(m.time)}, ${where}. ` +
+      `${m.note || 'no note'}. Play from here.`);
+    b.innerHTML = `<i></i><span class="pin-tip"><b>${esc(catLabel(m.category))}</b>
+      <small>${esc(where)} · ${esc(fmt(m.time))}${m.slot ? ' · ' + esc(m.slot) : ''}</small>
+      ${m.note ? '<div>' + esc(m.note) + '</div>' : ''}</span>`;
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      const audio = $('#audio');
+      audio.currentTime = m.time;
+      audio.play().catch(() => {});
+    });
+    host.appendChild(b);
+  });
+}
+
+function renderMarkList() {
+  const host = $('#marks');
+  const rows = markers().slice().sort((a, b) => a.time - b.time);
+  host.innerHTML = '';
+  rows.forEach((m, i) => {
+    const li = document.createElement('li');
+    li.style.animationDelay = Math.min(i, 8) * 40 + 'ms';
+    li.innerHTML = `<i style="background:${catColor(m.category)}"></i>
+      <span class="m-cat">${esc(catLabel(m.category))}</span>
+      <span class="m-where">${m.bar ? 'bar ' + m.bar : fmt(m.time)}${
+        m.slot ? ' · ' + esc(m.slot) : ''}</span>
+      <span class="m-note">${esc(m.note || '')}</span>`;
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.className = 'm-go';
+    go.textContent = fmt(m.time);
+    go.setAttribute('aria-label', `Play from ${fmt(m.time)}`);
+    go.addEventListener('click', () => {
+      const audio = $('#audio');
+      audio.currentTime = m.time;
+      audio.play().catch(() => {});
+    });
+    li.appendChild(go);
+    host.appendChild(li);
+  });
+}
+
+/* -- the popover ---------------------------------------------------------- */
+
+function buildChips() {
+  const host = $('#popChips');
+  if (host.children.length) return;
+  (state.config.feedback_categories || []).forEach(c => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.code = c.code;
+    b.textContent = c.label;
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', 'false');
+    b.style.setProperty('--cat', catColor(c.code));
+    b.addEventListener('click', () => pickCategory(c.code));
+    host.appendChild(b);
+  });
+}
+
+function pickCategory(code) {
+  if (!state.pending) return;
+  state.pending.category = code;
+  $('#popChips').querySelectorAll('button').forEach(b => {
+    b.setAttribute('aria-checked', String(b.dataset.code === code));
+  });
+}
+
+function openMarkPop(time) {
+  if (!state.detail) return;
+  buildChips();
+  const total = state.detail.session.duration || 1;
+  const t = Math.max(0, Math.min(total, time));
+  state.pending = { time: t, category: null };
+  const pop = $('#markPop');
+  const wrap = $('#waveWrap');
+  const w = wrap.clientWidth || 1;
+  const x = t / total * w;
+  // hang it under the playhead, but never off the edge of the panel
+  pop.style.left = Math.max(0, Math.min(w - Math.min(304, w), x - 140)) + 'px';
+  $('#popAt').textContent = fmt(t);
+  $('#popNote').value = '';
+  pickCategory('off-beat');
+  pop.hidden = false;
+  $('#markBtn').classList.add('armed');
+  // it hangs below the waveform, which on a short window puts it under the
+  // fold -- and a note you have to go looking for is a note that never gets
+  // written
+  const box = pop.getBoundingClientRect();
+  if (box.bottom > window.innerHeight - 12 || box.top < 0) {
+    pop.scrollIntoView({ behavior: REDUCED ? 'auto' : 'smooth', block: 'center' });
+  }
+  const first = $('#popChips').querySelector('button');
+  if (first) first.focus({ preventScroll: true });
+}
+
+function closeMarkPop() {
+  const pop = $('#markPop');
+  if (!pop || pop.hidden) return;
+  pop.hidden = true;
+  state.pending = null;
+  $('#markBtn').classList.remove('armed');
+}
+
+async function saveMark() {
+  if (!state.pending) return;
+  const body = {
+    marker: {
+      time: state.pending.time,
+      category: state.pending.category || 'off-beat',
+      note: $('#popNote').value,
+    },
+  };
+  const btn = $('#popSave');
+  btn.disabled = true;
+  try {
+    await postFeedback(body);
+    closeMarkPop();
+    renderPins();
+    renderMarkList();
+    flashEars('marker saved');
+  } catch (err) {
+    $('#popNote').value = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* -- the rating ----------------------------------------------------------- */
+
+const STAR = 'M12 2.6l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 17.4 6.2 20.5l1.1-6.5' +
+             'L2.6 9.4l6.5-.9z';
+
+function buildStars() {
+  const host = $('#stars');
+  if (host.children.length) return;
+  for (let n = 1; n <= 5; n++) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.stars = String(n);
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', 'false');
+    b.setAttribute('aria-label', `${n} out of 5`);
+    b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="${STAR}" fill="currentColor"/></svg>`;
+    b.addEventListener('click', () => saveRating(n));
+    host.appendChild(b);
+  }
+}
+
+function paintRating() {
+  buildStars();
+  const rating = (state.feedback && state.feedback.rating) || {};
+  const stars = rating.stars || 0;
+  $('#stars').querySelectorAll('button').forEach(b => {
+    const on = Number(b.dataset.stars) <= stars;
+    b.classList.toggle('lit', on);
+    b.setAttribute('aria-checked', String(Number(b.dataset.stars) === stars));
+  });
+  $('#verdict').value = rating.verdict || '';
+  const state_el = $('#ratingState');
+  state_el.classList.remove('saved');
+  state_el.textContent = stars ? `${stars} of 5` : 'not rated yet';
+}
+
+function flashEars(message) {
+  const el = $('#ratingState');
+  el.textContent = message;
+  el.classList.add('saved');
+  clearTimeout(el._t);
+  el._t = setTimeout(paintRating, 1900);
+}
+
+async function saveRating(stars) {
+  try {
+    await postFeedback({ stars });
+    paintRating();
+    flashEars('saved');
+  } catch (err) {
+    flashEars(err.message);
+  }
+}
+
+async function saveVerdict() {
+  const value = $('#verdict').value.trim();
+  const had = ((state.feedback && state.feedback.rating) || {}).verdict || '';
+  if (!value || value === had) return;
+  try {
+    await postFeedback({ verdict: value });
+    paintRating();
+    flashEars('verdict saved');
+  } catch (err) {
+    flashEars(err.message);
+  }
+}
+
+function renderFeedback(detail) {
+  state.feedback = detail.feedback || { markers: [], votes: [], rating: {} };
+  paintRating();
+  renderMarkList();
+  renderPins();
+  closeMarkPop();
+
+  const pick = $('#abPick');
+  const partners = detail.partners || [];
+  pick.innerHTML = '';
+  partners.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p.kind + ':' + p.id;
+    o.textContent = `${p.label}${p.sub ? ' — ' + p.sub : ''}`;
+    pick.appendChild(o);
+  });
+  $('.ab-open').hidden = partners.length === 0;
+}
+
+/* ── A/B ─────────────────────────────────────────────────────────────────── *
+ *
+ * Two <audio> elements play at once and one of them is muted, so flipping is a
+ * property change rather than a seek: no gap, no restart, and the ear is still
+ * in the same bar when the other take arrives. The muted one is nudged back
+ * onto the audible one's clock a few times a second -- decoders drift, and a
+ * comparison you cannot trust to the bar is not a comparison.
+ */
+
+/* Two decoders started a moment apart do not stay together, and a seek to
+ * pull one back is itself slow enough to overshoot -- correcting that way
+ * oscillates around ±50 ms, which is a sixteenth note at 128 and plainly
+ * audible on a flip. So the muted side is nudged instead: a fraction of a
+ * percent of playback rate, inaudible because it is muted, closing the gap
+ * over about a second. A hard seek is kept for the case a rate cannot fix. */
+const DRIFT_NUDGE = 0.005;         // 5 ms: below this, leave it alone
+const DRIFT_SEEK = 0.25;           // 250 ms: too far to walk back
+const MAX_NUDGE = 0.012;           // ±1.2% of rate, time-stretched not pitched
+const FIX_EVERY = 250;             // ms between corrections
+/* currentTime is read off the audio clock and is jittery by a render quantum
+ * either way, so the raw difference is noisy. Correcting on the raw number
+ * makes the loop chase its own noise and ring; correcting on a smoothed one
+ * settles. */
+const DRIFT_SMOOTH = 0.12;
+
+/* Two renders of the same track have the same title, which makes "A · lofi 7"
+ * against "B · lofi 7" useless. When the names collide, name each side by the
+ * first thing that actually differs. */
+function abTag(side, other) {
+  if (!other || side.label !== other.label) return side.label;
+  return (side.sub || '').split(' · ')[0] || side.label;
+}
+
+function abSideOf(which) { return which === 'a' ? state.ab.a : state.ab.b; }
+function abEl(which) { return which === 'a' ? $('#audioA') : $('#audioB'); }
+
+function selfSide() {
+  const { meta, session, wave } = state.detail;
+  return {
+    kind: 'remix', id: meta.id, label: meta.title,
+    sub: `${Number(session.bpm).toFixed(0)} BPM · ${session.camelot} · ${fmt(session.duration)}`,
+    url: `/api/remixes/${meta.id}/remix.mp3`,
+    wave: wave || [], duration: session.duration,
+    sections: (session.sections || []).map(s => ({ kind: s.kind, start: s.start, end: s.end })),
+  };
+}
+
+async function resolveSide(p) {
+  const side = {
+    kind: p.kind, id: p.id, label: p.label, sub: p.sub, url: p.url,
+    wave: [], duration: 0, sections: [],
+  };
+  if (p.kind === 'remix') {
+    const d = await api(`/api/remixes/${p.id}`);
+    side.wave = d.wave || [];
+    side.duration = d.session.duration;
+    side.sections = (d.session.sections || [])
+      .map(s => ({ kind: s.kind, start: s.start, end: s.end }));
+    side.sub = `${Number(d.session.bpm).toFixed(0)} BPM · ${d.session.camelot} · ` +
+               fmt(d.session.duration);
+  } else if (p.kind === 'source') {
+    const src = state.detail && state.detail.source;
+    if (src && src.analysis) {
+      side.wave = src.wave || [];
+      side.duration = src.analysis.duration;
+      side.sections = (src.analysis.sections || [])
+        .map(s => ({ kind: s.label, start: s.start, end: s.end }));
+      side.sub = `${src.analysis.tempo.bpm.toFixed(1)} BPM · ` +
+                 `${src.analysis.key.camelot} · the track you dropped in`;
+    }
+  }
+  return side;                    // a reference file has no waveform to draw
+}
+
+function drawLane(cv, side, headEl) {
+  const c = sizeCanvas(cv);
+  if (!c || !side) return;
+  const { ctx, w, h } = c;
+  const total = side.duration || 1;
+  const mid = h * 0.54, half = h * 0.35;
+
+  (side.sections || []).forEach(s => {
+    const x0 = s.start / total * w, x1 = s.end / total * w;
+    const col = COLORS[s.kind] || '#6e6e73';
+    const g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, col + '2c'); g.addColorStop(1, col + '06');
+    ctx.fillStyle = g;
+    ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
+    ctx.fillStyle = col + 'bb';
+    ctx.fillRect(x0, h - 2.5, Math.max(1, x1 - x0 - 1), 2.5);
+  });
+
+  const wave = side.wave || [];
+  if (!wave.length) {
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillRect(0, mid - 1, w, 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.40)';
+    ctx.font = '500 11px -apple-system, system-ui, sans-serif';
+    ctx.fillText('played straight from disk — no waveform for this one', 10, mid - 12);
+    if (headEl) headEl.hidden = false;
+    return;
+  }
+  const n = wave.length;
+  for (let i = 0; i < n; i++) {
+    const x = i / n * w;
+    const sec = i / n * total;
+    const s = (side.sections || []).find(v => sec >= v.start && sec < v.end);
+    ctx.fillStyle = (COLORS[s ? s.kind : 'outro'] || '#6e6e73') + 'e0';
+    const bar = Math.max(1, wave[i] * half);
+    ctx.fillRect(x, mid - bar, Math.max(1, w / n - 0.35), bar * 2);
+  }
+}
+
+function drawLanes() {
+  drawLane($('#waveA'), state.ab.a, $('#headA'));
+  drawLane($('#waveB'), state.ab.b, $('#headB'));
+}
+
+/* Both elements feed one AudioContext and the flip is a gain change inside it.
+ *
+ * `muted`, and `volume = 0` too, silence an element by changing what its
+ * output path is doing, and Chrome then reports its position off a different
+ * clock -- the pair appear to step 50-80 ms apart at every flip although the
+ * audio has not moved. A sync loop that believes that reading will pull the
+ * real audio apart chasing it. Through one graph both elements always render,
+ * both report against the same clock, and the flip is four milliseconds of
+ * gain ramp: no gap, and no click either.
+ */
+function abGraph() {
+  if (state.ab.gain || state.ab.noCtx) return state.ab.gain;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) { state.ab.noCtx = true; return null; }
+  try {
+    const ctx = new Ctx();
+    const tap = el => {
+      const g = ctx.createGain();
+      ctx.createMediaElementSource(el).connect(g);
+      g.connect(ctx.destination);
+      return g;
+    };
+    state.ab.ctx = ctx;
+    state.ab.gain = { a: tap($('#audioA')), b: tap($('#audioB')) };
+  } catch (e) {
+    state.ab.noCtx = true;                 // no graph: fall back to volume
+  }
+  return state.ab.gain;
+}
+
+const FLIP_RAMP = 0.004;                   // 4 ms, short enough to feel instant
+
+/* An AudioContext may only start from a gesture, and openCompare awaits before
+ * it plays -- so the click handlers call this while the gesture is still on
+ * the stack. */
+function abArm() {
+  abGraph();
+  if (state.ab.ctx && state.ab.ctx.state === 'suspended') {
+    state.ab.ctx.resume().catch(() => {});
+  }
+}
+
+function abFlip(which) {
+  state.ab.side = which;
+  const gain = abGraph();
+  if (gain) {
+    const t = state.ab.ctx.currentTime;
+    gain.a.gain.setTargetAtTime(which === 'a' ? 1 : 0, t, FLIP_RAMP);
+    gain.b.gain.setTargetAtTime(which === 'b' ? 1 : 0, t, FLIP_RAMP);
+  } else {
+    $('#audioA').volume = which === 'a' ? 1 : 0;
+    $('#audioB').volume = which === 'b' ? 1 : 0;
+  }
+  $('#laneA').classList.toggle('live', which === 'a');
+  $('#laneB').classList.toggle('live', which === 'b');
+  setSegment($('#abSeg'), which);
+}
+
+function abPlay() {
+  const A = $('#audioA'), B = $('#audioB');
+  abArm();
+  document.body.classList.add('ab-playing');
+  [A, B].forEach(el => {
+    const p = el.play();
+    if (p && p.catch) p.catch(() => document.body.classList.remove('ab-playing'));
+  });
+}
+
+function abPause() {
+  $('#audioA').pause();
+  $('#audioB').pause();
+  document.body.classList.remove('ab-playing');
+}
+
+function abToggle() {
+  if ($('#audioA').paused) abPlay(); else abPause();
+}
+
+function abSeek(t) {
+  [$('#audioA'), $('#audioB')].forEach(el => {
+    const d = isFinite(el.duration) ? el.duration : t;
+    el.currentTime = Math.max(0, Math.min(d, t));
+    el.playbackRate = 1;
+  });
+  state.ab.fixedAt = performance.now();
+  state.ab.drift = 0;
+}
+
+function abFrame(now) {
+  if (state.screen !== 'compare') { state.ab.raf = 0; return; }
+  /* A is the clock and B chases it, whichever one you happen to be hearing.
+   * Correcting "the muted one" instead would mean the roles -- and the sign
+   * of the error -- swap on every flip, and a controller whose feedback term
+   * inverts under it is a controller that kicks the pair apart each time. */
+  const lead = $('#audioA'), follow = $('#audioB');
+  const raw = (follow.currentTime || 0) - (lead.currentTime || 0);
+  const drift = state.ab.drift + (raw - state.ab.drift) * DRIFT_SMOOTH;
+  state.ab.drift = drift;
+
+  if (!lead.paused && now - state.ab.fixedAt > FIX_EVERY &&
+      isFinite(follow.duration)) {
+    state.ab.fixedAt = now;
+    if (Math.abs(drift) > DRIFT_SEEK) {
+      follow.currentTime = Math.min(lead.currentTime, follow.duration);
+      follow.playbackRate = 1;
+      state.ab.drift = 0;
+    } else if (Math.abs(drift) > DRIFT_NUDGE) {
+      const rate = 1 - Math.max(-MAX_NUDGE, Math.min(MAX_NUDGE, drift * 1.2));
+      if (Math.abs(follow.playbackRate - rate) > 0.0015) follow.playbackRate = rate;
+    } else if (follow.playbackRate !== 1) {
+      follow.playbackRate = 1;
+    }
+  }
+
+  const ms = Math.abs(raw) * 1000;
+  const el = $('#abDrift');
+  const text = ms < 8 ? 'in sync' : `${ms.toFixed(0)} ms apart`;
+  if (el.textContent !== text) el.textContent = text;
+  el.classList.toggle('off', ms > 50);
+
+  ['a', 'b'].forEach(which => {
+    const side = abSideOf(which);
+    const audio = abEl(which);
+    const head = which === 'a' ? $('#headA') : $('#headB');
+    const cv = which === 'a' ? $('#waveA') : $('#waveB');
+    const total = (side && side.duration) || audio.duration || 0;
+    const p = total ? (audio.currentTime || 0) / total : 0;
+    head.style.transform = `translate3d(${p * cv.clientWidth}px,0,0)`;
+  });
+  $('#abNow').textContent = fmt(lead.currentTime || 0);
+  state.ab.raf = requestAnimationFrame(abFrame);
+}
+
+function startAb() {
+  cancelAnimationFrame(state.ab.raf);
+  drawLanes();
+  state.ab.raf = requestAnimationFrame(abFrame);
+}
+
+function stopAb() {
+  cancelAnimationFrame(state.ab.raf);
+  state.ab.raf = 0;
+  if ($('#audioA').src || $('#audioB').src) abPause();
+}
+
+async function openCompare(partner) {
+  if (!state.detail) return;
+  const a = selfSide();
+  let b;
+  try {
+    b = await resolveSide(partner);
+  } catch (err) {
+    showAlert($('#controlsErr'), err.message);
+    return;
+  }
+  $('#audio').pause();
+  state.ab.a = a;
+  state.ab.b = b;
+  state.ab.voted = '';
+
+  $('#aName').textContent = a.label;
+  $('#aSub').textContent = a.sub || '';
+  $('#bName').textContent = b.label;
+  $('#bSub').textContent = b.sub || '';
+  $('#cmpTitle').textContent = b.kind === 'source'
+    ? 'Your remix against the original.'
+    : b.kind === 'reference' ? 'Your remix against a real one.'
+      : 'Two takes, one transport.';
+  $('#abTotal').textContent = fmt(Math.max(a.duration || 0, b.duration || 0));
+  $('#abNow').textContent = '0:00';
+  $('#voteReason').value = '';
+  $('#voteState').textContent = '';
+  $('#voteA').classList.remove('won');
+  $('#voteB').classList.remove('won');
+  $('#voteA').textContent = 'Prefer A';
+  $('#voteB').textContent = 'Prefer B';
+  showAlert($('#cmpErr'), '');
+
+  segment($('#abSeg'), [{ value: 'a', label: 'A · ' + abTag(a, b) },
+                        { value: 'b', label: 'B · ' + abTag(b, a) }], 'a', abFlip);
+
+  const A = $('#audioA'), B = $('#audioB');
+  [A, B].forEach(el => {
+    // the sync nudges playback rate; time-stretch it rather than detune it,
+    // because a flip can land on an element mid-correction
+    el.preservesPitch = true;
+    el.mozPreservesPitch = true;
+    el.webkitPreservesPitch = true;
+    el.playbackRate = 1;
+  });
+  A.src = a.url;
+  B.src = b.url;
+  A.currentTime = 0;
+  B.currentTime = 0;
+  state.ab.fixedAt = 0;
+  state.ab.drift = 0;
+  abFlip('a');
+  await go('compare');
+  abPlay();
+}
+
+async function saveVote(prefer) {
+  const b = state.ab.b;
+  if (!b || !state.detail) return;
+  const btn = prefer === 'a' ? $('#voteA') : $('#voteB');
+  btn.disabled = true;
+  try {
+    await postFeedback({
+      vote: {
+        other: b.id, prefer, reason: $('#voteReason').value,
+        label: state.ab.a.label, other_label: b.label,
+      },
+    });
+    state.ab.voted = prefer;
+    $('#voteA').classList.toggle('won', prefer === 'a');
+    $('#voteB').classList.toggle('won', prefer === 'b');
+    $('#voteState').textContent = 'saved — you prefer ' +
+      (prefer === 'a' ? 'A · ' + abTag(state.ab.a, b)
+                      : 'B · ' + abTag(b, state.ab.a));
+    renderMarkList();
+  } catch (err) {
+    showAlert($('#cmpErr'), err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 /* ── library ─────────────────────────────────────────────────────────────── */
 
 async function loadLibrary() {
@@ -994,6 +1617,29 @@ async function loadLibrary() {
     item.innerHTML = `<b>${esc(r.title)}</b>
       <small>${Number(r.bpm).toFixed(0)} BPM · ${esc(r.camelot)} ${esc(r.key)} · ${esc(r.length)}</small>`;
     item.addEventListener('click', () => openRemix(r.id));
+
+    // straight into A/B against whatever is open, which is the comparison
+    // you actually want: this take against the one you just built
+    const ab = document.createElement('button');
+    ab.type = 'button';
+    ab.className = 'lib-ab';
+    ab.textContent = '⇄';
+    const open = state.detail && state.detail.meta.id;
+    ab.title = open && open !== r.id
+      ? `Compare ${r.title} against the remix you have open`
+      : 'Open this remix, then compare it';
+    ab.setAttribute('aria-label', ab.title);
+    ab.addEventListener('click', () => {
+      const current = state.detail && state.detail.meta.id;
+      if (!current || current === r.id) { openRemix(r.id); return; }
+      abArm();
+      openCompare({
+        kind: 'remix', id: r.id, label: r.title,
+        sub: `${Number(r.bpm).toFixed(0)} BPM · ${r.camelot} · ${r.length}`,
+        url: `/api/remixes/${r.id}/remix.mp3`,
+      });
+    });
+
     const del = document.createElement('button');
     del.type = 'button';
     del.className = 'lib-del';
@@ -1019,6 +1665,7 @@ async function loadLibrary() {
       }
     });
     li.appendChild(item);
+    li.appendChild(ab);
     li.appendChild(del);
     list.appendChild(li);
   });
@@ -1191,6 +1838,91 @@ function wirePlayer() {
   });
 }
 
+const TYPING = el => {
+  const tag = ((el && el.tagName) || '').toLowerCase();
+  return tag === 'input' || tag === 'select' || tag === 'textarea';
+};
+
+function wireFeedback() {
+  $('#markBtn').addEventListener('click', () => {
+    if (!$('#markPop').hidden) { closeMarkPop(); return; }
+    openMarkPop($('#audio').currentTime || 0);
+  });
+  $('#popClose').addEventListener('click', closeMarkPop);
+  $('#popSave').addEventListener('click', saveMark);
+  $('#popNote').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); saveMark(); }
+  });
+
+  const verdict = $('#verdict');
+  verdict.addEventListener('change', saveVerdict);
+  verdict.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); verdict.blur(); }
+  });
+
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !$('#markPop').hidden) { closeMarkPop(); return; }
+    if (state.screen !== 'result' || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (TYPING(e.target)) return;
+    if (e.key === 'm' || e.key === 'M') {
+      e.preventDefault();
+      if ($('#markPop').hidden) openMarkPop($('#audio').currentTime || 0);
+      else closeMarkPop();
+    }
+  });
+
+  $('#abGo').addEventListener('click', () => {
+    abArm();
+    const value = $('#abPick').value;
+    const partner = (state.detail.partners || [])
+      .find(p => p.kind + ':' + p.id === value);
+    if (partner) openCompare(partner);
+  });
+}
+
+function wireCompare() {
+  $('#abPlay').addEventListener('click', abToggle);
+  $('#cmpBack').addEventListener('click', () => { abPause(); go('result'); });
+  $('#voteA').addEventListener('click', () => saveVote('a'));
+  $('#voteB').addEventListener('click', () => saveVote('b'));
+
+  [['#waveA', 'a'], ['#waveB', 'b']].forEach(([sel, which]) => {
+    $(sel).addEventListener('click', e => {
+      const side = abSideOf(which);
+      const total = (side && side.duration) || abEl(which).duration || 0;
+      if (!total) return;
+      const r = $(sel).getBoundingClientRect();
+      abSeek((e.clientX - r.left) / r.width * total);
+    });
+  });
+
+  ['#audioA', '#audioB'].forEach(sel => {
+    $(sel).addEventListener('ended', () => {
+      if (abEl(state.ab.side) === $(sel)) abPause();
+    });
+  });
+
+  window.addEventListener('keydown', e => {
+    if (state.screen !== 'compare' || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (TYPING(e.target)) return;
+    if (e.key === 'Tab') {
+      // Tab is the flip, but only from outside the controls: once you have
+      // tabbed onto a button, Tab has to keep moving focus or the panel is a trap
+      const tag = ((e.target && e.target.tagName) || '').toLowerCase();
+      if (tag === 'button' || tag === 'a') return;
+      e.preventDefault();
+      abFlip(state.ab.side === 'a' ? 'b' : 'a');
+    } else if (e.code === 'Space') {
+      e.preventDefault();
+      abToggle();
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    if (state.screen === 'compare') drawLanes();
+  });
+}
+
 function wireLibrary() {
   const lib = $('#library'), btn = $('#libToggle');
   btn.addEventListener('click', () => {
@@ -1204,6 +1936,8 @@ async function init() {
   wireDropZone();
   wireControls();
   wirePlayer();
+  wireFeedback();
+  wireCompare();
   wireLibrary();
   applyScreen('drop');
   try {
