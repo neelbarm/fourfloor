@@ -65,9 +65,14 @@ def _loop_to(src: np.ndarray, start: int, want: int, period: int, sr: int) -> np
     def take(a: int, n: int) -> np.ndarray:
         return fit(src[max(0, a): max(0, a) + n], n)
 
-    t = np.linspace(0.0, 1.0, fade, dtype=np.float32) if fade > 1 else None
-    rise = np.sin(t * np.pi / 2) if t is not None else None
-    fall = np.cos(t * np.pi / 2) if t is not None else None
+    # Equal-gain, not equal-power. A loop seam joins the end of a bar to the
+    # start of the same bar, and in sustained material -- a pad, a held chord,
+    # a sub -- those are nearly the same signal. Crossfading correlated audio
+    # with sine/cosine gains sums to 1.41, a 3 dB bump at every seam, which on a
+    # looped pad is a pulse you can hear. Linear gains sum to one whatever the
+    # correlation, at the cost of a small dip where the two sides are unrelated.
+    rise = np.linspace(0.0, 1.0, fade, dtype=np.float32) if fade > 1 else None
+    fall = (1.0 - rise) if rise is not None else None
     if rise is not None and src.ndim == 2:
         rise, fall = rise[:, None], fall[:, None]
 

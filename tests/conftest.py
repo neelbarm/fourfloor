@@ -32,6 +32,14 @@ def isolated_home(tmp_path_factory):
         os.environ["FOURFLOOR_HOME"] = before
 
 
+@pytest.fixture(scope="module")
+def monkeypatch_module():
+    """``monkeypatch`` with module scope, for patching inside a module fixture."""
+    mp = pytest.MonkeyPatch()
+    yield mp
+    mp.undo()
+
+
 @pytest.fixture(scope="session")
 def sr() -> int:
     return SR
@@ -60,6 +68,102 @@ def click_track(bpm: float, seconds: float = 20.0, sr: int = SR,
         if accent_first and i % 4 == 0:
             x[pos:pos + len(thump)] += thump * 1.4
         i += 1
+    return x / max(float(np.max(np.abs(x))), 1e-9)
+
+
+def house_track(bpm: float = 128.0, seconds: float = 60.0, sr: int = SR,
+                seed: int = 4) -> np.ndarray:
+    """Four on the floor: kick on every beat, open hats on the offbeats.
+
+    The pattern a kit builder is supposed to find, and the pattern that used to
+    make beat trackers lock on to the wrong half of the beat -- the open hat's
+    attack is spread across the spectrum and the kick's is not, so anything
+    scoring "sharpest" picks the offbeat.
+    """
+    from fourfloor.house import drums as DR
+
+    n = int(seconds * sr)
+    x = np.zeros(n, dtype=np.float32)
+    kick, hat, ohat, clap = (DR.kick(sr), DR.hat(sr, False), DR.hat(sr, True),
+                             DR.clap(sr))
+    beat = 60.0 / bpm
+    rng = np.random.default_rng(seed)
+
+    def put(src: np.ndarray, t: float, gain: float) -> None:
+        a = int(round(t * sr))
+        b = min(n, a + len(src))
+        if 0 <= a < n and b > a:
+            x[a:b] += gain * src[: b - a]
+
+    i = 0
+    while (i + 1) * beat * sr < n:
+        t = i * beat
+        # the middle third is the drop: everything, loud
+        loud = 0.45 < (t / seconds) < 0.8
+        put(kick, t, 1.0 if loud else 0.8)
+        put(ohat, t + beat * 0.5, (0.62 if loud else 0.3) * (0.9 + 0.2 * rng.random()))
+        put(hat, t + beat * 0.25, 0.22)
+        put(hat, t + beat * 0.75, 0.26)
+        if loud and i % 4 in (1, 3):
+            put(clap, t, 0.85)
+        i += 1
+    return x / max(float(np.max(np.abs(x))), 1e-9)
+
+
+def trap_track(bpm: float = 146.0, seconds: float = 75.0, sr: int = SR,
+               seed: int = 7) -> np.ndarray:
+    """A half-time hip-hop beat with hat rolls, plus a bass and a pad.
+
+    This is the shape that broke everything: the pulse reads as 146 and the
+    *feel* is 73, the snare is on beat three rather than on two and four, the
+    hats run 16ths with the occasional 32nd roll, and there is real harmonic
+    content for the separation to find. A remix of it exercises the half-time
+    decision, the downbeat parity and the warp all at once.
+    """
+    from fourfloor.house import drums as DR
+
+    n = int(seconds * sr)
+    x = np.zeros(n, dtype=np.float32)
+    kick, snare, hat = DR.kick(sr), DR.clap(sr), DR.hat(sr, False)
+    beat = 60.0 / bpm
+    bar = 4 * beat
+    rng = np.random.default_rng(seed)
+
+    def put(src: np.ndarray, t: float, gain: float) -> None:
+        a = int(round(t * sr))
+        b = min(n, a + len(src))
+        if 0 <= a < n and b > a:
+            x[a:b] += gain * src[: b - a]
+
+    n_bars = int(seconds / bar)
+    for b_i in range(n_bars):
+        t0 = b_i * bar
+        put(kick, t0, 1.0)                        # bar one
+        put(kick, t0 + beat * 1.75, 0.72)         # the trap pickup
+        put(snare, t0 + 2 * beat, 0.85)           # half-time backbeat, on three
+        for s in range(16):
+            t = t0 + s * (bar / 16.0)
+            put(hat, t, 0.20 + 0.06 * rng.random())
+        if b_i % 4 == 3:                          # a 32nd roll into the next bar
+            for s in range(8):
+                put(hat, t0 + 3.5 * beat + s * (beat / 8.0), 0.16)
+
+    # a bassline that changes note every two bars, and a pad above it
+    t = np.arange(n) / sr
+    roots = [55.0, 55.0, 65.41, 73.42]
+    bassline = np.zeros(n, dtype=np.float32)
+    pad = np.zeros(n, dtype=np.float32)
+    for b_i in range(n_bars):
+        f = roots[(b_i // 2) % len(roots)]
+        a = int(b_i * bar * sr)
+        b = min(n, int((b_i + 1) * bar * sr))
+        if b <= a:
+            continue
+        seg = t[: b - a]
+        bassline[a:b] += (np.sin(2 * np.pi * f * seg) * 0.55).astype(np.float32)
+        for k, amp in ((4, 0.10), (5, 0.07), (6, 0.05)):
+            pad[a:b] += (np.sin(2 * np.pi * f * k * seg) * amp).astype(np.float32)
+    x = x * 0.75 + bassline + pad
     return x / max(float(np.max(np.abs(x))), 1e-9)
 
 
@@ -106,6 +210,25 @@ def peak_freq(y: np.ndarray, sr: int = SR, n: int = 65536, offset: int = SR // 2
     den = a - 2 * b + c
     shift = float(np.clip(0.5 * (a - c) / den, -0.5, 0.5)) if abs(den) > 1e-9 else 0.0
     return float(freqs[k] + shift * (freqs[1] - freqs[0]))
+
+
+def _write(x: np.ndarray, path: Path, sr: int = SR) -> Path:
+    import soundfile as sf
+
+    sf.write(str(path), np.stack([x, x], axis=1), sr, subtype="PCM_24")
+    return path
+
+
+@pytest.fixture(scope="session")
+def trap_clip(tmp_path_factory) -> Path:
+    """A synthetic half-time trap source, written to disk."""
+    return _write(trap_track(), tmp_path_factory.mktemp("trap") / "trap-146.wav")
+
+
+@pytest.fixture(scope="session")
+def house_clip(tmp_path_factory) -> Path:
+    """A synthetic four-on-the-floor record, written to disk."""
+    return _write(house_track(), tmp_path_factory.mktemp("house") / "house-128.wav")
 
 
 @pytest.fixture(scope="session")
