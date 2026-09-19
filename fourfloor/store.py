@@ -42,6 +42,17 @@ REMIX_FILES: dict[str, str] = {
 
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
+#: Content types for the source audio the compare view plays back.
+AUDIO_TYPES: dict[str, str] = {
+    ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".wav": "audio/wav",
+    ".flac": "audio/flac", ".aiff": "audio/aiff", ".aif": "audio/aiff",
+}
+
+#: Where a human-made remix of a source may be sitting, for A/B against ours.
+#: ``<name>.remix.<ext>`` beside the learning pairs; override with
+#: ``FOURFLOOR_REFS``.
+REFS_ENV = "FOURFLOOR_REFS"
+
 
 class NotFound(LookupError):
     """No such id in the library."""
@@ -88,6 +99,14 @@ def title_of(filename: str) -> str:
     """A human title for the library row."""
     stem = Path(display_name(filename)).stem.replace("_", " ").replace("-", " ")
     return stem.strip()[:80] or "Untitled"
+
+
+def slug(text: str) -> str:
+    """A name reduced to letters and digits, for comparing two spellings.
+
+    Only ever used to compare two names to each other -- never to build a path.
+    """
+    return re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
 
 
 def _read_json(path: Path) -> dict:
@@ -149,6 +168,45 @@ class Library:
             if f.suffix.lower() in UPLOAD_EXTS and f.is_file():
                 return f
         raise NotFound(f"source {sid} has no audio")
+
+    def source_file(self, sid: str) -> tuple[Path, str]:
+        """The source's audio and its content type, for the compare player."""
+        path = self.source_audio(sid)
+        return path, AUDIO_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+    # -- the reference pairs folder ---------------------------------------
+
+    def refs_pairs(self) -> Path:
+        root = os.environ.get(REFS_ENV) or (Path.home() / "Music" / "house-refs")
+        return Path(root).expanduser() / "pairs"
+
+    def reference_pair(self, name: str) -> tuple[Path, str] | None:
+        """A human remix of *name* in the pairs folder, or ``None``.
+
+        ``name`` is text out of a filename somebody typed, so it never becomes
+        a path. The folder is listed, each candidate's own stem is reduced to a
+        slug, and the match is slug against slug -- the path that comes back is
+        one the directory handed us, checked to still be inside it.
+        """
+        want = slug(name)
+        if not want:
+            return None
+        folder = self.refs_pairs()
+        if not folder.is_dir():
+            return None
+        root = folder.resolve()
+        for f in sorted(folder.iterdir()):
+            if not f.is_file() or ".remix." not in f.name:
+                continue
+            if f.suffix.lower() not in AUDIO_TYPES:
+                continue
+            if slug(f.name.split(".remix.")[0]) != want:
+                continue
+            resolved = f.resolve()
+            if root not in resolved.parents:            # a symlink out of the tree
+                continue
+            return resolved, AUDIO_TYPES[f.suffix.lower()]
+        return None
 
     # -- remixes ----------------------------------------------------------
 

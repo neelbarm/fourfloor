@@ -35,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import cli, store, ui
+from . import cli, feedback, store, ui
 from .arrange import FORMS, fmt_time
 from .jobs import JobQueue, PhaseTimer
 from .remix import MAX_TARGET_BPM, MIN_TARGET_BPM, PHASES
@@ -148,6 +148,8 @@ class App:
             "upload_exts": sorted(store.UPLOAD_EXTS),
             "queue_depth": self.queue.depth(),
             "home": shown,
+            "feedback_categories": [{"code": c, "label": lab}
+                                    for c, lab in feedback.CATEGORIES.items()],
         }
 
     # -- upload -----------------------------------------------------------
@@ -369,7 +371,77 @@ class App:
                                               "suggested_bpm", "wave") if k in src}
             except store.NotFound:
                 source = {}
-        return {"meta": meta, "session": session, "wave": wave, "source": source}
+        return {"meta": meta, "session": session, "wave": wave, "source": source,
+                "partners": self.partners(rid, meta, source),
+                "feedback": self.feedback(rid)}
+
+    # -- A/B partners -----------------------------------------------------
+
+    def partners(self, rid: str, meta: dict, source: dict) -> list[dict]:
+        """Everything this remix can be played against, best match first.
+
+        Other renders of the same source come first because that is the
+        comparison that settles an argument; then the source itself, then a
+        human remix of the same track if one is sitting in the pairs folder.
+        Descriptors only -- the page loads a partner's waveform when it picks
+        one, so opening a result does not drag ten waveforms with it.
+        """
+        out: list[dict] = []
+        same, other = [], []
+        for row in self.lib.list_remixes():
+            if row["id"] == rid:
+                continue
+            (same if row.get("source_id") and
+             row.get("source_id") == meta.get("source_id") else other).append(row)
+        for row, kin in [(r, True) for r in same] + [(r, False) for r in other]:
+            out.append({
+                "kind": "remix", "id": row["id"], "label": row.get("title", ""),
+                "sub": (f"{float(row.get('bpm', 0)):.0f} BPM · "
+                        f"{row.get('camelot', '')} · {row.get('form', '')}"
+                        + (" · same source" if kin else "")),
+                "url": f"/api/remixes/{row['id']}/remix.mp3",
+                "same_source": kin,
+            })
+        if source.get("id"):
+            out.insert(min(len(out), len(same)), {
+                "kind": "source", "id": source["id"],
+                "label": source.get("name") or "the original",
+                "sub": "the track you dropped in",
+                "url": f"/api/sources/{source['id']}/audio",
+                "same_source": True,
+            })
+            ref = self.lib.reference_pair(source.get("title") or source.get("name") or "")
+            if ref is not None:
+                out.insert(min(len(out), len(same) + 1), {
+                    "kind": "reference", "id": "reference",
+                    "label": ref[0].name,
+                    "sub": "a real remix of this track, from your pairs folder",
+                    "url": f"/api/remixes/{rid}/reference",
+                    "same_source": True,
+                })
+        return out
+
+    # -- feedback ---------------------------------------------------------
+
+    def feedback(self, rid: str) -> dict:
+        d = self.lib.remix_dir(rid)
+        data = feedback.read(d, rid)
+        data["rating"] = feedback.latest_rating(data)
+        return data
+
+    def save_feedback(self, rid: str, payload: dict) -> dict:
+        d = self.lib.remix_dir(rid)
+        try:
+            data = feedback.apply(d, payload, rid)
+        except feedback.FeedbackError as exc:
+            raise HttpError(400, str(exc)) from None
+        data["rating"] = feedback.latest_rating(data)
+        return data
+
+    def all_feedback(self) -> dict:
+        data = feedback.as_json(self.lib)
+        data["digest"] = feedback.digest(self.lib)
+        return data
 
     def close(self) -> None:
         self.queue.close()
@@ -479,13 +551,29 @@ class Handler(BaseHTTPRequestHandler):
             self._json({**job.to_dict(), "events": list(job.events)})
         elif parts == ["remixes"] and method == "GET":
             self._json({"remixes": app.lib.list_remixes()})
+        elif parts == ["feedback"] and method == "GET":
+            self._all_feedback(query)
         elif len(parts) == 2 and parts[0] == "remixes" and method == "GET":
             self._json(app.remix_detail(parts[1]))
         elif len(parts) == 2 and parts[0] == "remixes" and method == "DELETE":
             app.lib.delete_remix(parts[1])
             self._json({"deleted": parts[1]})
+        # the three-segment remix routes, most specific first: `feedback` and
+        # `reference` are not files in the download allowlist
+        elif len(parts) == 3 and parts[0] == "remixes" and parts[2] == "feedback" \
+                and method == "GET":
+            self._json(app.feedback(store.safe_id(parts[1])))
+        elif len(parts) == 3 and parts[0] == "remixes" and parts[2] == "feedback" \
+                and method == "POST":
+            self._json(app.save_feedback(store.safe_id(parts[1]), self._body_json()))
+        elif len(parts) == 3 and parts[0] == "remixes" and parts[2] == "reference" \
+                and method == "GET":
+            self._reference(store.safe_id(parts[1]))
         elif len(parts) == 3 and parts[0] == "remixes" and method == "GET":
             self._download(parts[1], parts[2], "download" in query)
+        elif len(parts) == 3 and parts[0] == "sources" and parts[2] == "audio" \
+                and method == "GET":
+            self._source_audio(store.safe_id(parts[1]))
         else:
             raise HttpError(404, f"no route for {method} {path}")
 
@@ -578,6 +666,41 @@ class Handler(BaseHTTPRequestHandler):
             extra["Content-Disposition"] = (
                 f'attachment; filename="{stem} (fourfloor){suffix}"')
         self._send_file(path, ctype, extra)
+
+    def _source_audio(self, sid: str) -> None:
+        """Stream an uploaded source, so it can be A/B'd against its remix."""
+        path, ctype = self.app.lib.source_file(sid)
+        self._send_file(path, ctype, {"Accept-Ranges": "bytes",
+                                      "Cache-Control": "no-cache"})
+
+    def _reference(self, rid: str) -> None:
+        """Stream the human remix of this track, if the pairs folder has one.
+
+        The file is found by listing that folder and matching slugs, never by
+        joining a name from the browser onto a path -- see
+        :meth:`fourfloor.store.Library.reference_pair`.
+        """
+        meta = self.app.lib.remix_meta(rid)
+        title = ""
+        if meta.get("source_id"):
+            try:
+                src = self.app.lib.source_meta(meta["source_id"])
+                title = src.get("title") or src.get("name") or ""
+            except store.NotFound:
+                title = ""
+        found = self.app.lib.reference_pair(title or meta.get("title") or "")
+        if found is None:
+            raise HttpError(404, "no reference remix of this track on disk")
+        self._send_file(found[0], found[1], {"Accept-Ranges": "bytes",
+                                             "Cache-Control": "no-cache"})
+
+    def _all_feedback(self, query: dict) -> None:
+        """Every note taken, for the engineers. ``?text=1`` gives the digest."""
+        if query.get("text"):
+            body = feedback.digest(self.app.lib).encode("utf8")
+            self._send(200, body, "text/plain; charset=utf-8")
+            return
+        self._json(self.app.all_feedback())
 
     def _send_file(self, path: Path, ctype: str, extra: dict) -> None:
         """Send a file, honouring a single ``Range`` so audio can seek."""
