@@ -73,6 +73,90 @@ validation, the same session file — with a browser in front of it:
 No framework, no CDN, no build step: one stdlib HTTP server and three files of
 vanilla HTML, CSS and JavaScript.
 
+## Telling it what sounds wrong
+
+fourfloor can measure a remix — tempo, key, peak, bar count — but it cannot
+hear one. Everything it cannot measure has to come from somebody listening, and
+that person's time is the scarce resource on this project. So the result screen
+is also a notepad, and what gets written there lands next to the render where
+the next person working on the code will find it.
+
+![A/B compare](docs/compare.png)
+
+**Mark what is wrong, where it is wrong.** While the remix plays, press
+<kbd>M</kbd> (or hit **Mark**) and a popover opens at the playhead: pick a chip
+— off-beat, vocal buried, drums fake, clash, rough transition, too loud, too
+quiet, boring, *good* — add a line if you want to, and it is saved. Markers show
+up as coloured pins on the waveform; hovering one shows the note, clicking one
+plays from there. At the bottom, a star rating and a one-line verdict.
+
+The bar number and the arrangement slot are not taken from the browser — the
+server works them out from the remix's own `*.session.json` grid and
+`*.plan.json`, so "bar 27" means the bar the arranger built, and a note about
+the drop is filed against the drop.
+
+**A/B two takes.** Pick anything in **Hear it against** — another render of the
+same song, any other remix in the library, the track you dropped in, or a real
+human remix of it if one is sitting in `~/Music/house-refs/pairs/` — and both
+play at once with one shared transport. <kbd>Tab</kbd>, or the toggle, flips
+which one you hear. Then vote, with a reason.
+
+The flip is instant because nothing restarts: both `<audio>` elements feed one
+`AudioContext` and the flip is a four-millisecond gain crossfade. That routing
+is load-bearing rather than decorative — silencing a side with `muted`, or with
+`volume = 0`, makes Chrome report that element's position off a different clock,
+and the pair appear to jump 50–80 ms apart at every flip although the audio has
+not moved. Through one graph they stay within a small fraction of a millisecond
+of each other across a hundred flips.
+
+**What the engineers read.** Everything is appended, with timestamps, to
+`~/.fourfloor/remixes/<id>/feedback.json`, and every marker is also copied into
+that remix's `*.session.json` under a `feedback` array — the session file is
+what travels to another machine, and a note about bar 41 is worth nothing if it
+stays behind. Nothing is edited in place, so re-rating a remix after a fix
+leaves the first opinion on record and the pair reads as a before/after.
+
+```bash
+python -m fourfloor.feedback           # the digest
+python -m fourfloor.feedback --json    # the raw records
+python -m fourfloor.feedback --remix 4ff0c412b0b701c6
+curl -s '127.0.0.1:4444/api/feedback?text=1'   # the same digest, from the app
+```
+
+```
+fourfloor listening notes — 1 remix with feedback
+
+lofi 7  ·  4ff0c412b0b701c6  ·  124 BPM  ·  7A Dm  ·  club form
+──────────────────────────────────────────────────────────────
+  rating  ★★★☆☆  “close, but the drop is plastic”
+  Off-beat  (1)
+      bar  17  0:32.90  [build bars 17-24]  — the build drags behind the grid
+                         the arranger said: riser + snare roll
+  Drums fake  (2)
+      bar  27  0:50.32  [drop bars 25-48]  — hats sound like a plugin preset
+                         the arranger said: hook, full kit, sidechained bass
+      bar  31  0:58.06  [drop bars 25-48]  — no swing at all
+  A/B vs lofi 7 (8e849bc44e6a2d7b): preferred the other one  — take 2 breathes more
+```
+
+Grouped by category rather than by time, because a fix is per category and the
+bar numbers under it are the evidence. It is one block of text: an engineer, or
+an agent, reads it and knows exactly which slot to open.
+
+The endpoints, if you would rather read them directly:
+
+| | |
+|---|---|
+| `GET /api/remixes/<id>/feedback` | markers, ratings and votes for one remix |
+| `POST /api/remixes/<id>/feedback` | `{marker}`, `{stars, verdict}` and/or `{vote}` |
+| `GET /api/feedback` | everything, plus the rendered digest |
+| `GET /api/feedback?text=1` | just the digest, as `text/plain` |
+
+Localhost-only and `Host`-checked like the rest of the app. A category has to be
+one of the nine; notes are stripped of control characters and capped; the
+reference remix in the pairs folder is found by listing that folder and matching
+slugs, never by joining a name from the browser onto a path.
+
 ## Paste a link
 
 Finding an mp3 is the boring part. If [yt-dlp](https://github.com/yt-dlp/yt-dlp)
