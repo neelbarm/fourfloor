@@ -111,6 +111,55 @@ def _parser() -> argparse.ArgumentParser:
     v.add_argument("input", help="a remix mp3/wav that has a .session.json beside it")
     v.add_argument("-o", "--output", default=None)
 
+    e = sub.add_parser("export", help="write DJ files for a remix or a folder of them")
+    e.add_argument("input", help="a remix mp3, or a folder of them, "
+                                 "each with its .session.json beside it")
+    e.add_argument("--set", dest="set_name", default=None, metavar="NAME",
+                   help="what to call the Rekordbox playlist (default: the folder)")
+    e.add_argument("--format", dest="formats", action="append", metavar="FMT",
+                   help="rekordbox, serato, csv, tags or all; repeat or comma-separate "
+                        "(default: rekordbox,csv)")
+    e.add_argument("--out", default=None, metavar="DIR",
+                   help="where rekordbox.xml and cues.csv go "
+                        "(default: beside the remixes)")
+    e.add_argument("--artist", default="fourfloor",
+                   help="the Artist tag to write (default: fourfloor)")
+    e.add_argument("--suffix", action="store_true",
+                   help="append ' (fourfloor house remix)' to every title")
+    e.add_argument("--no-verify", action="store_true",
+                   help="skip the ffprobe check that tagging left the audio alone")
+    e.add_argument("--json", action="store_true")
+
+    b = sub.add_parser("batch", help="remix a folder into one set at one tempo")
+    b.add_argument("folder", help="folder of original tracks")
+    b.add_argument("-o", "--out", required=True, metavar="DIR",
+                   help="where the remixes and the set files go")
+    b.add_argument("--bpm", type=float, required=True,
+                   help="one tempo for the whole set, e.g. 126")
+    kg = b.add_mutually_exclusive_group()
+    kg.add_argument("--key-lock", action="store_true", dest="key_lock",
+                    help="keep every track in its own key (the default)")
+    kg.add_argument("--key", default=None, metavar="STRATEGY",
+                    help="'auto': shift each track up to ±2 semitones onto a key "
+                         "that mixes with the one before it")
+    b.add_argument("--set", dest="set_name", default=None, metavar="NAME",
+                   help="what to call the set (default: the source folder's name)")
+    b.add_argument("--stems", choices=("hpss", "demucs"), default="hpss")
+    b.add_argument("--kit", default=None, metavar="NAME")
+    b.add_argument("--form", choices=tuple(FORMS), default="club")
+    b.add_argument("--length", default=None, help="target length per track, e.g. 4:30")
+    b.add_argument("--swing", type=float, default=None)
+    b.add_argument("--seed", type=int, default=0)
+    b.add_argument("--wav", action="store_true", help="also write a wav per track")
+    b.add_argument("--artist", default="fourfloor")
+    b.add_argument("--jobs", type=int, default=1,
+                   help="render this many tracks at once (default 1)")
+    b.add_argument("--resume", action="store_true",
+                   help="skip tracks that already have an mp3 and a session file")
+    b.add_argument("--json", action="store_true",
+                   help="print set.json instead of the report")
+    b.add_argument("-q", "--quiet", action="store_true")
+
     s = sub.add_parser("serve", help="run the local web app: drop a song in a browser")
     s.add_argument("--port", type=int, default=4444, help="port to listen on (default 4444)")
     s.add_argument("--open", action="store_true", dest="open_browser",
@@ -565,6 +614,92 @@ def cmd_preview(args, c: ui.C) -> int:
     return 0
 
 
+def _export_report(res, c: ui.C) -> str:
+    """What was written, and what a DJ does with it."""
+    from .export import HOT_CUE_LETTERS
+
+    lines = ["", ui.rule(c, "export"), ""]
+    lines.append(ui.kv(c, "set", c.bold(res.set_name)))
+    lines.append(ui.kv(c, "tracks", str(len(res.tracks))))
+    lines.append("")
+    for t in res.tracks:
+        lines.append(ui.kv(c, t.path.name[:28],
+                           f"{c.bold(f'{t.bpm:.2f}')} BPM   "
+                           f"{c.magenta(t.key)} {c.magenta(t.camelot)}   "
+                           f"{fmt_time(t.duration)}", pad=30))
+        cues = "  ".join(f"{HOT_CUE_LETTERS[i]} {cue.name}"
+                         for i, cue in enumerate(t.hot_cues))
+        lines.append(ui.kv(c, "", c.grey(cues), pad=30))
+    lines.append("")
+    if res.tagged:
+        lines.append(ui.rule(c, "tagged"))
+        for row in res.tagged:
+            probe = row.get("probe") or {}
+            stream = "{}s {}".format(probe.get("duration", "?"),
+                                     probe.get("codec_name", "?"))
+            lines.append(ui.kv(c, Path(row["file"]).name[:28],
+                               c.grey("{} bytes of ID3".format(row["bytes"]))
+                               + "   " + c.grey("audio unchanged: " + stream),
+                               pad=30))
+        lines.append("")
+    if res.files:
+        lines.append(ui.rule(c, "files"))
+        for label, path in res.files.items():
+            lines.append(ui.kv(c, label, c.cyan(str(path))))
+        lines.append("")
+    for note in res.notes:
+        lines.append(ui.warn(c, note))
+    if res.notes:
+        lines.append("")
+    if "rekordbox" in res.files:
+        lines.append(f"  {c.grey('import it:')} Rekordbox > Preferences > Advanced > "
+                     f"rekordbox xml > Imported Library, pick this file, then find "
+                     f"'{res.set_name}' under rekordbox xml in the tree")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def cmd_export(args, c: ui.C) -> int:
+    from . import export as export_mod
+
+    target = Path(args.input)
+    set_name = args.set_name or (target.name if target.is_dir() else target.stem)
+    if not args.json:
+        print(ui.header(c, f"export {target.name}"))
+    res = export_mod.export(
+        target, set_name, formats=args.formats, out_dir=args.out,
+        artist=args.artist, suffix=args.suffix, verify=not args.no_verify,
+    )
+    if args.json:
+        print(json.dumps(res.to_dict(), indent=2))
+    else:
+        print(_export_report(res, c))
+    return 0
+
+
+def cmd_batch(args, c: ui.C) -> int:
+    from . import batch as batch_mod
+
+    if args.key is not None and args.key.strip().lower() != "auto":
+        raise ValueError("batch takes --key auto or --key-lock; per-track keys are "
+                         "what `fourfloor remix --key` is for")
+    strategy = "auto" if (args.key or "").strip().lower() == "auto" else "lock"
+    quiet = args.quiet or args.json
+    reporter = batch_mod.Reporter(c, quiet=quiet)
+    manifest = batch_mod.run(
+        args.folder, args.out, bpm=args.bpm, key_strategy=strategy,
+        stems=args.stems, kit=args.kit, jobs=args.jobs, resume=args.resume,
+        length=args.length, form=args.form, swing=args.swing, seed=args.seed,
+        wav=args.wav, set_name=args.set_name, artist=args.artist,
+        on_event=reporter,
+    )
+    if args.json:
+        print(json.dumps(manifest, indent=2))
+    elif not quiet:
+        print(reporter.report(manifest))
+    return 1 if manifest["summary"]["failed"] and not manifest["summary"]["ok"] else 0
+
+
 def cmd_serve(args, c: ui.C) -> int:
     from .server import serve
 
@@ -581,7 +716,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     handlers = {"remix": cmd_remix, "inspect": cmd_inspect, "learn": cmd_learn,
                 "preview": cmd_preview, "serve": cmd_serve, "fetch": cmd_fetch,
-                "kit": cmd_kit}
+                "kit": cmd_kit, "export": cmd_export, "batch": cmd_batch}
     try:
         return handlers[args.command](args, c)
     except KeyboardInterrupt:

@@ -290,7 +290,7 @@ def alignment_report(rendered_audio: np.ndarray, sr: int, bpm: float,
                      source_stem: np.ndarray | None = None,
                      kit_layer: np.ndarray | None = None,
                      spans: list[tuple[int, int]] | None = None,
-                     division: int = 4) -> dict:
+                     division: int = 4, kit_is_sampled: bool = False) -> dict:
     """Measure whether a rendered remix sits on its own grid.
 
     ``rendered_audio`` is the finished mix. ``source_stem`` should be the source
@@ -335,12 +335,18 @@ def alignment_report(rendered_audio: np.ndarray, sr: int, bpm: float,
     if judged["bar_phase"] != 0 and judged["bar_phase_margin"] > 0.08:
         problems.append(f"the source's bar one lands on the grid's beat "
                         f"{judged['bar_phase'] + 1}")
-    if "kit" in out and out["kit"]["median_ms"] > 6.0:
-        problems.append(f"the kit itself reads {out['kit']['median_ms']:.1f} ms off its own "
-                        "grid, so the grid parameters are wrong")
+    if "kit" in out:
+        limit = 18.0 if kit_is_sampled else 6.0
+        if out["kit"]["median_ms"] > limit:
+            problems.append(
+                f"the sampled loop is {out['kit']['median_ms']:.1f} ms off the grid "
+                f"it was laid on (limit {limit:.0f})" if kit_is_sampled else
+                f"the kit itself reads {out['kit']['median_ms']:.1f} ms off its own "
+                "grid, so the grid parameters are wrong")
     if "spans" in out and out["spans"]["max_concurrent"] > 1:
         problems.append(f"{out['spans']['max_concurrent']} arrangement slots render "
                         "source audio at the same time")
+    out["kit_is_sampled"] = bool(kit_is_sampled)
     out["problems"] = problems
     out["ok"] = not problems
     return out
