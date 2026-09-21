@@ -146,7 +146,12 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--set", dest="set_name", default=None, metavar="NAME",
                    help="what to call the set (default: the source folder's name)")
     b.add_argument("--stems", choices=("hpss", "demucs"), default="hpss")
-    b.add_argument("--kit", default=None, metavar="NAME")
+    b.add_argument("--kit", default=None, metavar="NAME",
+                   help="one drum kit for the whole set, from `fourfloor kit build` "
+                        "(default: the most recent one; 'none' for the synth kit)")
+    b.add_argument("--bass", choices=("auto", "source", "sub", "none", "synth"),
+                   default="auto", help="low-end policy for every track, "
+                                        "same meanings as `fourfloor remix --bass`")
     b.add_argument("--form", choices=tuple(FORMS), default="club")
     b.add_argument("--length", default=None, help="target length per track, e.g. 4:30")
     b.add_argument("--swing", type=float, default=None)
@@ -667,10 +672,11 @@ def cmd_export(args, c: ui.C) -> int:
 
     target = Path(args.input)
     set_name = args.set_name or (target.name if target.is_dir() else target.stem)
+    formats = export_mod.normalise_formats(args.formats)   # refuse before the banner
     if not args.json:
         print(ui.header(c, f"export {target.name}"))
     res = export_mod.export(
-        target, set_name, formats=args.formats, out_dir=args.out,
+        target, set_name, formats=formats, out_dir=args.out,
         artist=args.artist, suffix=args.suffix, verify=not args.no_verify,
     )
     if args.json:
@@ -691,9 +697,9 @@ def cmd_batch(args, c: ui.C) -> int:
     reporter = batch_mod.Reporter(c, quiet=quiet)
     manifest = batch_mod.run(
         args.folder, args.out, bpm=args.bpm, key_strategy=strategy,
-        stems=args.stems, kit=args.kit, jobs=args.jobs, resume=args.resume,
-        length=args.length, form=args.form, swing=args.swing, seed=args.seed,
-        wav=args.wav, set_name=args.set_name, artist=args.artist,
+        stems=args.stems, kit=args.kit, bass=args.bass, jobs=args.jobs,
+        resume=args.resume, length=args.length, form=args.form, swing=args.swing,
+        seed=args.seed, wav=args.wav, set_name=args.set_name, artist=args.artist,
         on_event=reporter,
     )
     if args.json:
