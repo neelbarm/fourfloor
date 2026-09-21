@@ -667,6 +667,163 @@ and the warp all have to be right at once. Acceptance: median phase error under
 12 ms, p90 under 25 ms, over 85% of source onsets within ±20 ms of the grid, bar
 one on bar one, and never two slots of source audio at the same time.
 
+## The critic
+
+I cannot hear these remixes while I am building them, and neither can the agents
+working on the engine. The first time we tuned to band-level numbers — kick
+energy in range, crest factor in range, every meter green — the render came back
+rated *"off beat, everything overlapping."* Meters said fine, ears said garbage.
+
+So `fourfloor critic` does not score a render against a spec. It scores it
+against records that are known to be good, and adds four detectors aimed at the
+specific things that went wrong.
+
+```bash
+fourfloor critic examples/lofi-7.house.mp3
+fourfloor critic my-remix.mp3 --refs ~/Music/house-refs/remixes
+fourfloor critic my-remix.mp3 --refs ~/Music/house-refs/remixes --json
+```
+
+```
+── body.fourfloor.mp3 ───────────────────────────────────────────────────
+
+   41.0 / 100   ██████████████····················
+
+  Not playable yet. Mainly it does not sound like the reference records:
+  drops do not sound like the references (cos 0.618). Also the arrangement
+  is piling parts on top of each other.
+
+  groove      ███████·················  29.4 x0.30
+               only 59% on grid; the pulse is smeared, and the beat peak
+               is split -- two layers at different tempi
+  similarity  █·······················   4.3 x0.22
+               drops do not sound like the references (cos 0.618) [laion-clap]
+  clarity     ███████·················  27.5 x0.18
+               4.9 onsets per beat with a weak 2-8 Hz pulse -- sounds like
+               two parts playing over each other
+```
+
+Six sub-scores, each 0–100:
+
+| sub-score | weight | what it measures |
+|---|---|---|
+| `groove` | 0.30 | onsets landing on a locally-fitted grid, pulse sharpness, split tempo peaks |
+| `similarity` | 0.22 | cosine distance from the render's drops to real house drops, in a learned embedding |
+| `clarity` | 0.18 | onset density per beat, 2–8 Hz modulation depth, spectral flatness |
+| `clicks` | 0.10 | sample-level discontinuities, counted triple at section cues |
+| `vocal` | 0.10 | syllabic (4–8 Hz) energy in the vocal band and its level against the rest |
+| `loudness` | 0.10 | RMS, crest, clipping |
+
+### Calibration
+
+The weights are fitted, not guessed. The set is six real house remixes, two
+non-house originals, and every render a human has rated. The constraint is that
+the ranking reproduces the verdicts:
+
+| file | total | simil | groove | clarity | clicks | vocal | loud |
+|---|---|---|---|---|---|---|---|
+| reference: Stay Fly (Bittersweet) | **91.0** | 94.1 | 85.1 | 88.1 | 100.0 | 93.6 | 95.9 |
+| reference: Sweet Escape (BOSEP) | **87.0** | 85.9 | 99.7 | 95.9 | 17.1 | 92.8 | 99.4 |
+| reference: E85 (Kosuk) | **86.6** | 86.2 | 85.9 | 75.4 | 85.2 | 98.3 | 99.3 |
+| reference: babybabyyy | **79.6** | 89.0 | 60.4 | 73.6 | 100.0 | 87.0 | 100.0 |
+| reference: Never Be Like You | **77.6** | 93.0 | 61.4 | 56.0 | 100.0 | 92.1 | 94.2 |
+| reference: body.remix | **68.5** | 91.0 | 46.0 | 68.7 | 58.6 | 89.8 | 75.0 |
+| render: final-cantsay | **82.3** | 98.2 | 65.3 | 64.1 | 100.0 | 98.7 | 97.4 |
+| render: final-stayfly | **75.1** | 82.4 | 71.3 | 78.4 | 28.1 | 100.0 | 86.3 |
+| render: final-body | **73.1** | 74.8 | 65.3 | 64.1 | 57.8 | 100.0 | 97.6 |
+| render: body.classic — *"better, some of it is off beat"* | **71.9** | 56.2 | 63.6 | 68.9 | 100.0 | 95.7 | 84.3 |
+| render: body.fourfloor — *"off beat, everything overlapping"* | **41.0** | 4.3 | 29.4 | 27.5 | 67.3 | 95.3 | 100.0 |
+| original (not house): body.original | 58.3 | 0.0 | 79.8 | 68.7 | 85.3 | 60.0 | 75.0 |
+| original (not house): CAN'T SAY | 54.6 | 0.0 | 55.2 | 64.8 | 100.0 | 69.8 | 94.2 |
+| source (not house): lofi-7 | 42.7 | 0.0 | 41.6 | 30.2 | 100.0 | 47.9 | 100.0 |
+
+References average **81.7** and none falls below the best render. The two rated
+renders land in the order the human put them, 30.9 points apart. Non-house
+material scores 0 on similarity, which is the anchor doing its job: the
+embedding is calibrated so a reference reaches 90 and the best non-house
+original reaches 0.
+
+Re-fit with the scripts under `scratchpad/critic/`; the numbers live in
+`WEIGHTS` and `BANDS` in `fourfloor/critic/score.py`, one table, no magic
+constants buried in the code.
+
+### Two things that had to be rebuilt
+
+**Grid adherence has to be measured locally.** The obvious implementation —
+fold every onset time modulo the beat period, see how many land near a grid
+line — puts *every* track at chance, good or bad. A 0.1 % tempo error
+accumulates to a quarter of a second over four minutes, ten times the ±20 ms
+window being tested. Fitting a fresh phase per 8-second window (about four bars)
+is what makes the measurement mean anything: it separates the references (0.79)
+from *"some of it is off beat"* (0.72) from *"off beat"* (0.59).
+
+**A splice and a kick drum are the same event at the sample level.** Both are a
+sudden jump in a quiet neighbourhood. The first detector fired 55 times a minute
+on a render whose timing was fine, once per beat, exactly on the kick — and the
+better the drum kit got, the worse the render scored. Two tests now have to pass
+together: the jump must tower over its immediate neighbours (1.5 ms) *and* over
+the derivative the passage has been running at (50 ms), and the level has to
+hold across it. A kick jumps into new energy; a cut does not.
+
+### The learned-similarity backend
+
+The similarity score uses [LAION-CLAP](https://github.com/LAION-AI/CLAP), whose
+audio tower was trained on music and actually knows what a house record sounds
+like. It is **not** installed in the project venv, on purpose: its dependency
+closure pins `numpy<2` and fourfloor runs numpy 2, so `pip install laion-clap`
+here would silently downgrade the array library the DSP is tested against.
+
+```bash
+python -m fourfloor.critic.install_clap     # sidecar venv in ~/.fourfloor/critic
+```
+
+That builds an isolated interpreter and drives it as a subprocess; audio crosses
+the boundary as a `.npy` of 10-second windows and nothing else does. Reference
+embeddings are cached in `~/.fourfloor/critic/cache`, never in the repo, and
+never the audio itself.
+
+Without it the critic falls back to a hand-built MFCC-plus-rhythm embedding,
+**at half weight, with a warning printed** — because on the calibration set that
+fallback gets the important pair backwards. `body.fourfloor`, the render rated
+garbage, scores 0.946 on it, higher than every real reference, while
+`body.classic` scores 0.610, below the non-house originals. MFCCs and an
+autocorrelation profile describe texture, and a dense bright mix has the texture
+of a house record whether or not its parts agree about where the beat is. It
+still separates house from non-house, so it contributes something; it is not a
+substitute.
+
+### A second opinion from something that can hear
+
+`--ear gemini` sends the render — and, optionally, a reference remix and the
+original song — to Gemini as audio, prompted as a house producer deciding
+whether to play it out tonight. It returns a score, a verdict, timestamped
+issues, per-section commentary, and a comparison against the reference. The
+local numbers are never replaced; the result sits beside them in a `gemini`
+block.
+
+```bash
+fourfloor critic render.mp3 --refs ~/Music/house-refs/remixes --ear gemini \
+    --ref  ~/Music/house-refs/pairs/body.remix.mp3 \
+    --source ~/Music/house-refs/pairs/body.original.mp3
+```
+
+The key comes from `GEMINI_API_KEY`, or from `~/.fourfloor/gemini.key` (one
+line, `chmod 600`). It is never printed, never logged, travels in a header
+rather than a URL, is scrubbed out of error messages, and is not in this
+repository. Nothing leaves your machine unless you pass `--ear`.
+
+The model is chosen by parsing the version out of the names the API serves and
+taking the newest that can review audio, then walking down the list if one
+answers 404 or 503. The first version of this code hard-coded `gemini-2.5-pro`;
+the first time it ran against a real key that model replied *"no longer
+available to new users."* Names rot, so the code reads them instead of
+remembering them.
+
+When the render lives under `~/.fourfloor/remixes/<id>/`, the issues are also
+appended to that folder's `feedback.json` as markers authored `gemini`, in the
+same schema the web app writes, so a model's note and a human's note sit in one
+list. Re-running replaces its own markers and leaves everyone else's alone.
+
 ## Style learning
 
 `fourfloor learn` measures a folder of house remixes you already like and turns
@@ -733,6 +890,19 @@ with no key and no network.
 
 ## Honest limitations
 
+- **The critic scores a render, not a song.** Its similarity anchor is "does
+  this sound like these six records", so a good remix in a subgenre the
+  reference folder does not contain will score low and be right to. Give it
+  references that match what you are making. With no `--refs` at all the
+  similarity sub-score sits out and the other five are reweighted.
+- **The vocal sub-score is a band proxy by default.** Without `--demucs` it
+  reads 300–3400 Hz as "the voice", which cannot tell a vocal from a lead
+  synth. On the calibration set it barely separates anything, which is why it
+  carries 0.10 and says `(band-proxy)` on every line it prints.
+- **The click detector still fires on distortion.** A deliberately clipped or
+  saturated master reads as discontinuous, and one of the six references — a
+  loud, distorted record — loses 80 points of its `clicks` sub-score for a
+  choice its producer made on purpose.
 - **Time-stretching has limits.** Ratios outside 0.8–1.25 are audible. fourfloor
   warns and proceeds. An 80 BPM source into 124 lands at 0.775 and you can hear it
   on sustained vocals — that's the trade for not pitching everything up a fourth.

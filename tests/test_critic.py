@@ -190,6 +190,35 @@ def test_a_kick_attack_is_not_a_click():
     assert m.click_rate < 8.0
 
 
+def test_a_hard_sampled_kick_is_not_a_click():
+    """The false positive that cost a good render nine points.
+
+    A sampled kick from a real kit starts at full amplitude -- there is
+    no attack ramp -- so at the sample level it is a step discontinuity,
+    and on a real render the two-floor test fired on it once per beat,
+    fifty-five times a minute. What tells them apart is the level after
+    the event: a kick jumps into new energy, a splice does not.
+    """
+    beat = 60.0 / BPM
+    x = np.zeros(int(24.0 * SR))
+    kick = _hit(int(0.12 * SR), 0.035, 5, tone=55.0)
+    kick[: int(ATTACK * SR)] = kick[int(ATTACK * SR)]      # square off the attack
+    for t in np.arange(0.0, 23.5, beat):
+        i = int(t * SR)
+        x[i: i + len(kick)] += kick
+    x *= 0.8 / float(np.max(np.abs(x)))
+
+    m = F.Measured(duration=24.0)
+    F.measure_clicks(x, SR, m)
+    assert m.click_rate == 0.0, f"{m.extra.get('n_clicks')} kicks read as splices"
+
+
+def test_the_attack_filter_keeps_splices():
+    """...and does not simply silence the detector."""
+    kept = F._drop_attacks(_spliced_sine(), np.array([2 * SR, 4 * SR]), SR)
+    assert len(kept) == 2
+
+
 def test_clicks_at_section_cues_count_triple():
     x = _spliced_sine()
     plain, at_cue = F.Measured(duration=20.0), F.Measured(duration=20.0)

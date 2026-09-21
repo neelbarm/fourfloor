@@ -43,7 +43,8 @@ WEIGHTS: dict[str, float] = {
 BANDS: dict[str, tuple[float, float]] = {
     # groove
     "on_grid": (0.55, 0.85),        # windowed half-beat adherence
-    "pulse": (0.50, 1.60),          # beat + half-beat autocorrelation contrast
+    "on_grid_beat": (0.30, 0.65),   # windowed beat adherence
+    "pulse": (0.40, 0.90),          # beat autocorrelation contrast
     "bar": (0.35, 0.85),
     "split": (0.15, 0.65),          # rival tempo peak, less is better
     # clarity
@@ -51,7 +52,7 @@ BANDS: dict[str, tuple[float, float]] = {
     "mod_depth": (30.0, 120.0),     # 2-8 Hz envelope peak over median
     "flatness": (0.035, 0.085),     # less is better
     # clicks
-    "click_rate": (8.0, 70.0),      # weighted events per minute, less is better
+    "click_rate": (3.0, 35.0),      # weighted events per minute, less is better
     # vocal
     "vocal_lo": (-20.0, -8.0),
     "vocal_hi": (2.0, 9.0),         # above this the vocal band is too hot
@@ -71,7 +72,7 @@ BANDS: dict[str, tuple[float, float]] = {
 #: Deliberately set so it does *not* bind anywhere on the calibration set
 #: -- it is a guard against a pathological case, not a tuning knob. It
 #: starts to bite around a groove score of 25 with everything else high.
-GROOVE_GATE = (35.0, 0.70)
+GROOVE_GATE = (30.0, 0.90)
 
 
 @dataclass
@@ -170,12 +171,23 @@ def score_groove(m: Measured) -> SubScore:
     out the tightest one in the set; grid adherence (0.59 against the
     references' 0.79) and the split peak (0.61 against their 0.00-0.41)
     are the two numbers that actually notice.
+
+    Half-beat autocorrelation contrast is deliberately *not* here,
+    although a house record is supposed to have a peak there. On the
+    calibration set it pointed the wrong way: ``body.fourfloor`` scores
+    0.77 on it and a clean four-to-the-floor render scores 0.06, because
+    a kick with nothing syncopated over it has little half-beat energy
+    by construction. Two grid terms replace it -- adherence to the
+    half-beat grid and to the beat grid -- which ask the question
+    directly instead of inferring it from the spectrum of the envelope.
     """
     grid = _band(m.on_grid, "on_grid")
-    pulse = _band(m.beat_contrast + m.half_contrast, "pulse")
+    grid_beat = _band(m.on_grid_beat, "on_grid_beat")
+    pulse = _band(m.beat_contrast, "pulse")
     bar = _band(m.bar_contrast, "bar")
     split = 1.0 - _band(m.split_peak, "split")
-    score = 100.0 * (0.55 * grid + 0.20 * pulse + 0.10 * bar + 0.15 * split)
+    score = 100.0 * (0.42 * grid + 0.20 * grid_beat + 0.13 * pulse
+                     + 0.08 * bar + 0.17 * split)
     if m.on_grid >= 0.80 and m.beat_contrast > 0.18:
         detail = f"{m.on_grid * 100:.0f}% of onsets land on the half-beat grid; pulse is sharp"
     elif m.on_grid >= 0.60:

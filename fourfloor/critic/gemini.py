@@ -30,17 +30,50 @@ from pathlib import Path
 API_ROOT = "https://generativelanguage.googleapis.com"
 KEY_FILE = Path(os.environ.get("FOURFLOOR_HOME", Path.home() / ".fourfloor")) / "gemini.key"
 INLINE_LIMIT = 18 * 1024 * 1024     # below this, base64 inline beats an upload
+INLINE_BUDGET = 12 * 1024 * 1024    # total bytes allowed inline across all parts
 TIMEOUT = 240
+RETRY_BASE = 3.0                    # seconds; doubles per attempt
 
 CATEGORIES = ("off_beat", "vocal_buried", "drums_fake", "wrong_notes",
               "rough_transition", "too_loud", "too_quiet", "repetitive",
               "artifact", "good")
 
-#: Preference order. The first model the account actually serves that
-#: accepts audio wins; the list is a preference, not a hard requirement,
-#: so a newer 2.5 variant appearing on the endpoint is picked up by the
-#: prefix match below rather than needing a code change.
-MODEL_PREFS = ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro")
+#: Model families that cannot review a piece of audio, whatever their
+#: version: image and speech generators, embedders, transcribers, the
+#: robotics and computer-use towers, and the open-weight Gemma line.
+_NOT_A_CRITIC = ("image", "tts", "transcribe", "embedding", "computer-use",
+                 "robotics", "customtools", "vision", "gemma", "lyria",
+                 "banana", "antigravity", "deep-research")
+
+#: Tier ordering within one version, most specific name first so that
+#: "flash-lite" is not read as "flash". Breaks a version tie only.
+_TIERS = (("flash-lite", 1), ("pro", 3), ("flash", 2))
+
+#: Aliases Google keeps pointed at a current model. The safety net for
+#: the day the naming scheme changes again.
+_ALIASES = ("gemini-pro-latest", "gemini-flash-latest")
+
+_VERSION = re.compile(r"^gemini-(\d+)(?:\.(\d+))?-")
+
+
+def rank_model(name: str) -> tuple | None:
+    """Sort key for an audio-capable Gemini, or ``None`` if it is not one.
+
+    Deliberately parsed rather than listed. The first version of this
+    module hard-coded ``gemini-2.5-pro`` as the preferred model; by the
+    time it first ran against a real key that model answered 404 with
+    "no longer available to new users". A name like ``gemini-3.8-flash``
+    carries its own ordering, so reading the version out of it keeps
+    working across releases that have not happened yet.
+    """
+    if not name.startswith("gemini-") or any(bad in name for bad in _NOT_A_CRITIC):
+        return None
+    m = _VERSION.match(name)
+    if not m:
+        return None
+    major, minor = int(m.group(1)), int(m.group(2) or 0)
+    tier = next((rank for key, rank in _TIERS if key in name), 0)
+    return (major, minor, tier, 0 if "preview" in name else 1)
 
 
 class GeminiError(RuntimeError):
@@ -58,19 +91,29 @@ class Ear:
         return text.replace(self.key, "<key>") if self.key else text
 
     def _request(self, method: str, url: str, body: bytes | None = None,
-                 headers: dict | None = None) -> bytes:
-        req = urllib.request.Request(url, data=body, method=method)
-        req.add_header("x-goog-api-key", self.key)
-        for k, v in (headers or {}).items():
-            req.add_header(k, v)
-        try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-                return resp.read()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf8", "replace")[:400]
-            raise GeminiError(self._scrub(f"HTTP {exc.code} from {_path_of(url)}: {detail}")) from None
-        except urllib.error.URLError as exc:
-            raise GeminiError(self._scrub(f"cannot reach the Gemini API: {exc.reason}")) from None
+                 headers: dict | None = None, retries: int = 2) -> bytes:
+        for attempt in range(retries + 1):
+            req = urllib.request.Request(url, data=body, method=method)
+            req.add_header("x-goog-api-key", self.key)
+            for k, v in (headers or {}).items():
+                req.add_header(k, v)
+            try:
+                with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                    return resp.read()
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf8", "replace")[:400]
+                err = GeminiError(
+                    self._scrub(f"HTTP {exc.code} from {_path_of(url)}: {detail}"))
+                err.status = exc.code
+                # 429 and 503 are "ask again", not "this will never work"
+                if exc.code in (429, 503) and attempt < retries:
+                    time.sleep(RETRY_BASE * 2 ** attempt)
+                    continue
+                raise err from None
+            except urllib.error.URLError as exc:
+                raise GeminiError(
+                    self._scrub(f"cannot reach the Gemini API: {exc.reason}")) from None
+        raise GeminiError("unreachable")
 
     def _json(self, method: str, url: str, payload: dict | None = None) -> dict:
         body = json.dumps(payload).encode() if payload is not None else None
@@ -83,42 +126,65 @@ class Ear:
 
     # -- model discovery --------------------------------------------------
 
+    def candidates(self) -> list[str]:
+        """Audio-capable models this key is served, newest first.
+
+        A list rather than one name because "the endpoint lists it" and
+        "the endpoint will answer for it" are different questions: a
+        retired model still appears and answers 404, and a popular one
+        answers 503 under load. The caller walks down until one replies.
+        """
+        if self.model:
+            return [self.model]
+        data = self._json("GET", f"{API_ROOT}/v1beta/models?pageSize=200")
+        served = []
+        for m in data.get("models", []):
+            name = m.get("name", "").split("/")[-1]
+            methods = m.get("supportedGenerationMethods") or m.get("supportedActions") or []
+            if "generateContent" in methods:
+                served.append(name)
+        ranked = [n for _r, n in sorted(((rank_model(n), n) for n in served
+                                         if rank_model(n)), reverse=True)]
+        ranked += [a for a in _ALIASES if a in served]
+        if not ranked:
+            raise GeminiError("this key has no model that can review audio")
+        return ranked
+
     def pick_model(self) -> str:
         """The newest audio-capable model this key can actually call."""
         if self.model:
             return self.model
         data = self._json("GET", f"{API_ROOT}/v1beta/models?pageSize=200")
-        usable = []
+        served = []
         for m in data.get("models", []):
             name = m.get("name", "").split("/")[-1]
             methods = m.get("supportedGenerationMethods") or m.get("supportedActions") or []
-            if "generateContent" not in methods:
-                continue
-            if "embedding" in name or "tts" in name or "image" in name:
-                continue
-            usable.append(name)
-        for pref in MODEL_PREFS:
-            exact = [n for n in usable if n == pref]
-            if exact:
-                self.model = exact[0]
-                return self.model
-            # newest same-family variant, e.g. gemini-2.5-pro-preview-xx
-            family = sorted(n for n in usable if n.startswith(pref))
-            if family:
-                self.model = family[-1]
-                return self.model
-        if usable:
-            self.model = usable[0]
+            if "generateContent" in methods:
+                served.append(name)
+        ranked = sorted(((rank_model(n), n) for n in served if rank_model(n)),
+                        reverse=True)
+        if ranked:
+            self.model = ranked[0][1]
             return self.model
-        raise GeminiError("this key has no model that accepts generateContent")
+        for alias in _ALIASES:
+            if alias in served:
+                self.model = alias
+                return self.model
+        raise GeminiError("this key has no model that can review audio")
 
     # -- files ------------------------------------------------------------
 
-    def part_for(self, path: Path, label: str) -> dict:
-        """An audio part: inline base64 when small, a Files API handle when not."""
+    def part_for(self, path: Path, label: str, inline_ok: bool = True) -> dict:
+        """An audio part: inline base64 when small, a Files API handle when not.
+
+        ``inline_ok`` is how the caller enforces the *total* request
+        budget. Each of a render, a reference and a source can sit under
+        the per-file limit while the three of them together, base64
+        expanded by a third, blow past what ``generateContent`` accepts
+        in one body.
+        """
         mime = mimetypes.guess_type(str(path))[0] or "audio/mpeg"
-        size = path.stat().st_size
-        if size <= INLINE_LIMIT:
+        if inline_ok and path.stat().st_size <= INLINE_LIMIT:
             data = base64.b64encode(path.read_bytes()).decode()
             return {"inline_data": {"mime_type": mime, "data": data}}
         return {"file_data": {"mime_type": mime, "file_uri": self.upload(path, label, mime)}}
@@ -173,33 +239,51 @@ class Ear:
 
     def review(self, render: Path, ref: Path | None = None, source: Path | None = None,
                session: dict | None = None, on_step=None) -> dict:
-        model = self.pick_model()
-        if on_step:
-            on_step(f"gemini {model}")
+        sending = [p for p in (render, ref, source) if p]
+        total = sum(p.stat().st_size for p in sending)
+        inline_ok = total <= INLINE_BUDGET
+        if on_step and not inline_ok:
+            on_step(f"uploading {len(sending)} files")
+
         parts: list[dict] = [{"text": prompt_for(session, ref is not None, source is not None)}]
         parts.append({"text": "AUDIO 1 -- THE RENDER under review:"})
-        parts.append(self.part_for(render, "render"))
+        parts.append(self.part_for(render, "render", inline_ok))
         if ref:
             parts.append({"text": "AUDIO 2 -- REFERENCE: a real, professionally "
                                   "produced house remix. This is the target."})
-            parts.append(self.part_for(ref, "reference"))
+            parts.append(self.part_for(ref, "reference", inline_ok))
         if source:
             parts.append({"text": "AUDIO 3 -- SOURCE: the original, non-house song "
                                   "the render was made from."})
-            parts.append(self.part_for(source, "source"))
+            parts.append(self.part_for(source, "source", inline_ok))
         payload = {
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json",
                                  "maxOutputTokens": 4096},
         }
-        data = self._json("POST",
-                          f"{API_ROOT}/v1beta/models/{model}:generateContent", payload)
-        text = _first_text(data)
-        if not text:
-            raise GeminiError("the model returned no text")
-        out = repair_json(text)
-        out["model"] = model
-        return out
+        models = self.candidates()
+        last: GeminiError | None = None
+        for model in models[:4]:
+            if on_step:
+                on_step(f"gemini {model}")
+            try:
+                data = self._json(
+                    "POST", f"{API_ROOT}/v1beta/models/{model}:generateContent", payload)
+            except GeminiError as exc:
+                # 404 (retired) and 503 (saturated) both mean "try the next
+                # one"; anything else is ours to fix, so surface it.
+                if getattr(exc, "status", None) in (404, 429, 503):
+                    last = exc
+                    continue
+                raise
+            text = _first_text(data)
+            if not text:
+                last = GeminiError(f"{model} returned no text")
+                continue
+            out = repair_json(text)
+            out["model"] = model
+            return out
+        raise last or GeminiError("no served model answered")
 
 
 def _path_of(url: str) -> str:

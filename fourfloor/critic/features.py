@@ -408,6 +408,36 @@ def measure_mush(sp: Spectral, m: Measured) -> None:
 #: (short floor ms, long floor ms, short ratio, long ratio, absolute jump)
 CLICK = (1.5, 50.0, 12.0, 35.0, 0.08)
 
+#: A candidate is discarded when the 20 ms after it is this many times
+#: louder than the 20 ms before: that is an attack, not a cut.
+CLICK_ONSET_RATIO = 2.0
+
+
+def _drop_attacks(x: np.ndarray, starts: np.ndarray, sr: int) -> np.ndarray:
+    """Discard candidates that are drum attacks rather than cuts.
+
+    The two-floor test finds jumps, and a hard-sampled kick is a jump: on
+    the calibration set it fired 55 times a minute on a render whose only
+    fault was elsewhere, once per beat, exactly on the kick. What
+    separates the two is not the jump, it is what happens after it. A
+    transient is a jump *into* new energy -- the 20 ms after it is far
+    louder than the 20 ms before. A splice is a jump between two passages
+    at roughly the same level: the waveform is broken, the loudness is
+    not. Requiring the level to hold across the event keeps the splices
+    and drops the drums.
+    """
+    if starts.size == 0:
+        return starts
+    w = max(8, int(sr * 0.020))
+    keep = np.zeros(len(starts), dtype=bool)
+    for k, i in enumerate(starts):
+        if i < w or i + 1 + w > len(x):
+            continue
+        before = float(np.sqrt(np.mean(np.square(x[i - w: i]))))
+        after = float(np.sqrt(np.mean(np.square(x[i + 1: i + 1 + w]))))
+        keep[k] = after < CLICK_ONSET_RATIO * max(before, 1e-9)
+    return starts[keep]
+
 
 def measure_clicks(x: np.ndarray, sr: int, m: Measured,
                    cues: list[float] | None = None) -> None:
@@ -443,6 +473,10 @@ def measure_clicks(x: np.ndarray, sr: int, m: Measured,
     # merge hits inside 5 ms into one event
     gap = max(1, int(sr * 0.005))
     starts = hits[np.concatenate([[True], np.diff(hits) > gap])]
+    starts = _drop_attacks(x, starts, sr)
+    if starts.size == 0:
+        m.extra["n_clicks"] = 0
+        return
     weights = np.ones(len(starts))
     if cues:
         t = starts / float(sr)
