@@ -288,6 +288,17 @@ def test_two_links_that_parse_to_the_same_name_do_not_collide(tmp_path, opts,
     assert entries[1].slug.endswith("-2")
 
 
+def test_a_dry_run_says_when_it_would_not_fetch_anything(tmp_path, opts, fake_run,
+                                                         capsys) -> None:
+    """A candidate too weak to download must not read as "would fetch"."""
+    fake_run["candidates"][0].score = 0.05
+    opts.dry_run = True
+    source = local(tmp_path, "Somebody - The Original (Neel Remix)")
+    lines: list[str] = []
+    pipeline.add([source], opts, on=lambda kind, text: lines.append(text))
+    assert any("nothing worth fetching" in t and "standalone" in t for t in lines)
+
+
 def test_a_dry_run_writes_nothing_at_all(tmp_path, opts, fake_run) -> None:
     opts.dry_run = True
     source = local(tmp_path, "Somebody - The Original (Neel Remix)")

@@ -283,8 +283,15 @@ def _ingest(source: str, info: dict, title: str, uploader: str,
 
 
 def _dry_line(entry: Entry, parsed: titles.Parsed, best) -> str:
-    would = (f"would fetch: {best.title} ({best.score:.2f}) {best.url}"
-             if best else "found nothing worth fetching")
+    if best is None:
+        would = "the search found nothing at all"
+    elif best.score < MIN_CANDIDATE_SCORE:
+        # say what it would really do, not what it found: below this the
+        # candidate is not worth a download and the remix is kept on its own
+        would = (f"nothing worth fetching — best was {best.title} "
+                 f"({best.score:.2f}), so this would be a standalone remix")
+    else:
+        would = f"would fetch: {best.title} ({best.score:.2f}) {best.url}"
     return f"{parsed.label()}  ->  {entry.slug}\n    {would}"
 
 
