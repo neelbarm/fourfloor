@@ -336,14 +336,17 @@ class Engine:
     #: answer into. It is the oldest arrangement in dance music and it is what a
     #: listener recognises as "the vocal splits and repeats".
     #:
-    #: The pieces are one and two beats, not four. A slice only re-synchronises
-    #: at its own start, so with a triplet flow inside it the longer the slice
-    #: the further the voice gets from the beat before the next one pulls it
-    #: back. Two beats is about as long as a triplet can run before it is
-    #: audibly arguing with the kick.
-    CHOP_PATTERN = (("take", 2), ("take", 2), ("again", 2), ("rest", 2),
-                    ("take", 2), ("stut", 1), ("stut", 1), ("again", 2),
-                    ("rest", 2))
+    #: The pieces are mostly one beat. A slice only re-synchronises at its own
+    #: start, so with a triplet flow inside it the longer the slice the further
+    #: the voice gets from the beat before the next one pulls it back -- and a
+    #: rapper fits three or four syllables into a beat, so a two-beat slice
+    #: puts one syllable on the grid and lets seven drift. Ten slice starts to
+    #: the four bars is roughly what a producer's chop looks like, and it is
+    #: four beats of rest in sixteen, which is the room the drums answer into.
+    CHOP_PATTERN = (("take", 1), ("take", 1), ("again", 1), ("rest", 1),
+                    ("take", 2), ("stut", 1), ("again", 1),
+                    ("take", 1), ("take", 1), ("stut", 1), ("rest", 1),
+                    ("again", 2), ("rest", 2))
 
     def _chop_vocal(self, voc: np.ndarray, want: int) -> np.ndarray:
         """Rebuild a vocal out of slices that start on syllables and land on beats.
