@@ -67,6 +67,10 @@ def _parser() -> argparse.ArgumentParser:
                    help="do not put a synth kick under a sampled loop's kicks")
     r.add_argument("--drums-db", type=float, default=0.0, metavar="DB",
                    help="trim the drum bus, in decibels (default 0)")
+    r.add_argument("--vocal", choices=("auto", "flow", "chop"), default="auto",
+                   help="auto (default) measures whether the voice locks to a "
+                        "straight grid; flow plays it as sung; chop cuts it into "
+                        "slices that start on syllables and land on beats")
     r.add_argument("--producer", action="store_true",
                    help="ask Claude to plan the arrangement (needs ANTHROPIC_API_KEY)")
     r.add_argument("--seed", type=int, default=0, help="randomisation seed")
@@ -199,7 +203,7 @@ def remix_options(args):
         target_bpm=args.bpm, key=args.key, compatible_with=args.compatible_with,
         stems=args.stems, form=args.form, length=args.length, swing=args.swing,
         producer=args.producer, seed=args.seed, wav=not args.no_wav,
-        kit=args.kit, bass=args.bass, drums_db=args.drums_db,
+        kit=args.kit, bass=args.bass, drums_db=args.drums_db, vocal=args.vocal,
         kick_reinforce=not getattr(args, "no_kick_reinforce", False),
     )
 
@@ -276,6 +280,7 @@ def _remix_report(res, c: ui.C, elapsed: float) -> str:
                        if res.kit_name else c.grey("synthesised kit "
                                                    "(build one: fourfloor kit build)")))
     lines.append(ui.kv(c, "bass", res.bass_source))
+    lines.append(ui.kv(c, "vocal", res.vocal_mode))
     lines.append(ui.kv(c, "levels", f"{res.metrics['peak_db']:.2f} dB peak   "
                                     f"{res.metrics['rms_db']:.2f} dB RMS   "
                                     f"{res.metrics['kick_count']} kicks"))

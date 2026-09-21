@@ -516,3 +516,54 @@ def bass_collision(bass: np.ndarray, sr: int, bpm: float,
     out["on_beat"] = float(w[on_beat].sum() / total)
     out["off_eighth"] = float(w[~on_eighth].sum() / total)
     return out
+
+
+def vocal_fit(vocals: np.ndarray, sr: int, bpm: float,
+              first_downbeat: float = 0.0, tol: float = 0.030) -> dict:
+    """Will this voice lock to a straight four-on-the-floor grid, or not?
+
+    A rapper's flow is not a drum machine. Triplet flows -- three syllables to
+    the beat instead of two or four -- are the default in most hip-hop since
+    about 2015, and a triplet syllable lands a third of a beat from anything on
+    a sixteenth lattice, which at 128 BPM is 156 ms. Warping cannot fix that:
+    the warp puts the song's *beats* on the grid, and the voice is phrased
+    against those beats exactly as the rapper phrased it.
+
+    Laid down as one continuous take over a straight house kit, that reads as
+    two things happening at once -- which is what a listener says when he says
+    "overlaps". The answer is not to stretch the voice; it is to stop playing
+    it continuously, and cut it into pieces that each start on a syllable and
+    land on a beat.
+
+    Returns the share of vocal onset energy that sits on a straight sixteenth
+    lattice, the share that sits on a triplet one, how much of the time the
+    voice is sounding at all, and how scattered its timing is against the
+    straight grid.
+    """
+    mono = _mono(np.asarray(vocals, dtype=np.float32))
+    duration = len(mono) / float(sr)
+    out = {"straight": 0.0, "triplet": 0.0, "advantage": 0.0,
+           "duty": 0.0, "scatter_ms": 0.0, "onsets_per_bar": 0.0}
+    if duration <= 1.0:
+        return out
+    rms = F.rms_envelope(mono, hop=512, win=2048)
+    peak = max(float(rms.max()), 1e-9)
+    out["duty"] = float(np.mean(rms > 0.12 * peak))
+    onsets, strength = onset_times(vocals, sr)
+    if not len(onsets):
+        return out
+    w = np.asarray(strength, dtype=float)
+    total = max(float(w.sum()), 1e-12)
+    bars = max(duration / (4.0 * 60.0 / max(bpm, 1e-6)), 1e-9)
+    out["onsets_per_bar"] = float(len(onsets) / bars)
+    straight = grid_times(bpm, first_downbeat, duration, division=4)
+    triplet = grid_times(bpm, first_downbeat, duration, division=6)
+    err_s = np.abs(phase_errors(onsets, straight))
+    out["straight"] = float(w[err_s <= tol].sum() / total)
+    out["triplet"] = float(
+        w[np.abs(phase_errors(onsets, triplet)) <= tol].sum() / total)
+    out["advantage"] = out["triplet"] - out["straight"]
+    # how scattered, in the syllables that are not already on the grid
+    loose = err_s[err_s > tol]
+    out["scatter_ms"] = float(np.median(loose) * 1000.0) if len(loose) else 0.0
+    return out

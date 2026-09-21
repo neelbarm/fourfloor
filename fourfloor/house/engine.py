@@ -205,7 +205,8 @@ class Engine:
                  semitones: int = 0, swing: float = 0.08, beat_multiple: float = 1.0,
                  src_bar_dur: float = 2.0, seed: int = 0, warp=None,
                  drum_kit=None, kick_reinforce: bool = True,
-                 bass_mode: str = "source", drums_db: float = 0.0) -> None:
+                 bass_mode: str = "source", drums_db: float = 0.0,
+                 vocal_mode: str = "flow") -> None:
         self.sr = sr
         self.plan = plan
         self.stems = stems
@@ -227,6 +228,7 @@ class Engine:
         self.kick_reinforce = kick_reinforce
         self.bass_mode = bass_mode
         self.drums_gain = 10.0 ** (float(drums_db) / 20.0)
+        self.vocal_mode = vocal_mode
         self.source_bass_bed: np.ndarray | None = None
         self.rng = np.random.default_rng(seed)
         self.bar_dur = plan.bar_dur
@@ -277,6 +279,9 @@ class Engine:
         # cannot drift away from the part of the song it belongs to.
         bass = (np.zeros((self.n, 2), dtype=np.float32)
                 if self.stems.bass is not None else None)
+        # The voice on its own, laid out exactly as it is mixed, so the gate can
+        # ask the question a listener asks: is the singing on the beat?
+        vocal_bed = np.zeros((self.n, 2), dtype=np.float32)
         self.source_spans = []
         for slot in self.plan.slots:
             a = self._bar_sample(slot.start_bar)
@@ -284,7 +289,8 @@ class Engine:
             self.source_spans.append((a, a + want))
             period = int(round(max(slot.source_bars, 1) * self.bar_dur * self.sr))
             start = int(round(slot.source_start * self.sr))
-            seg = self._harmonic_span(slot, start, want, period)
+            seg, voc_only = self._harmonic_span(slot, start, want, period)
+            add_at(vocal_bed, voc_only, a, slot.source_gain)
             pseg = _loop_to(self.stems.percussive, start, want, period, self.sr)
             if bass is not None:
                 add_at(bass, _loop_to(self.stems.bass, start, want, period, self.sr),
@@ -316,6 +322,7 @@ class Engine:
             add_at(perc_ref, pseg, a, 1.0)
             if slot.percussive_gain > 0:
                 add_at(perc, pseg, a, slot.percussive_gain)
+        self.layers["vocals"] = vocal_bed
         self.layers["source_perc"] = perc_ref
         # The percussive bed as it is actually mixed -- which with a real kit in
         # play should be silence, and the gate checks that rather than trusting
@@ -323,6 +330,82 @@ class Engine:
         self.layers["source_drums"] = perc
         self.source_bass_bed = bass
         return harm, perc
+
+    #: One four-bar unit of chopped vocal, as ``(what, beats)``: fresh phrases,
+    #: the first one again, a two-beat stutter of it, and gaps for the drums to
+    #: answer into. It is the oldest arrangement in dance music and it is what a
+    #: listener recognises as "the vocal splits and repeats".
+    #:
+    #: The pieces are one and two beats, not four. A slice only re-synchronises
+    #: at its own start, so with a triplet flow inside it the longer the slice
+    #: the further the voice gets from the beat before the next one pulls it
+    #: back. Two beats is about as long as a triplet can run before it is
+    #: audibly arguing with the kick.
+    CHOP_PATTERN = (("take", 2), ("take", 2), ("again", 2), ("rest", 2),
+                    ("take", 2), ("stut", 1), ("stut", 1), ("again", 2),
+                    ("rest", 2))
+
+    def _chop_vocal(self, voc: np.ndarray, want: int) -> np.ndarray:
+        """Rebuild a vocal out of slices that start on syllables and land on beats.
+
+        Each slice begins at a vocal onset -- a syllable, not an arbitrary
+        sample -- and is placed at a grid position, so its first and loudest
+        transient is exactly on the beat by construction. Nothing is stretched.
+        Inside a slice the voice keeps the timing it was sung with, which is the
+        point: a triplet triplet-feels for four beats and then the next slice
+        re-synchronises, instead of a whole verse walking away from the kick.
+        """
+        from ..analysis.alignment import onset_times
+
+        beat_n = max(64, int(round(self.beat * self.sr)))
+        out = np.zeros((want, voc.shape[1]) if voc.ndim == 2 else (want,),
+                       dtype=np.float32)
+        onsets, strength = onset_times(voc, self.sr)
+        if len(onsets) < 4:
+            return np.array(fit(voc, want), dtype=np.float32, copy=True)
+        # Only syllables worth starting a phrase on.
+        keep = np.asarray(strength) >= np.percentile(strength, 35)
+        starts = (np.asarray(onsets)[keep] * self.sr).astype(int)
+        starts = starts[starts < len(voc) - beat_n]
+        if len(starts) < 4:
+            return np.array(fit(voc, want), dtype=np.float32, copy=True)
+
+        fade_in = max(8, int(0.006 * self.sr))
+        fade_out = max(16, int(0.014 * self.sr))
+
+        def slice_at(i: int, beats: int) -> np.ndarray:
+            a = int(starts[i % len(starts)])
+            seg = np.array(fit(voc[a: a + beats * beat_n], beats * beat_n),
+                           dtype=np.float32, copy=True)
+            env = np.ones(len(seg), dtype=np.float32)
+            env[:fade_in] *= np.linspace(0.0, 1.0, fade_in)
+            env[-fade_out:] *= np.linspace(1.0, 0.0, fade_out)
+            return seg * (env[:, None] if seg.ndim == 2 else env)
+
+        pos, cursor, first, last = 0, 0, None, None
+        while pos < want:
+            for what, beats in self.CHOP_PATTERN:
+                if pos >= want:
+                    break
+                n = beats * beat_n
+                if what == "take":
+                    seg = slice_at(cursor, beats)
+                    cursor += 1
+                    if first is None:
+                        first = seg
+                    last = seg
+                elif what == "again":
+                    seg = first if first is not None else last
+                elif what == "stut":
+                    seg = (last[:n] if last is not None and len(last) >= n
+                           else slice_at(cursor, beats))
+                else:
+                    pos += n
+                    continue
+                add_at(out, seg[:min(n, want - pos)], pos, 1.0)
+                pos += n
+            first = None                 # a new four bars, a new phrase to keep
+        return out
 
     def _harmonic_span(self, slot: Slot, start: int, want: int,
                        period: int) -> np.ndarray:
@@ -335,13 +418,18 @@ class Engine:
         stems this is the harmonic bed as it comes.
         """
         if self.stems.vocals is None or self.stems.other is None:
-            return _loop_to(self.stems.harmonic, start, want, period, self.sr)
+            bed = _loop_to(self.stems.harmonic, start, want, period, self.sr)
+            return bed, np.zeros_like(bed)
         voc = _loop_to(self.stems.vocals, start, want, period, self.sr)
         oth = _loop_to(self.stems.other, start, want, period, self.sr)
+        # The breakdown keeps its vocal whole. There are no drums there for it
+        # to fight, and one long clean phrase is what a breakdown is for.
+        if self.vocal_mode == "chop" and slot.drum_pattern != "breakdown":
+            voc = self._chop_vocal(voc, want)
         gain, hp = OTHER_SECTION.get(slot.drum_pattern, (1.0, None))
         if hp is not None:
             oth = FL.apply(oth, "highpass", self.sr, hp, q=0.707, order=2)
-        return (voc + oth * gain).astype(np.float32)
+        return (voc + oth * gain).astype(np.float32), voc
 
     def _throw(self, seg: np.ndarray, slot: Slot) -> np.ndarray:
         """Reverb throw on the last bar of a section (a breakdown's exit gesture)."""

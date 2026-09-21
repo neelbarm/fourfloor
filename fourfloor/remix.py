@@ -14,6 +14,7 @@ from .analysis.key import KeyEstimate, nearest_compatible, parse_key, semitone_s
 from .audio import SR, decode, write_mp3, write_wav
 from .dsp.pitch import TempoPlan, plan_tempo
 from .house.bass import choose_bass
+from .house.vocal import choose_vocal
 from .house.engine import Engine, Stems
 from .stems import separate
 from .style import Style
@@ -52,6 +53,10 @@ class RemixOptions:
     kick_reinforce: bool = True
     drums_db: float = 0.0
     """Trim on the drum bus, in decibels, on top of the default level."""
+    vocal: str = "auto"
+    """``flow`` plays the voice as it was sung, ``chop`` cuts it into slices
+    that start on syllables and land on beats, ``auto`` measures which the
+    voice will stand."""
     keep_layers: bool = False
     """Hold on to the engine's individual buses so the alignment gate can
     measure the source layer without the kit shouting over it."""
@@ -70,6 +75,7 @@ class RemixResult:
     warp: WarpMap | None
     kit_name: str | None
     bass_source: str
+    vocal_mode: str
     semitones: int
     target_key: KeyEstimate
     paths: dict[str, Path]
@@ -139,6 +145,9 @@ def validate_options(opts: RemixOptions, out: str | Path) -> None:
             f"--bpm {opts.target_bpm:g} is out of range; fourfloor targets "
             f"{MIN_TARGET_BPM:g}-{MAX_TARGET_BPM:g} BPM"
         )
+    if opts.vocal not in ("auto", "flow", "chop"):
+        raise ValueError(f"--vocal {opts.vocal!r} is not a mode; "
+                         "use auto, flow or chop")
     if not (-24.0 <= opts.drums_db <= 12.0):
         raise ValueError(f"--drums-db {opts.drums_db:g} is out of range; use -24 to +12")
     if opts.swing is not None and not (0.0 <= opts.swing <= 0.66):
@@ -193,6 +202,15 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     step("separate", f"{opts.stems} separation")
     stems = separate(warped, a.sr, opts.stems, want_bass=(opts.bass != "synth"))
 
+    vocal_mode, vocal_why = opts.vocal, ""
+    if opts.vocal == "auto":
+        if stems.vocals is None:
+            vocal_mode = "flow"
+        else:
+            vocal_mode, _vm, vocal_why = choose_vocal(stems.vocals, a.sr, target_bpm)
+    if vocal_why:
+        warnings.append(f"vocal: {vocal_why}")
+
     bass_mode, bass_why = opts.bass, ""
     if opts.bass == "auto":
         if stems.bass is None:
@@ -233,7 +251,8 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
                     swing=swing, beat_multiple=tempo.beat_multiple,
                     src_bar_dur=a.bar_dur, seed=opts.seed, warp=wmap,
                     drum_kit=drum_kit, kick_reinforce=opts.kick_reinforce,
-                    bass_mode=bass_mode, drums_db=opts.drums_db)
+                    bass_mode=bass_mode, drums_db=opts.drums_db,
+                    vocal_mode=vocal_mode)
     audio, metrics = engine.render()
     layers = engine.layers if opts.keep_layers else {}
     spans = list(engine.source_spans)
@@ -262,6 +281,7 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
             "separation": stems.source_name,
             "drums": (drum_kit.name if drum_kit else "synth"),
             "bass": _bass_label(bass_mode, stems.bass_name),
+            "vocal": vocal_mode,
         },
         tempo_plan=tempo.to_dict(),
     )
@@ -278,6 +298,6 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
                        tempo_plan=tempo, warp=wmap,
                        kit_name=(drum_kit.name if drum_kit else None),
                        bass_source=_bass_label(bass_mode, stems.bass_name),
-                       semitones=semitones, target_key=target_key,
+                       vocal_mode=vocal_mode, semitones=semitones, target_key=target_key,
                        paths=paths, metrics=metrics, warnings=warnings,
                        layers=layers, source_spans=spans)
