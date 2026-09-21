@@ -754,6 +754,7 @@ the ranking reproduces the verdicts:
 | reference: body.remix | **68.5** | 91.0 | 46.0 | 68.7 | 58.6 | 89.8 | 75.0 |
 | render: final-cantsay | **82.3** | 98.2 | 65.3 | 64.1 | 100.0 | 98.7 | 97.4 |
 | render: final-stayfly | **75.1** | 82.4 | 71.3 | 78.4 | 28.1 | 100.0 | 86.3 |
+| render: final-body (808 swapped for a sub) | **73.3** | 73.8 | 66.9 | 65.2 | 53.1 | 100.0 | 99.9 |
 | render: final-body | **73.1** | 74.8 | 65.3 | 64.1 | 57.8 | 100.0 | 97.6 |
 | render: body.classic — *"better, some of it is off beat"* | **71.9** | 56.2 | 63.6 | 68.9 | 100.0 | 95.7 | 84.3 |
 | render: body.fourfloor — *"off beat, everything overlapping"* | **41.0** | 4.3 | 29.4 | 27.5 | 67.3 | 95.3 | 100.0 |
