@@ -31,22 +31,44 @@ STRAIGHT_LOCK = 0.72
 #: treated as a triplet flow rather than as a loose straight one.
 TRIPLET_EDGE = 0.06
 
+#: How far under the lock a voice has to sit before it is chopped even though
+#: no other grid fits it better -- a voice this loose is not playing anything a
+#: four-on-the-floor kit agrees with. Expressed as a distance from the lock
+#: rather than as its own number, so that a lock learned from reference pairs
+#: moves the whole decision with it: ``0.72 - 0.12`` is the 0.60 this was
+#: calibrated at.
+LOOSE_MARGIN = 0.12
+
 #: Below this there is not enough voice in the stem to be worth deciding about.
 MIN_DUTY = 0.05
 
 
-def choose_vocal(vocals, sr: int, bpm: float) -> tuple[str, dict, str]:
-    """``("flow" | "chop", measurement, why)`` for a separated vocal stem."""
+def choose_vocal(vocals, sr: int, bpm: float,
+                 learned: dict | None = None) -> tuple[str, dict, str]:
+    """``("flow" | "chop", measurement, why)`` for a separated vocal stem.
+
+    ``learned`` replaces the two thresholds with ones measured from reference
+    pairs -- what *this* DJ's remixers did with voices that fitted the grid this
+    well (:mod:`fourfloor.refs.learned`). Without it, or with fewer than a
+    handful of pairs behind it, the numbers below stand.
+    """
     from ..analysis.alignment import vocal_fit
+
+    if learned is None:
+        from ..refs.learned import vocal_thresholds
+        learned = vocal_thresholds()
+    lock = float(learned.get("straight_lock", STRAIGHT_LOCK)) if learned else STRAIGHT_LOCK
+    edge = float(learned.get("triplet_edge", TRIPLET_EDGE)) if learned else TRIPLET_EDGE
+    floor = max(0.0, lock - LOOSE_MARGIN)
 
     m = vocal_fit(vocals, sr, bpm)
     if m["duty"] < MIN_DUTY:
         return "flow", m, "there is barely a vocal in this to arrange"
-    if m["straight"] >= STRAIGHT_LOCK:
+    if m["straight"] >= lock:
         return "flow", m, (
             f"{m['straight']:.0%} of the vocal already lands on the grid, so it "
             "is played as it was sung")
-    if m["advantage"] >= TRIPLET_EDGE or m["straight"] < 0.60:
+    if m["advantage"] >= edge or m["straight"] < floor:
         return "chop", m, (
             f"the vocal fits a triplet grid better than a straight one "
             f"({m['triplet']:.0%} against {m['straight']:.0%}) -- a triplet flow "

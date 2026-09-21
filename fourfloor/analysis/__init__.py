@@ -19,20 +19,34 @@ __all__ = [
 ]
 
 
-def suggest_house_tempo(bpm: float) -> float:
+def suggest_house_tempo(bpm: float, learned: float | None = None) -> float:
     """Nearest sensible house tempo for a source BPM.
 
     House lives at 120-128. We pick the value in that band that needs the
     smallest time-stretch given half/double-time reinterpretation, defaulting to
     124 when the source is already comfortably close.
+
+    ``learned`` moves the default. Once ``fourfloor refs learn`` has measured a
+    folder of references, the tempo *those* records sit at is a better answer
+    than 124 for the person who chose them -- a DJ whose set runs at 130 does
+    not want 124 -- so it becomes both the tie-break centre and a candidate in
+    its own right. Passing a number overrides the file; passing nothing reads
+    ``~/.fourfloor/style.json`` if it is there, and nothing changes if it is
+    not.
     """
+    if learned is None:
+        from ..refs.learned import learned_bpm
+        learned = learned_bpm()
+    centre = float(learned) if learned else 124.0
     band = np.arange(120.0, 128.5, 1.0)
-    best, best_cost = 124.0, np.inf
+    if not (120.0 <= centre <= 128.0):
+        band = np.append(band, round(centre))   # the references' own tempo
+    best, best_cost = centre if learned else 124.0, np.inf
     for t in band:
         cost = min(abs(np.log2(t / max(bpm, 1e-6))),
                    abs(np.log2(t / max(2 * bpm, 1e-6))),
                    abs(np.log2(2 * t / max(bpm, 1e-6))))
-        cost += 0.02 * abs(t - 124.0)          # tie-break toward 124
+        cost += 0.02 * abs(t - centre)          # tie-break toward what we know
         if cost < best_cost:
             best, best_cost = float(t), cost
     return best
