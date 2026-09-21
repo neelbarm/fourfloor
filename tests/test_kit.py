@@ -101,6 +101,13 @@ def test_a_remix_plays_the_kit_and_stays_on_the_grid(built_kit, trap_clip,
                              source_stem=res.layers["source_perc"],
                              kit_layer=res.layers["kit"], spans=res.source_spans)
     assert rep["kit"]["median_ms"] < 10.0, rep["kit"]
+    # The source's own drums have to be *gone*, not merely turned down: a
+    # second drummer playing the source's rhythm under a record's is the
+    # other thing a listener hears as two rhythms at once. Measured, because
+    # reading the arrangement code is not evidence.
+    over = A.overlap_report({"source_drums": res.layers["source_drums"]},
+                            res.sr, BPM)
+    assert over["layers"]["source_drums"]["silent"], over
     assert rep["kit"]["beat_alignment"] == "grid", rep["kit"]
     assert rep["source"]["bar_phase"] == 0
     assert rep["spans"]["max_concurrent"] == 1

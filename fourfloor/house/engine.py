@@ -171,7 +171,8 @@ class Engine:
     def __init__(self, sr: int, plan: Plan, stems: Stems, chords: list[dict],
                  semitones: int = 0, swing: float = 0.08, beat_multiple: float = 1.0,
                  src_bar_dur: float = 2.0, seed: int = 0, warp=None,
-                 drum_kit=None, kick_reinforce: bool = True) -> None:
+                 drum_kit=None, kick_reinforce: bool = True,
+                 bass_mode: str = "source") -> None:
         self.sr = sr
         self.plan = plan
         self.stems = stems
@@ -183,6 +184,7 @@ class Engine:
         self.kit = DR.Kit(sr=sr, swing=swing)
         self.drum_kit = drum_kit
         self.kick_reinforce = kick_reinforce
+        self.bass_mode = bass_mode
         self.source_bass_bed: np.ndarray | None = None
         self.rng = np.random.default_rng(seed)
         self.bar_dur = plan.bar_dur
@@ -273,6 +275,10 @@ class Engine:
             if slot.percussive_gain > 0:
                 add_at(perc, pseg, a, slot.percussive_gain)
         self.layers["source_perc"] = perc_ref
+        # The percussive bed as it is actually mixed -- which with a real kit in
+        # play should be silence, and the gate checks that rather than trusting
+        # a reading of the arrangement code.
+        self.layers["source_drums"] = perc
         self.source_bass_bed = bass
         return harm, perc
 
@@ -435,9 +441,83 @@ class Engine:
         the bass stem is actually playing, beat by beat, measured by
         autocorrelation. It never plays a note the record is not playing.
         """
-        if self.source_bass_bed is not None:
-            return self._render_source_bass()
-        return self._render_synth_bass()
+        if self.bass_mode == "none":
+            return np.zeros((self.n, 2), dtype=np.float32)
+        if self.source_bass_bed is None or self.bass_mode == "synth":
+            return self._render_synth_bass()
+        if self.bass_mode == "sub":
+            return self._render_house_sub()
+        return self._render_source_bass()
+
+    def _render_house_sub(self) -> np.ndarray:
+        """A sub playing the record's notes on the house grid.
+
+        What this is for: an 808 is a kick with a pitch, and under
+        four-on-the-floor it reads as a second kick drum rather than as a bass
+        line -- which is exactly what "two rhythms at once" means. Throwing it
+        away and synthesising a bass line loses the song's harmony. Throwing
+        away its *rhythm* and keeping its *pitch* loses nothing that matters:
+        the notes are the record's, read off the separated stem one beat at a
+        time by autocorrelation, and the rhythm is the one the kit is playing.
+
+        One note per beat, held almost the whole beat, so the hard sidechain
+        every bass bus gets turns it into the pump a house record has. Where the
+        stem goes quiet or unpitched the sub goes with it, so it can never
+        invent a bass line the record does not have.
+        """
+        bed = self.source_bass_bed
+        out = np.zeros(self.n, dtype=np.float32)
+        beat_n = max(64, int(round(self.beat * self.sr)))
+        for slot in self.plan.slots:
+            if not slot.use_bass:
+                continue
+            a, b = self._bar_sample(slot.start_bar), self._bar_sample(slot.end_bar)
+            ref = float(np.sqrt(np.mean(np.square(bed[a:b].mean(axis=1)))))
+            if ref <= 1e-6:
+                continue
+            phase, last_f0, carried = 0.0, 0.0, 0
+            for i in range(a, b - beat_n + 1, beat_n):
+                seg = bed[i:i + beat_n].mean(axis=1)
+                level = float(np.sqrt(np.mean(np.square(seg))))
+                f0 = PI.f0_autocorr(seg, self.sr, fmin=35.0, fmax=200.0) \
+                    if level > 0.2 * ref else 0.0
+                if f0 <= 0.0:
+                    # hold the last note for one beat, then stop: the record
+                    # has gone quiet and so should we
+                    if last_f0 > 0.0 and carried < 1 and level > 0.1 * ref:
+                        f0, carried = last_f0, carried + 1
+                    else:
+                        last_f0, phase = 0.0, 0.0
+                        continue
+                else:
+                    carried = 0
+                while f0 > 90.0:
+                    f0 *= 0.5                # where a system can move air
+                while f0 < 35.0:
+                    f0 *= 2.0
+                if last_f0 <= 0.0 or abs(f0 - last_f0) > 0.5:
+                    phase = 0.0              # a new note starts from zero
+                out[i:i + beat_n] += self._sub_note(f0, beat_n, phase) * level
+                phase = float((phase + 2.0 * np.pi * f0 * beat_n / self.sr)
+                              % (2.0 * np.pi))
+                last_f0 = f0
+        peak = float(np.max(np.abs(out)))
+        if peak > 0:
+            out = out / peak * 0.85
+        return to_stereo(out)
+
+    def _sub_note(self, f0: float, n: int, phase: float = 0.0) -> np.ndarray:
+        """One sub note: a sine with just enough harmonic to survive a laptop."""
+        t = np.arange(n) / self.sr
+        sig = (np.sin(2.0 * np.pi * f0 * t + phase)
+               + 0.20 * np.sin(2.0 * np.pi * 2 * f0 * t + 2 * phase)
+               + 0.07 * np.sin(2.0 * np.pi * 3 * f0 * t + 3 * phase))
+        env = np.ones(n, dtype=np.float32)
+        attack = max(8, int(0.006 * self.sr))
+        release = max(16, int(0.030 * self.sr))
+        env[:attack] *= np.linspace(0.0, 1.0, attack)
+        env[-release:] *= np.linspace(1.0, 0.0, release)
+        return (sig.astype(np.float32) * env * 1.6)
 
     def _render_source_bass(self) -> np.ndarray:
         bed = self.source_bass_bed
@@ -565,12 +645,17 @@ class Engine:
         # HPSS's "bass" is the whole bottom of the harmonic half rather than an
         # isolated instrument, so it carries mud demucs would have given to
         # another stem and comes in lower.
-        bass_gain = {"demucs bass": 0.95, "hpss low band": 0.55}.get(
-            self.stems.bass_name, 0.55) if self.source_bass_bed is not None else 0.55
+        if self.bass_mode == "sub":
+            bass_gain = 0.55
+        elif self.source_bass_bed is not None and self.bass_mode == "source":
+            bass_gain = {"demucs bass": 0.95, "hpss low band": 0.55}.get(
+                self.stems.bass_name, 0.55)
+        else:
+            bass_gain = 0.55
         source_bus = harm * 1.35 + perc
         mix = source_bus + drums * 0.72 + bassline * bass_gain
-        self.layers.update({"source": source_bus, "kit": drums * 0.72,
-                            "bass": bassline * bass_gain})
+        self.layers.update({"source": source_bus, "harmonic": harm * 1.35,
+                            "kit": drums * 0.72, "bass": bassline * bass_gain})
         out = DY.master(mix, self.sr, peak_db=-1.0)
 
         metrics = {

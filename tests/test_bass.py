@@ -49,6 +49,81 @@ def test_asking_for_a_synth_bass_separates_without_one(trap_clip) -> None:
     assert stems.bass_name == "synth"
 
 
+# ---------------------------------------------------------------------------
+# which bass to play
+# ---------------------------------------------------------------------------
+
+def test_an_808_pattern_is_replaced_by_a_sub() -> None:
+    """A part that hits where the kick goes is a second kick drum.
+
+    Seven notes a bar, over half of that energy landing exactly on the beat:
+    that is a trap 808, and playing it under four-on-the-floor is what "two
+    rhythms at once" sounds like.
+    """
+    from fourfloor.house.bass import choose_bass
+    from test_overlap import trap_808
+
+    mode, m, why = choose_bass(trap_808(), 44100, 128.0)
+    assert mode == "sub", (m, why)
+    assert "kick" in why
+
+
+def test_a_rolling_house_bass_is_kept() -> None:
+    from fourfloor.house.bass import choose_bass
+    from test_overlap import house_bass
+
+    mode, m, why = choose_bass(house_bass(), 44100, 128.0)
+    assert mode == "source", (m, why)
+
+
+def test_a_sustained_on_grid_bass_is_kept() -> None:
+    """One note a bar starts on the downbeat, so all of it is "on the beat".
+
+    Every attack colliding with the kick is only a problem when there are
+    enough of them to be a rhythm; a held note is not competing with anything.
+    """
+    from fourfloor.house.bass import choose_bass
+    from test_overlap import sustained_bass
+
+    mode, m, why = choose_bass(sustained_bass(), 44100, 128.0)
+    assert m["on_beat"] > 0.9, "the held note does start on the beat"
+    assert mode == "source", (m, why)
+
+
+def test_a_stem_with_nothing_in_it_is_replaced(sr: int) -> None:
+    from fourfloor.house.bass import choose_bass
+
+    mode, _m, _why = choose_bass(np.zeros(sr * 20, dtype=np.float32), sr, 128.0)
+    assert mode == "sub"
+
+
+def test_the_sub_plays_the_pitches_the_record_plays(trap_clip, tmp_path) -> None:
+    """`--bass sub` keeps the song's notes and throws away only its rhythm."""
+    res = remix(trap_clip, tmp_path / "sub.mp3",
+                RemixOptions(target_bpm=128.0, length="1:30", wav=False,
+                             kit="none", bass="sub", keep_layers=True))
+    assert res.bass_source.startswith("pitch-tracked sub")
+    sr = res.sr
+    drop = next(s for s in res.session["sections"] if s["kind"] == "drop")
+    seg = res.layers["bass"].mean(axis=1)[int(drop["start"] * sr):int(drop["end"] * sr)]
+    assert rms_db(seg) > -40.0, "the sub is not playing"
+    beat = 60.0 / 128.0
+    notes = [f for f in (f0_autocorr(seg[int(i * beat * sr):int((i + 1) * beat * sr)], sr)
+                         for i in range(int(len(seg) / sr / beat) - 1)) if f > 0]
+    assert len(notes) > 8
+    wanted = np.array([55.0, 65.41, 73.42, 110.0, 130.81, 146.83])
+    off = [np.min(np.abs(1200 * np.log2(np.array(n) / wanted))) for n in notes]
+    assert float(np.median(off)) < 60.0, \
+        f"the sub is not on the song's notes: median {np.median(off):.0f} cents"
+
+
+def test_none_leaves_the_low_end_to_the_kick(trap_clip, tmp_path) -> None:
+    res = remix(trap_clip, tmp_path / "nobass.mp3",
+                RemixOptions(target_bpm=128.0, length="1:30", wav=False,
+                             kit="none", bass="none", keep_layers=True))
+    assert float(np.max(np.abs(res.layers["bass"]))) == 0.0
+
+
 def test_the_default_bass_is_the_song_and_it_tracks_the_song(trap_clip,
                                                              tmp_path) -> None:
     """The bass layer has to *be* the record's bassline, not a version of it.
@@ -59,7 +134,7 @@ def test_the_default_bass_is_the_song_and_it_tracks_the_song(trap_clip,
     """
     res = remix(trap_clip, tmp_path / "bass.mp3",
                 RemixOptions(target_bpm=128.0, length="1:30", wav=False,
-                             kit="none", keep_layers=True))
+                             kit="none", bass="source", keep_layers=True))
     assert res.bass_source == "hpss low band"
     bass = res.layers["bass"].mean(axis=1)
     sr = res.sr

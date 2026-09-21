@@ -58,8 +58,11 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--kit", default=None, metavar="NAME",
                    help="drum kit built with `fourfloor kit build` "
                         "(default: the most recent one; 'none' for the synth kit)")
-    r.add_argument("--bass", choices=("source", "synth"), default="source",
-                   help="use the song's own bass stem (default) or synthesise one")
+    r.add_argument("--bass", choices=("auto", "source", "sub", "none", "synth"),
+                   default="auto",
+                   help="auto (default) keeps the song's bass unless it is an 808 "
+                        "doubling the kick; source always keeps it; sub always "
+                        "replaces it with a sub following its pitch; none; synth")
     r.add_argument("--no-kick-reinforce", action="store_true",
                    help="do not put a synth kick under a sampled loop's kicks")
     r.add_argument("--producer", action="store_true",

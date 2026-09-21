@@ -175,7 +175,7 @@ def _overlaps(a0: float, a1: float, b0: float, b1: float) -> bool:
 def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
          form_name: str = "club", length: float | None = None,
          swing: float = 0.08, has_stems: bool = False,
-         warp: WarpMap | None = None) -> Plan:
+         warp: WarpMap | None = None, has_kit: bool = False) -> Plan:
     """Build the arrangement.
 
     ``warp`` is the map the source was actually warped through. It is what makes
@@ -189,7 +189,13 @@ def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
     song if the song has them, not four bars looped eight times, and the second
     drop carries on from where the first one stopped rather than replaying it.
     The breakdown is required to be somewhere else in the song entirely.
+
+    ``has_kit`` silences the original-drum texture. That texture is there to
+    give a synthesised kit something human underneath it; laid under a kit
+    sampled off a record it is simply a second drummer, playing the source's
+    rhythm against the record's.
     """
+    keep_percussive = not (has_stems or has_kit)
     wm = warp if warp is not None else WarpMap.from_analysis(
         analysis, target_bpm, beat_multiple)
     bar_dur = wm.bar_dur
@@ -258,7 +264,7 @@ def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
                      source_label=hook.label, drum_pattern=pattern,
                      source_gain=0.82, sidechain=0.62, use_bass=True,
                      use_stabs=(drop_i == 1), impact=True, fill=True,
-                     percussive_gain=0.0 if has_stems else 0.12,
+                     percussive_gain=0.12 if keep_percussive else 0.0,
                      note=f"hook from {fmt_time(wm.to_source(src_at))}, "
                           f"{src_bars} bars of source walked forward, full kit"
                           + (", offbeat stabs" if drop_i == 1 else ""))
@@ -278,7 +284,7 @@ def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
                      source_start=src_at, source_bars=src_bars,
                      source_label=quiet.label, drum_pattern="breakdown",
                      source_gain=0.9, lowpass=(4200.0, 14000.0), sidechain=0.0,
-                     reverb_throw=True, percussive_gain=0.18 if not has_stems else 0.0,
+                     reverb_throw=True, percussive_gain=0.18 if keep_percussive else 0.0,
                      note=f"{quiet.label} from {fmt_time(quiet.start)}, a different "
                           "part of the song to the drops; no kick, filter opening")
         elif kind == "build":

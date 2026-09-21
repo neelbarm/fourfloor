@@ -13,6 +13,7 @@ from .analysis import Analysis, analyze, suggest_house_tempo
 from .analysis.key import KeyEstimate, nearest_compatible, parse_key, semitone_shift
 from .audio import SR, decode, write_mp3, write_wav
 from .dsp.pitch import TempoPlan, plan_tempo
+from .house.bass import choose_bass
 from .house.engine import Engine, Stems
 from .stems import separate
 from .style import Style
@@ -42,8 +43,12 @@ class RemixOptions:
     kit: str | None = None
     """Name of a sampled drum kit, ``"none"`` for the synthesised one, or
     ``None`` for the most recently built kit if there is one."""
-    bass: str = "source"
-    """``source`` uses the song's own bass; ``synth`` builds one from chords."""
+    bass: str = "auto"
+    """What to do with the low end. ``auto`` measures the separated bass and
+    keeps it unless it is an 808 doubling the kick; ``source`` always keeps it;
+    ``sub`` always replaces it with a sub that follows its pitch on the house
+    grid; ``none`` leaves the low end to the kick; ``synth`` is the old
+    chord-guessing bass line."""
     kick_reinforce: bool = True
     keep_layers: bool = False
     """Hold on to the engine's individual buses so the alignment gate can
@@ -98,6 +103,16 @@ def _resolve_key(a: Analysis, opts: RemixOptions) -> tuple[int, KeyEstimate, lis
     return int(shift), target, warnings
 
 
+def _bass_label(mode: str, stem_name: str) -> str:
+    """What the report and the session file should say the low end is."""
+    return {
+        "source": stem_name,
+        "sub": f"pitch-tracked sub from the {stem_name}",
+        "none": "none (the kick carries the low end)",
+        "synth": "synth",
+    }.get(mode, mode)
+
+
 def _neighbours(camelot: str) -> list[str]:
     from .analysis.key import camelot_neighbours
     return camelot_neighbours(camelot)
@@ -135,8 +150,9 @@ def validate_options(opts: RemixOptions, out: str | Path) -> None:
         )
     if opts.stems not in ("hpss", "demucs"):
         raise ValueError(f"--stems {opts.stems!r} is not an engine; use hpss or demucs")
-    if opts.bass not in ("source", "synth"):
-        raise ValueError(f"--bass {opts.bass!r} is not a bass; use source or synth")
+    if opts.bass not in ("auto", "source", "sub", "none", "synth"):
+        raise ValueError(f"--bass {opts.bass!r} is not a bass; "
+                         "use auto, source, sub, none or synth")
     if opts.length:
         arrange.parse_length(opts.length)          # raises with its own message
     if opts.key and opts.key.lower() != "auto":
@@ -173,12 +189,23 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     step("separate", f"{opts.stems} separation")
     stems = separate(warped, a.sr, opts.stems, want_bass=(opts.bass != "synth"))
 
+    bass_mode, bass_why = opts.bass, ""
+    if opts.bass == "auto":
+        if stems.bass is None:
+            bass_mode, bass_why = "synth", "nothing could be separated to play"
+        else:
+            bass_mode, _meas, bass_why = choose_bass(stems.bass, a.sr, target_bpm)
+    if bass_why:
+        warnings.append(f"bass: {bass_why}")
+
+    drum_kit = kits.resolve(opts.kit)
+
     step("arrange", f"{opts.form} form")
     length = arrange.parse_length(opts.length) if opts.length else (
         style.length if style and style.length else 270.0)
     p = arrange.plan(a, target_bpm, tempo.beat_multiple, form_name=opts.form,
                      length=length, swing=swing, has_stems=(opts.stems == "demucs"),
-                     warp=wmap)
+                     warp=wmap, has_kit=drum_kit is not None)
     if length and p.duration > length + 4.0 * p.bar_dur:
         min_bars = arrange.form_min_bars(arrange.FORMS.get(opts.form, arrange.FORMS["club"]))
         warnings.append(
@@ -196,13 +223,13 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     if problems:
         raise RuntimeError("arrangement failed validation: " + "; ".join(problems))
 
-    drum_kit = kits.resolve(opts.kit)
     step("render", f"{p.total_bars} bars, {arrange.fmt_time(p.duration)}"
                    + (f", {drum_kit.name} kit" if drum_kit else ""))
     engine = Engine(sr=a.sr, plan=p, stems=stems, chords=a.chords, semitones=semitones,
                     swing=swing, beat_multiple=tempo.beat_multiple,
                     src_bar_dur=a.bar_dur, seed=opts.seed, warp=wmap,
-                    drum_kit=drum_kit, kick_reinforce=opts.kick_reinforce)
+                    drum_kit=drum_kit, kick_reinforce=opts.kick_reinforce,
+                    bass_mode=bass_mode)
     audio, metrics = engine.render()
     layers = engine.layers if opts.keep_layers else {}
     spans = list(engine.source_spans)
@@ -230,7 +257,7 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
             "duration": round(a.duration, 2),
             "separation": stems.source_name,
             "drums": (drum_kit.name if drum_kit else "synth"),
-            "bass": stems.bass_name,
+            "bass": _bass_label(bass_mode, stems.bass_name),
         },
         tempo_plan=tempo.to_dict(),
     )
@@ -246,6 +273,7 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     return RemixResult(audio=audio, sr=a.sr, plan=p, session=sess, analysis=a,
                        tempo_plan=tempo, warp=wmap,
                        kit_name=(drum_kit.name if drum_kit else None),
-                       bass_source=stems.bass_name, semitones=semitones, target_key=target_key,
+                       bass_source=_bass_label(bass_mode, stems.bass_name),
+                       semitones=semitones, target_key=target_key,
                        paths=paths, metrics=metrics, warnings=warnings,
                        layers=layers, source_spans=spans)

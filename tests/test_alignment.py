@@ -175,18 +175,27 @@ def _gate(res) -> dict:
         kit_layer=res.layers.get("kit"), spans=res.source_spans)
 
 
+#: These fixtures name the kit and the bass rather than taking the defaults.
+#: What they are testing is where the engine *puts* things, and both defaults
+#: are chosen from the machine's state or from the source: another test file
+#: that builds a kit would otherwise change the drum bus under these, and the
+#: synthesised kit's control assertion -- within 3 ms of its own grid -- is
+#: only true of a kit that was placed arithmetically.
+PINNED = dict(kit="none", bass="source", wav=False, keep_layers=True)
+
+
 @pytest.fixture(scope="module")
 def fixture_remix(fixture_path, tmp_path_factory):
     out = tmp_path_factory.mktemp("gate") / "fixture.house.mp3"
-    return remix(fixture_path, out, RemixOptions(target_bpm=124.0, length="2:00",
-                                                 wav=False, keep_layers=True))
+    return remix(fixture_path, out,
+                 RemixOptions(target_bpm=124.0, length="2:00", **PINNED))
 
 
 @pytest.fixture(scope="module")
 def trap_remix(trap_clip, tmp_path_factory):
     out = tmp_path_factory.mktemp("gate") / "trap.house.mp3"
-    return remix(trap_clip, out, RemixOptions(target_bpm=128.0, length="2:00",
-                                              wav=False, keep_layers=True))
+    return remix(trap_clip, out,
+                 RemixOptions(target_bpm=128.0, length="2:00", **PINNED))
 
 
 def test_a_render_sits_on_its_own_grid(trap_remix) -> None:

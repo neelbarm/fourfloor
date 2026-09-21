@@ -7,6 +7,58 @@ import numpy as np
 from ..dsp import filters as FL
 
 
+#: How much of a bass part's sub-band attack energy may land on the beat before
+#: it counts as a second kick drum. Measured on five records warped to 128 BPM:
+#: three house remixes and a lo-fi track put 5-25% of it there, because a bass
+#: that belongs over four-on-the-floor dodges the kick. Don Toliver's *Body*
+#: puts 54% of it there.
+COLLISION_LIMIT = 0.35
+
+#: A part has to be playing a rhythm before where it lands can be a problem.
+#: A bass holding one note a bar starts that note on the downbeat, so 100% of
+#: its attacks are "on the beat", and there is nothing wrong with it.
+RHYTHMIC_PER_BAR = 4.0
+
+#: ...unless it is also relentless. A part this busy and this far off the
+#: eighth-note grid is a pattern rather than a bass line, whatever it does on
+#: the beat.
+BUSY_PER_BAR = 10.0
+BUSY_OFF_EIGHTH = 0.55
+
+
+def choose_bass(bass, sr: int, bpm: float) -> tuple[str, dict, str]:
+    """Play the record's bass, or replace it with a sub that follows its pitch.
+
+    Returns ``(mode, measurement, why)``. The measurement is
+    :func:`analysis.alignment.bass_collision`; ``why`` is a sentence for the
+    remix report, because a decision the engine makes on its own about how the
+    low end of somebody's track is going to sound should say so out loud.
+    """
+    from ..analysis.alignment import bass_collision
+
+    m = bass_collision(bass, sr, bpm)
+    if m["rms_db"] < -45.0:
+        return "sub", m, ("the separated bass is almost silent, so the sub is "
+                          "synthesised from what pitch there is")
+    if m["per_bar"] >= RHYTHMIC_PER_BAR and m["on_beat"] >= COLLISION_LIMIT:
+        return "sub", m, (
+            f"{m['on_beat']:.0%} of the source bass hits exactly where the kick "
+            "goes -- that is an 808 doubling the kick, not a bass line, so the "
+            "low end is re-synthesised on the house grid at the pitches it plays")
+    if m["per_bar"] >= BUSY_PER_BAR and m["off_eighth"] >= BUSY_OFF_EIGHTH:
+        return "sub", m, (
+            f"the source bass plays {m['per_bar']:.0f} notes a bar with "
+            f"{m['off_eighth']:.0%} of them off the eighth-note grid; that is a "
+            "pattern rather than a bass line, so it is re-synthesised")
+    if m["per_bar"] < RHYTHMIC_PER_BAR:
+        return "source", m, (
+            f"the source bass plays {m['per_bar']:.1f} notes a bar -- it is "
+            "holding notes, not playing a pattern -- so it is kept as it is")
+    return "source", m, (
+        f"the source bass puts only {m['on_beat']:.0%} of itself on the beat, so "
+        "it dodges the kick and is kept as it is")
+
+
 def note_hz(pitch_class: int, octave: int = 2) -> float:
     """Frequency of a pitch class in a given octave (C2 = 65.41 Hz)."""
     midi = 12 * (octave + 1) + pitch_class
