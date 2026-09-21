@@ -180,6 +180,45 @@ def test_the_digest_is_available_as_plain_text_for_a_terminal(app, built) -> Non
     assert "Drums fake" in text
 
 
+def test_the_page_is_served_gemini_markers_alongside_neels(app, built) -> None:
+    """The critic writes into the same file; the page has to render both."""
+    _, (rid, _) = built
+    home = Path(app.json("/api/config")[1]["home"]).expanduser()
+    folder = store.Library(home).remix_dir(rid)
+    path = folder / "feedback.json"
+
+    doc = json.loads(path.read_text())
+    doc["markers"].append({                      # the critic's own shape
+        "time": 30.0, "bar": 15, "category": "artifact",
+        "note": "phase-vocoder ringing on the riser tail",
+        "author": "gemini", "ts": "2026-09-20T10:00:00Z",
+    })
+    path.write_text(json.dumps(doc, indent=2) + "\n")
+
+    status, data = app.json(f"/api/remixes/{rid}/feedback")
+    assert status == 200
+    heard = next(m for m in data["markers"] if m["author"] == "gemini")
+    assert heard["category"] == "artifact"
+    assert heard["at"] > 0, "the ISO ts comes back as a timestamp"
+    assert heard["bar"] > 0, "and the bar is recomputed on the arranger's grid"
+    assert all(m["author"] for m in data["markers"]), "every marker names a voice"
+    assert {m["author"] for m in data["markers"]} == {"neel", "gemini"}
+
+    # and the same rows reach the engineers' endpoint
+    _, all_of_it = app.json("/api/feedback")
+    row = next(r for r in all_of_it["remixes"] if r["id"] == rid)
+    assert "gemini" in {m["author"] for m in row["feedback"]["markers"]}
+    assert "(Gemini)" in all_of_it["digest"]
+    assert "artifact" in all_of_it["digest"]
+
+
+def test_a_marker_the_app_posts_is_attributed_to_neel(app, built) -> None:
+    _, (_, rid) = built
+    _, data = app.json(f"/api/remixes/{rid}/feedback", "POST",
+                       {"marker": {"time": 1.0, "category": "good"}})
+    assert data["markers"][-1]["author"] == "neel"
+
+
 def test_the_config_tells_the_page_which_chips_to_draw(app) -> None:
     _, cfg = app.json("/api/config")
     assert [c["code"] for c in cfg["feedback_categories"]] == list(feedback.CATEGORIES)

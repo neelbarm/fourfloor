@@ -52,7 +52,7 @@ const state = {
   raf: 0, playerRaf: 0, revealT0: 0, reveal: 1,
   feedback: null, pending: null,
   ab: { a: null, b: null, side: 'a', raf: 0, fixedAt: 0, drift: 0, voted: '',
-        ctx: null, gain: null, noCtx: false },
+        ctx: null, gain: null, noCtx: false, drawnW: 0 },
 };
 
 /* ── small helpers ───────────────────────────────────────────────────────── */
@@ -997,12 +997,28 @@ function playerFrame(now) {
  * and nothing waits for a Save button it does not need — a star posts itself.
  */
 
+/* A category off a chip has a label; a category another tool invented has only
+ * its own slug, so tidy it rather than showing "drums-fake" next to "artifact"
+ * in two different house styles. */
 const catLabel = code => {
   const cats = (state.config && state.config.feedback_categories) || [];
   const hit = cats.find(c => c.code === code);
-  return hit ? hit.label : code;
+  if (hit) return hit.label;
+  const words = String(code || 'unknown').replace(/[-_]+/g, ' ').trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
 };
 const catColor = code => CAT_COLORS[code] || '#8b8b93';
+
+/* The ears are not the only thing writing into this file any more: the critic
+ * appends what Gemini heard, with author "gemini". A machine's opinion is
+ * worth showing next to a person's and worth never being mistaken for one, so
+ * anything that is not Neel gets a dashed pin and its name on the row. */
+const ME = 'neel';
+const authorLabel = slug => {
+  const known = { neel: 'Neel', gemini: 'Gemini' };
+  const s = slug || ME;
+  return known[s] || s.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+};
 
 async function postFeedback(body) {
   const id = state.detail && state.detail.meta.id;
@@ -1028,20 +1044,39 @@ function renderPins() {
   host.innerHTML = '';
   if (!state.detail) return;
   const total = state.detail.session.duration || 1;
+  /* The tooltip is absolutely positioned, which means it still counts towards
+   * the page's scroll width even while it is invisible -- on a phone a pin
+   * past halfway was widening the whole document by its own width. So each
+   * one is measured and pinned inside the waveform rather than hung off its
+   * marker and hoped for. */
+  const wrapW = $('#waveWrap').clientWidth || 0;
+  const tipW = wrapW ? Math.min(210, Math.max(120, wrapW - 24)) : 210;
+
   markers().forEach(m => {
     const p = Math.max(0, Math.min(1, m.time / total));
+    const who = m.author || ME;
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'pin' + (p > 0.72 ? ' right' : '');
+    b.className = 'pin' + (who === ME ? '' : ' other');
     b.style.left = (p * 100) + '%';
     b.style.setProperty('--pin', catColor(m.category));
+    if (wrapW) {
+      const x = p * wrapW;                       // where the pin's stem lands
+      const want = Math.max(4, Math.min(x + 12, wrapW - tipW - 4));
+      b.style.setProperty('--tip-w', tipW + 'px');
+      b.style.setProperty('--tip-left', (want - (x - 7)) + 'px');
+    }
     const where = m.bar ? `bar ${m.bar}` : fmt(m.time);
+    const by = who === ME ? '' : `${authorLabel(who)}: `;
     b.setAttribute('aria-label',
-      `${catLabel(m.category)} at ${fmt(m.time)}, ${where}. ` +
+      `${by}${catLabel(m.category)} at ${fmt(m.time)}, ${where}. ` +
       `${m.note || 'no note'}. Play from here.`);
-    b.innerHTML = `<i></i><span class="pin-tip"><b>${esc(catLabel(m.category))}</b>
+    b.innerHTML = `<i></i><span class="pin-tip">
+      <b>${esc(catLabel(m.category))}</b>
       <small>${esc(where)} · ${esc(fmt(m.time))}${m.slot ? ' · ' + esc(m.slot) : ''}</small>
-      ${m.note ? '<div>' + esc(m.note) + '</div>' : ''}</span>`;
+      ${m.note ? '<div>' + esc(m.note) + '</div>' : ''}
+      ${who === ME ? '' : '<em class="pin-by">heard by ' + esc(authorLabel(who)) + '</em>'}
+      </span>`;
     b.addEventListener('click', e => {
       e.stopPropagation();
       const audio = $('#audio');
@@ -1056,11 +1091,26 @@ function renderMarkList() {
   const host = $('#marks');
   const rows = markers().slice().sort((a, b) => a.time - b.time);
   host.innerHTML = '';
+
+  // say whose the dashed ones are, but only once somebody else has listened
+  const others = [...new Set(rows.map(m => m.author || ME))].filter(a => a !== ME);
+  const note = $('#earsOther');
+  note.hidden = others.length === 0;
+  note.textContent = others.length
+    ? ` The dashed pins are not yours — ${others.map(authorLabel).join(' and ')} ` +
+      `listened too, and the critic files what it heard in the same place.`
+    : '';
+
   rows.forEach((m, i) => {
+    const who = m.author || ME;
     const li = document.createElement('li');
+    li.className = who === ME ? '' : 'other';
     li.style.animationDelay = Math.min(i, 8) * 40 + 'ms';
-    li.innerHTML = `<i style="background:${catColor(m.category)}"></i>
-      <span class="m-cat">${esc(catLabel(m.category))}</span>
+    li.innerHTML = `<i style="${who === ME
+        ? 'background:' + catColor(m.category)
+        : 'border:1.5px dashed ' + catColor(m.category)}"></i>
+      <span class="m-cat">${esc(catLabel(m.category))}${who === ME ? ''
+        : '<em class="m-by">' + esc(authorLabel(who)) + '</em>'}</span>
       <span class="m-where">${m.bar ? 'bar ' + m.bar : fmt(m.time)}${
         m.slot ? ' · ' + esc(m.slot) : ''}</span>
       <span class="m-note">${esc(m.note || '')}</span>`;
@@ -1490,6 +1540,11 @@ function abFrame(now) {
   if (el.textContent !== text) el.textContent = text;
   el.classList.toggle('off', ms > 50);
 
+  // the lanes are first drawn inside a view transition, where the canvas may
+  // not have a width yet; redraw once it does, and whenever it changes
+  const w = $('#waveA').clientWidth;
+  if (w && w !== state.ab.drawnW) { state.ab.drawnW = w; drawLanes(); }
+
   ['a', 'b'].forEach(which => {
     const side = abSideOf(which);
     const audio = abEl(which);
@@ -1505,6 +1560,7 @@ function abFrame(now) {
 
 function startAb() {
   cancelAnimationFrame(state.ab.raf);
+  state.ab.drawnW = 0;
   drawLanes();
   state.ab.raf = requestAnimationFrame(abFrame);
 }
@@ -1835,6 +1891,7 @@ function wirePlayer() {
   window.addEventListener('resize', () => {
     drawRemixWave(state.reveal);
     drawSourceWave(1);
+    renderPins();            // the tooltips are clamped to a measured width
   });
 }
 

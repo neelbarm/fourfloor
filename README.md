@@ -109,6 +109,27 @@ and the pair appear to jump 50–80 ms apart at every flip although the audio ha
 not moved. Through one graph they stay within a small fraction of a millisecond
 of each other across a hundred flips.
 
+**Neel is not the only listener any more.** `fourfloor critic` sends a render to
+Gemini and appends what it heard into the *same* `feedback.json`, tagged
+`author: "gemini"`. Those markers show up on the same waveform as hollow,
+dashed pins with a **Gemini** badge on the row, so a model's opinion sits next
+to a person's and is never mistaken for one. Two things make one file safe for
+two writers:
+
+- **Neither tidies the other's records.** The append path reads the file raw
+  and writes back exactly what it read, so a marker the critic wrote goes back
+  to disk in the critic's own shape — `ts` instead of `at`, its own categories,
+  and all. Normalising happens on the way *out*, in memory.
+- **Bars are recomputed, never trusted.** The critic counts bars from zero and
+  this module counts from one. Neither is wrong and neither has to change: the
+  bar and the arrangement slot are worked out from the marker's *time* against
+  the session grid, because a time in seconds is the one thing two tools cannot
+  disagree about. One digest never shows the same moment as two different bars.
+
+A category the chips do not have — the critic invents its own, like `artifact`
+— is kept, grouped and shown under a tidied version of its own name rather than
+dropped.
+
 **What the engineers read.** Everything is appended, with timestamps, to
 `~/.fourfloor/remixes/<id>/feedback.json`, and every marker is also copied into
 that remix's `*.session.json` under a `feedback` array — the session file is
@@ -129,13 +150,16 @@ fourfloor listening notes — 1 remix with feedback
 lofi 7  ·  4ff0c412b0b701c6  ·  124 BPM  ·  7A Dm  ·  club form
 ──────────────────────────────────────────────────────────────
   rating  ★★★☆☆  “close, but the drop is plastic”
+  heard by  Gemini, Neel
   Off-beat  (1)
       bar  17  0:32.90  [build bars 17-24]  — the build drags behind the grid
                          the arranger said: riser + snare roll
   Drums fake  (2)
       bar  27  0:50.32  [drop bars 25-48]  — hats sound like a plugin preset
                          the arranger said: hook, full kit, sidechained bass
-      bar  31  0:58.06  [drop bars 25-48]  — no swing at all
+      bar  31  0:58.06  [drop bars 25-48]  — hat transients repeat  (Gemini)
+  Artifact  (1)
+      bar   8  0:14.20  [intro bars 1-16]  — ringing on the riser tail  (Gemini)
   A/B vs lofi 7 (8e849bc44e6a2d7b): preferred the other one  — take 2 breathes more
 ```
 

@@ -424,8 +424,10 @@ class App:
     # -- feedback ---------------------------------------------------------
 
     def feedback(self, rid: str) -> dict:
+        """One remix's notes, everyone's, on the arranger's own bar numbers."""
         d = self.lib.remix_dir(rid)
-        data = feedback.read(d, rid)
+        data = feedback.resolve(feedback.read(d, rid), feedback.session_of(d),
+                                feedback.plan_of(d))
         data["rating"] = feedback.latest_rating(data)
         return data
 

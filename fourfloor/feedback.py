@@ -15,6 +15,14 @@ Every marker is also copied into the remix's ``*.session.json`` under a
 session file is the thing that gets moved to another machine, and a note about
 bar 41 is worth nothing if it stays behind.
 
+The ears are not the only thing writing here. :mod:`fourfloor.critic` appends
+what Gemini heard into the same file with ``author: "gemini"``, which makes two
+writers on one document, so: the append path reads it **raw** and puts back
+exactly what it read, and every marker's bar is recomputed from its *time*
+against the session grid on the way out -- the critic counts bars from zero
+where this module counts from one, and a time in seconds is the one thing two
+tools cannot disagree about.
+
 ``python -m fourfloor.feedback`` prints the digest: per remix, the markers
 grouped by category, each with its bar number and the plan slot it lands in.
 That is the block an engineer agent reads before touching the arranger.
@@ -22,6 +30,7 @@ That is the block an engineer agent reads before touching the arranger.
 
 from __future__ import annotations
 
+import calendar
 import json
 import re
 import threading
@@ -52,6 +61,13 @@ CATEGORIES: dict[str, str] = {
 #: Which way a vote went.
 PREFERENCES = ("a", "b")
 
+#: Who left a marker. Ears are not the only thing writing here any more: the
+#: critic appends what Gemini heard into the same file, with ``author:
+#: "gemini"``. Anything not listed is shown under a title-cased version of its
+#: own slug, so a third listener needs no change here.
+DEFAULT_AUTHOR = "neel"
+AUTHORS = {"neel": "Neel", "gemini": "Gemini"}
+
 MAX_NOTE = 400
 MAX_LABEL = 120
 MAX_MARKERS = 500
@@ -79,8 +95,59 @@ def blank(rid: str = "") -> dict:
     return {"schema": SCHEMA, "remix": rid, "markers": [], "ratings": [], "votes": []}
 
 
-def read(remix_dir: str | Path, rid: str = "") -> dict:
-    """The feedback for one remix; an empty document if nothing was said yet."""
+def _epoch(marker: dict) -> float:
+    """When a marker was left, whoever wrote it.
+
+    This module stamps ``at`` with a float; the critic stamps ``ts`` with an
+    ISO string. Both are read, so neither tool has to know about the other.
+    """
+    at = marker.get("at")
+    if isinstance(at, (int, float)) and at > 0:
+        return float(at)
+    try:
+        return float(calendar.timegm(
+            time.strptime(str(marker.get("ts") or ""), "%Y-%m-%dT%H:%M:%SZ")))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def normalise_marker(marker: dict) -> dict:
+    """One marker in the shape the app and the digest expect.
+
+    Two tools write this file and only one of them is this module, so nothing
+    downstream may assume a field is present or is the type it would have
+    been: a bar can arrive as ``None`` when there was no grid to count, and a
+    category can be a word this module has never heard of. Reading is where
+    that gets squared away -- in memory, never on disk, so the other writer's
+    own record is left exactly as it wrote it.
+    """
+    out = dict(marker)
+    out["author"] = clean_author(marker.get("author"))
+    out["category"] = (str(marker.get("category") or "").strip().lower()
+                       or "unknown")
+    out["note"] = clean_text(marker.get("note"))
+    try:
+        out["time"] = round(float(marker.get("time") or 0.0), 3)
+    except (TypeError, ValueError):
+        out["time"] = 0.0
+    try:
+        out["bar"] = max(0, int(marker.get("bar") or 0))
+    except (TypeError, ValueError):
+        out["bar"] = 0
+    out["at"] = _epoch(marker)
+    out.setdefault("slot", "")
+    out.setdefault("slot_bars", "")
+    return out
+
+
+def read_raw(remix_dir: str | Path, rid: str = "") -> dict:
+    """The file exactly as it is on disk, minus anything that is not a record.
+
+    The append path reads through here and writes back what it read, so a
+    marker another tool wrote is returned to disk in that tool's own shape.
+    Tidying somebody else's record on the way past is how two writers start
+    quietly undoing each other.
+    """
     path = Path(remix_dir) / FEEDBACK_FILE
     try:
         data = json.loads(path.read_text(encoding="utf8"))
@@ -93,6 +160,13 @@ def read(remix_dir: str | Path, rid: str = "") -> dict:
         rows = data.get(key)
         if isinstance(rows, list):
             out[key] = [r for r in rows if isinstance(r, dict)]
+    return out
+
+
+def read(remix_dir: str | Path, rid: str = "") -> dict:
+    """The feedback for one remix, in the shape the app and the digest read."""
+    out = read_raw(remix_dir, rid)
+    out["markers"] = [normalise_marker(m) for m in out["markers"]]
     return out
 
 
@@ -122,6 +196,24 @@ def clean_text(value, limit: int = MAX_NOTE) -> str:
     """Free text reduced to one safe, short line."""
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", str(value or ""))
     return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
+def clean_author(value) -> str:
+    """Who is speaking, as a short slug. Empty means the person at the desk."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", str(value or "").strip().lower()).strip("-")
+    return (slug or DEFAULT_AUTHOR)[:24]
+
+
+def author_label(slug: str) -> str:
+    return AUTHORS.get(slug) or (slug or DEFAULT_AUTHOR).replace("-", " ").title()
+
+
+def category_label(code: str) -> str:
+    """A chip's label, or a tidied version of a category another tool made up."""
+    if code in CATEGORIES:
+        return CATEGORIES[code]
+    words = re.sub(r"[-_]+", " ", str(code or "unknown")).strip()
+    return words[:1].upper() + words[1:]
 
 
 def clean_category(value) -> str:
@@ -188,6 +280,25 @@ def slot_label(slot: dict | None) -> str:
     return f"{slot.get('kind', 'slot')} bars {start + 1}-{start + bars}"
 
 
+def resolve(data: dict, session: dict, plan: dict) -> dict:
+    """Put every marker back on the arranger's grid, whoever wrote it.
+
+    A time in seconds is the one thing two tools cannot disagree about; a bar
+    number is a convention, and the critic counts bars from zero where this
+    module counts from one. Rather than make either side change, the bar and
+    the slot are recomputed here from the time against the session grid, so
+    one digest never shows the same moment as two different bars.
+    """
+    if bar_duration(session) <= 0:
+        return data
+    for m in data.get("markers", []):
+        m["bar"] = bar_of(session, m["time"])
+        slot = slot_of(plan, m["bar"])
+        m["slot"] = (slot or {}).get("kind", "")
+        m["slot_bars"] = slot_label(slot)
+    return data
+
+
 def _read_side_file(remix_dir: Path, name: str) -> dict:
     try:
         data = json.loads((remix_dir / name).read_text(encoding="utf8"))
@@ -214,7 +325,7 @@ def _stamp(row: dict) -> dict:
 
 
 def add_marker(remix_dir: str | Path, time_sec, category, note: str = "",
-               rid: str = "") -> dict:
+               rid: str = "", author: str = DEFAULT_AUTHOR) -> dict:
     """Drop a marker. Returns the marker as it was stored.
 
     The bar and the slot are worked out here from the session and plan files
@@ -234,39 +345,50 @@ def add_marker(remix_dir: str | Path, time_sec, category, note: str = "",
         "bar": bar,
         "category": code,
         "note": clean_text(note),
+        "author": clean_author(author),
         "slot": (slot or {}).get("kind", ""),
         "slot_bars": slot_label(slot),
     })
 
     with _LOCK:
-        data = read(remix_dir, rid)
+        data = read_raw(remix_dir, rid)
         if len(data["markers"]) >= MAX_MARKERS:
             raise FeedbackError(
                 f"this remix already has {MAX_MARKERS} markers; that is a rewrite, "
                 "not a note")
         data["markers"].append(marker)
         _write_json(remix_dir / FEEDBACK_FILE, data)
-        _mirror_into_session(remix_dir, marker)
+        sync_session(remix_dir)
     return marker
 
 
-def _mirror_into_session(remix_dir: Path, marker: dict) -> None:
-    """Copy a marker into ``*.session.json`` so the DJ handoff carries it.
+#: What of a marker travels in the session file.
+SESSION_FIELDS = ("time", "bar", "category", "note", "author", "at")
+
+
+def sync_session(remix_dir: str | Path) -> Path | None:
+    """Put every marker into ``*.session.json`` so the DJ handoff carries them.
 
     Additive only: the session schema is a contract with MixPilot and every
-    other reader, so this appends to a ``feedback`` array and touches nothing
-    else. A reader that does not know the field ignores it.
+    other reader, so this writes a ``feedback`` array and touches nothing else.
+    A reader that does not know the field ignores it.
+
+    It rewrites that array rather than appending to it, and that is what makes
+    the critic's markers turn up here too -- the critic writes straight into
+    ``feedback.json`` and knows nothing about the session file, and the notes
+    worth carrying to another machine are all of them, not only the ones that
+    were typed into the browser.
     """
-    path = remix_dir / "remix.session.json"
+    remix_dir = Path(remix_dir)
     session = _read_side_file(remix_dir, "remix.session.json")
     if not session:
-        return
-    rows = session.get("feedback")
-    if not isinstance(rows, list):
-        rows = []
-    rows.append({k: marker[k] for k in ("time", "bar", "category", "note", "at")})
-    session["feedback"] = rows
-    _write_json(path, session)
+        return None
+    data = resolve(read(remix_dir), session, plan_of(remix_dir))
+    session["feedback"] = [
+        {k: m.get(k) for k in SESSION_FIELDS}
+        for m in sorted(data["markers"], key=lambda m: m["time"])
+    ]
+    return _write_json(remix_dir / "remix.session.json", session)
 
 
 def add_rating(remix_dir: str | Path, stars=None, verdict=None,
@@ -289,7 +411,7 @@ def add_rating(remix_dir: str | Path, stars=None, verdict=None,
         raise FeedbackError("a rating needs stars or a verdict")
     _stamp(row)
     with _LOCK:
-        data = read(remix_dir, rid)
+        data = read_raw(remix_dir, rid)
         data["ratings"].append(row)
         _write_json(Path(remix_dir) / FEEDBACK_FILE, data)
     return row
@@ -315,7 +437,7 @@ def add_vote(remix_dir: str | Path, other: str, prefer: str, reason: str = "",
         "other_label": clean_text(other_label, MAX_LABEL),
     })
     with _LOCK:
-        data = read(remix_dir, rid)
+        data = read_raw(remix_dir, rid)
         data["votes"].append(row)
         _write_json(Path(remix_dir) / FEEDBACK_FILE, data)
     return row
@@ -333,7 +455,8 @@ def apply(remix_dir: str | Path, payload: dict, rid: str = "") -> dict:
     marker = payload.get("marker")
     if isinstance(marker, dict):
         add_marker(remix_dir, marker.get("time"), marker.get("category"),
-                   marker.get("note", ""), rid)
+                   marker.get("note", ""), rid,
+                   author=marker.get("author") or DEFAULT_AUTHOR)
         did = True
     if payload.get("stars") is not None or payload.get("verdict") is not None:
         add_rating(remix_dir, payload.get("stars"), payload.get("verdict"), rid)
@@ -370,9 +493,10 @@ def collect(lib) -> list[dict]:
         data = read(d, rid)
         if not (data["markers"] or data["ratings"] or data["votes"]):
             continue
-        out.append({"meta": meta, "feedback": data,
+        plan, session = plan_of(d), session_of(d)
+        out.append({"meta": meta, "feedback": resolve(data, session, plan),
                     "rating": latest_rating(data),
-                    "plan": plan_of(d), "session": session_of(d)})
+                    "plan": plan, "session": session})
     return out
 
 
@@ -410,26 +534,36 @@ def digest(lib, rid: str = "") -> str:
         said: set[str] = set()                    # each slot explains itself once
         by_cat: dict[str, list[dict]] = {}
         for m in data["markers"]:
-            by_cat.setdefault(m.get("category", "?"), []).append(m)
+            by_cat.setdefault(m["category"], []).append(m)
         if not by_cat:
             lines.append("  (no markers — rating only)")
-        for code in CATEGORIES:
-            marks = by_cat.pop(code, [])
-            if not marks:
-                continue
-            lines.append(f"  {CATEGORIES[code]}  ({len(marks)})")
-            for m in sorted(marks, key=lambda x: x.get("time", 0)):
-                slot = slot_of(plan, int(m.get("bar", 0)))
-                where = slot_label(slot) or m.get("slot_bars") or "outside the plan"
-                note = f'  — {m["note"]}' if m.get("note") else ""
-                lines.append(f"      bar {int(m.get('bar', 0)):>3}  "
-                             f"{fmt_time(float(m.get('time', 0))):>7}  "
-                             f"[{where}]{note}")
+        heard = sorted({m["author"] for m in data["markers"]})
+        if len(heard) > 1:
+            lines.append("  heard by  " + ", ".join(author_label(a) for a in heard))
+
+        def group(code: str, marks: list[dict]) -> None:
+            lines.append(f"  {category_label(code)}  ({len(marks)})")
+            for m in sorted(marks, key=lambda x: x["time"]):
+                slot = slot_of(plan, m["bar"])
+                where = slot_label(slot) or m["slot_bars"] or "outside the plan"
+                note = f'  — {m["note"]}' if m["note"] else ""
+                # only a second listener is named; not saying "Neel" on every
+                # line of a file that is mostly Neel keeps the block readable
+                who = (f'  ({author_label(m["author"])})'
+                       if m["author"] != DEFAULT_AUTHOR else "")
+                bar = f'{m["bar"]:>3}' if m["bar"] else "  ?"
+                lines.append(f"      bar {bar}  {fmt_time(m['time']):>7}  "
+                             f"[{where}]{note}{who}")
                 if slot and slot.get("note") and where not in said:
                     said.add(where)
                     lines.append(f"{'':>25}the arranger said: {slot['note']}")
-        for code, marks in by_cat.items():            # anything unknown, kept
-            lines.append(f"  {code}  ({len(marks)})")
+
+        for code in CATEGORIES:                       # the chips, in chip order
+            marks = by_cat.pop(code, [])
+            if marks:
+                group(code, marks)
+        for code in sorted(by_cat):                   # then whatever else wrote
+            group(code, by_cat[code])
 
         for v in data["votes"]:
             # two renders of one song share a title, so the id always goes in:
@@ -449,6 +583,7 @@ def as_json(lib) -> dict:
     rows = collect(lib)
     return {
         "categories": [{"code": c, "label": lab} for c, lab in CATEGORIES.items()],
+        "authors": [{"code": c, "label": lab} for c, lab in AUTHORS.items()],
         "remixes": [
             {
                 "id": r["meta"]["id"],

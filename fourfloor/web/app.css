@@ -687,7 +687,8 @@ kbd {
 .pin:hover i, .pin:focus-visible i { opacity: 1; }
 .pin:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; border-radius: 6px; }
 .pin-tip {
-  position: absolute; left: 12px; top: 22px; width: max-content; max-width: 210px;
+  position: absolute; left: var(--tip-left, 12px); top: 22px;
+  width: max-content; max-width: var(--tip-w, 210px);
   padding: 7px 10px; border-radius: 10px; font-size: 11.5px; line-height: 1.45;
   text-align: left; color: var(--ink); pointer-events: none;
   background: rgba(12, 12, 16, 0.94); border: 1px solid var(--line-2);
@@ -697,8 +698,22 @@ kbd {
 }
 .pin-tip b { display: block; font-weight: 620; color: currentColor; }
 .pin-tip small { color: var(--muted); }
+.pin-tip .pin-by {
+  display: block; margin-top: 5px; font-style: normal; font-size: 10.5px;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted);
+}
+
+/* a marker somebody else heard: same colour, hollow and dashed, so it reads
+   as an opinion from outside the room without losing its category */
+.pin.other::before { background: none; border: 1.5px dashed currentColor; }
+.pin.other i {
+  background: none; opacity: 1;
+  background-image: linear-gradient(currentColor 3px, transparent 3px);
+  background-size: 1.5px 6px;
+}
+.pin.other:hover i, .pin.other:focus-visible i { background-size: 1.5px 4px; }
 .pin:hover .pin-tip, .pin:focus-visible .pin-tip { opacity: 1; transform: translateY(0); }
-.pin.right .pin-tip { left: auto; right: 12px; }
+
 
 .pop {
   position: absolute; z-index: 12; top: calc(100% + 12px); left: 0;
@@ -787,6 +802,13 @@ kbd {
 .marks i { width: 9px; height: 9px; border-radius: 50% 50% 50% 2px;
            transform: rotate(45deg); }
 .marks .m-cat { font-weight: 590; letter-spacing: -0.01em; white-space: nowrap; }
+.marks li.other .m-cat { color: var(--muted); }
+.marks .m-by {
+  font-style: normal; font-size: 9.5px; font-weight: 620; letter-spacing: 0.08em;
+  text-transform: uppercase; margin-left: 7px; padding: 2px 6px;
+  border-radius: 999px; color: var(--violet);
+  background: rgba(125, 140, 255, 0.14); border: 1px solid rgba(125, 140, 255, 0.32);
+}
 .marks .m-where { color: var(--muted); white-space: nowrap; }
 .marks .m-note { color: var(--muted); overflow-wrap: anywhere; }
 .marks .m-go {
