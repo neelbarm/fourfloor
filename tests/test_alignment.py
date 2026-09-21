@@ -151,17 +151,50 @@ def test_every_slot_starts_on_a_source_bar_line(fixture_analysis) -> None:
         assert abs(bars - round(bars)) < 1e-4, slot
 
 
-def test_the_arrangement_walks_forward_and_the_breakdown_is_elsewhere(
-        fixture_analysis) -> None:
+def test_no_slot_replays_another_and_none_replays_itself(fixture_analysis) -> None:
+    """The two complaints a listener makes about an arrangement.
+
+    "The entire second half is a verbatim loop of the first half" -- two drops
+    reading the song from the same second. And "the track halts and restarts
+    the intro" -- a slot handed fewer bars than it is long, looping what it was
+    given. Both were real, and both are structural: they can be read straight
+    off the plan without listening to anything.
+    """
     p = plan(fixture_analysis, 124.0, 2.0, length=270.0)
     drops = [s for s in p.slots if s.kind == "drop"]
     breakdown = next(s for s in p.slots if s.kind == "breakdown")
     assert len(drops) >= 2
-    assert drops[1].source_start >= drops[0].source_start
+    assert drops[0].source_start != drops[1].source_start, "the drops are the same"
     assert breakdown.source_bars >= 8, "a breakdown needs real material"
     for d in drops:
-        same = (abs(breakdown.source_start - d.source_start) < p.bar_dur)
-        assert not same, "the breakdown is replaying a drop"
+        assert abs(breakdown.source_start - d.source_start) >= p.bar_dur, \
+            "the breakdown is replaying a drop"
+    intro = next(s for s in p.slots if s.kind == "intro")
+    assert abs(breakdown.source_start - intro.source_start) >= p.bar_dur, \
+        "the breakdown is replaying the intro"
+
+
+def test_drops_are_different_parts_of_the_song_when_there_is_room(
+        fixture_analysis) -> None:
+    """With a song long enough to hold them, two drops are two drops.
+
+    A sixty-second source cannot give two non-overlapping forty-bar drops, and
+    the planner says so by overlapping them rather than by looping one. Ask for
+    an arrangement its slots do fit in and they have to be different music.
+    """
+    p = plan(fixture_analysis, 124.0, 2.0, length=110.0)
+    drops = [s for s in p.slots if s.kind == "drop"]
+    assert len(drops) >= 2
+    apart = abs(drops[1].source_start - drops[0].source_start) / p.bar_dur
+    assert apart >= 8.0, f"the drops are {apart:.1f} bars apart"
+
+
+def test_a_slot_is_never_given_less_source_than_it_plays(fixture_analysis) -> None:
+    """...unless the whole song is shorter than the slot, which is honest."""
+    p = plan(fixture_analysis, 124.0, 2.0, length=110.0)
+    for slot in p.slots:
+        assert slot.source_bars == slot.bars, \
+            f"{slot.kind} loops {slot.source_bars} bars over {slot.bars}"
 
 
 # ---------------------------------------------------------------------------
