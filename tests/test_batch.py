@@ -112,6 +112,14 @@ def test_plan_key_flow_returns_a_readable_key_name() -> None:
     assert batch.plan_key_flow(["8A"])[0]["key"] == "Am"
 
 
+def test_a_seeded_chain_plans_the_first_track_too() -> None:
+    """What a resumed batch needs: mix out of the track already on disk."""
+    plan = batch.plan_key_flow(["2A"], previous="8A")
+    assert plan[0]["shift"] != 0
+    assert plan[0]["camelot"] in _wheel("8A")
+    assert batch.plan_key_flow(["9A"], previous="8A")[0]["shift"] == 0
+
+
 # ---------------------------------------------------------------------------
 # a stub renderer
 # ---------------------------------------------------------------------------
@@ -121,7 +129,7 @@ class FakeResult:
         self.paths, self.session, self.metrics = paths, sess, metrics
 
 
-def stub_remix(*, fail_on=(), calls=None, key_seen=None):
+def stub_remix(*, fail_on=(), calls=None, key_seen=None, opts_seen=None):
     """A ``remix`` replacement that writes the two files a batch looks for."""
 
     def _remix(path, out, opts=None, style=None, progress=None):
@@ -130,6 +138,8 @@ def stub_remix(*, fail_on=(), calls=None, key_seen=None):
             calls.append(path.name)
         if key_seen is not None:
             key_seen[path.name] = getattr(opts, "key", None)
+        if opts_seen is not None:
+            opts_seen[path.name] = opts
         if any(token in path.name for token in fail_on):
             raise RuntimeError(f"engine refused {path.name}")
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -156,12 +166,13 @@ def originals(tmp_path) -> Path:
 @pytest.fixture
 def engine(monkeypatch):
     """Install a stub renderer and hand back the knobs to configure it."""
-    state = {"calls": [], "keys": {}}
+    state = {"calls": [], "keys": {}, "opts": {}}
 
     def install(fail_on=()):
         monkeypatch.setattr("fourfloor.remix.remix",
                             stub_remix(fail_on=fail_on, calls=state["calls"],
-                                       key_seen=state["keys"]))
+                                       key_seen=state["keys"],
+                                       opts_seen=state["opts"]))
         return state
 
     return install
@@ -225,6 +236,26 @@ def test_every_track_is_rendered_at_the_one_tempo(originals, tmp_path, engine) -
     assert {t["bpm"] for t in manifest["tracks"]} == {126.0}
 
 
+def test_one_kit_and_one_bass_policy_reach_every_track(originals, tmp_path,
+                                                       engine) -> None:
+    """A set wants one drum kit and one low end, not a decision per file."""
+    state = engine()
+    manifest = batch.run(originals, tmp_path / "gig", bpm=126.0,
+                         kit="murph", bass="sub", stems="hpss", form="tool")
+    assert len(state["opts"]) == 3
+    for opts in state["opts"].values():
+        assert opts.kit == "murph"
+        assert opts.bass == "sub"
+        assert opts.form == "tool"
+    assert manifest["kit"] == "murph" and manifest["bass"] == "sub"
+
+
+def test_the_bass_policy_defaults_to_auto(originals, tmp_path, engine) -> None:
+    state = engine()
+    batch.run(originals, tmp_path / "gig", bpm=126.0)
+    assert {o.bass for o in state["opts"].values()} == {"auto"}
+
+
 def test_set_json_carries_the_cues_and_whatever_alignment_the_engine_reports(
         originals, tmp_path, engine) -> None:
     engine()
@@ -255,6 +286,95 @@ def test_key_lock_asks_the_engine_for_no_key_change(originals, tmp_path,
     batch.run(originals, tmp_path / "gig", bpm=126.0, key_strategy="lock")
     assert set(state["keys"].values()) == {None}
     assert batch.run(originals, tmp_path / "gig2", bpm=126.0)["key_flow"] == []
+
+
+# ---------------------------------------------------------------------------
+# --key auto, with the analyser stubbed too
+# ---------------------------------------------------------------------------
+
+def stub_analyze(camelots: dict):
+    """Report a fixed key per filename, the way ``analyze`` would."""
+    from fourfloor.analysis.key import KeyEstimate, camelot_to_key
+
+    class FakeGrid:
+        bpm = 120.0
+
+    class FakeAnalysis:
+        def __init__(self, code):
+            pc, minor = camelot_to_key(code)
+            self.key = KeyEstimate(pc, minor, 0.9)
+            self.grid = FakeGrid()
+
+    def _analyze(path, keep_audio=True, clip=None):
+        code = camelots.get(Path(path).name)
+        if code is None:
+            raise RuntimeError(f"cannot analyse {Path(path).name}")
+        return FakeAnalysis(code)
+
+    return _analyze
+
+
+def test_key_auto_asks_the_engine_for_the_planned_key(originals, tmp_path, engine,
+                                                      monkeypatch) -> None:
+    state = engine()
+    monkeypatch.setattr("fourfloor.analysis.analyze", stub_analyze({
+        "01 first.mp3": "8A", "02 Nuit — Blanche.mp3": "2A", "03 third.mp3": "9A"}))
+    manifest = batch.run(originals, tmp_path / "gig", bpm=126.0, key_strategy="auto")
+
+    flow = {Path(t["source"]).name: s
+            for t, s in zip(manifest["tracks"], manifest["key_flow"])}
+    assert flow["01 first.mp3"]["shift"] == 0
+    assert state["keys"]["01 first.mp3"] is None      # the first track is untouched
+    for name, step in flow.items():
+        if step["shift"]:
+            assert state["keys"][name] == step["key"]
+
+
+def test_key_auto_records_the_flow_in_set_json(originals, tmp_path, engine,
+                                               monkeypatch) -> None:
+    engine()
+    monkeypatch.setattr("fourfloor.analysis.analyze", stub_analyze({
+        "01 first.mp3": "8A", "02 Nuit — Blanche.mp3": "2A", "03 third.mp3": "2A"}))
+    out = tmp_path / "gig"
+    batch.run(originals, out, bpm=126.0, key_strategy="auto")
+    data = json.loads((out / "set.json").read_text(encoding="utf8"))
+    assert data["key_strategy"] == "auto"
+    assert len(data["key_flow"]) == 3
+    for prev, nxt in zip(data["key_flow"], data["key_flow"][1:]):
+        if nxt["compatible"]:
+            assert nxt["camelot"] in _wheel(prev["camelot"])
+
+
+def test_resuming_with_key_auto_mixes_out_of_what_is_already_there(
+        originals, tmp_path, engine, monkeypatch) -> None:
+    keys = {"01 first.mp3": "8A", "02 Nuit — Blanche.mp3": "2A",
+            "03 third.mp3": "2A"}
+    state = engine(fail_on=("02", "03"))
+    monkeypatch.setattr("fourfloor.analysis.analyze", stub_analyze(keys))
+    out = tmp_path / "gig"
+    batch.run(originals, out, bpm=126.0, key_strategy="auto")   # only track one lands
+
+    state["calls"].clear()
+    engine()
+    manifest = batch.run(originals, out, bpm=126.0, key_strategy="auto", resume=True)
+    assert manifest["summary"]["skipped"] == 1
+    # the two new tracks are planned against track one's key, not from scratch
+    assert manifest["key_flow"][0]["shift"] != 0
+    assert manifest["key_flow"][0]["camelot"] in _wheel(manifest["tracks"][0]["camelot"])
+
+
+def test_a_track_the_analyser_cannot_read_still_gets_remixed(originals, tmp_path,
+                                                             engine,
+                                                             monkeypatch) -> None:
+    """A key we cannot find is a reason to leave the track alone, not to drop it."""
+    state = engine()
+    monkeypatch.setattr("fourfloor.analysis.analyze", stub_analyze({
+        "01 first.mp3": "8A", "03 third.mp3": "9A"}))
+    manifest = batch.run(originals, tmp_path / "gig", bpm=126.0, key_strategy="auto")
+    assert manifest["summary"]["ok"] == 3
+    assert len(state["calls"]) == 3
+    unreadable = [s for s in manifest["key_flow"] if s["source"] == ""]
+    assert unreadable and unreadable[0]["shift"] == 0
 
 
 # ---------------------------------------------------------------------------

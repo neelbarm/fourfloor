@@ -60,7 +60,8 @@ def shift_camelot(code: str, semitones: int) -> str:
     return KeyEstimate((pc + int(semitones)) % 12, minor, 1.0).camelot
 
 
-def plan_key_flow(camelots: list[str], max_shift: int = MAX_AUTO_SHIFT) -> list[dict]:
+def plan_key_flow(camelots: list[str], max_shift: int = MAX_AUTO_SHIFT,
+                  previous: str | None = None) -> list[dict]:
     """Choose a semitone shift per track so consecutive keys mix.
 
     The first track keeps its own key -- it sets the tone of the set and there
@@ -71,13 +72,16 @@ def plan_key_flow(camelots: list[str], max_shift: int = MAX_AUTO_SHIFT) -> list[
     alone and flagged, because a two-semitone shift that still clashes is the
     worst of both worlds.
 
+    ``previous`` is the Camelot code of a track that already exists ahead of
+    this list, which is what a resumed batch has: the first track then has
+    something to mix out of and is planned like any other.
+
     Returns one dict per track: ``source``, ``shift``, ``camelot``, ``key`` and
     ``compatible``.
     """
     from .analysis.key import KeyEstimate, camelot_neighbours, camelot_to_key
 
     out: list[dict] = []
-    previous: str | None = None
     for code in camelots:
         code = (code or "").strip().upper()
         try:
@@ -211,6 +215,7 @@ def _remix_one(job: dict) -> dict:
             form=job.get("form", "club"), length=job.get("length"),
             swing=job.get("swing"), seed=job.get("seed", 0),
             wav=bool(job.get("wav", False)), kit=job.get("kit"),
+            bass=job.get("bass", "auto"),
         )
         res = remix(source, out, opts)
         row = _row_from_session(source, Path(res.paths.get("mp3", out)), res.session,
@@ -251,11 +256,15 @@ def _source_keys(sources: list[Path], on_event) -> list[str]:
 
 def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
         key_strategy: str = "lock", stems: str = "hpss", kit: str | None = None,
-        jobs: int = 1, resume: bool = False, length: str | None = None,
-        form: str = "club", swing: float | None = None, seed: int = 0,
-        wav: bool = False, set_name: str | None = None, artist: str = "fourfloor",
-        on_event=None) -> dict:
+        bass: str = "auto", jobs: int = 1, resume: bool = False,
+        length: str | None = None, form: str = "club", swing: float | None = None,
+        seed: int = 0, wav: bool = False, set_name: str | None = None,
+        artist: str = "fourfloor", on_event=None) -> dict:
     """Remix every track in ``folder`` at ``bpm`` and export the set.
+
+    ``kit`` and ``bass`` are handed to every track unchanged: a set wants one
+    drum kit and one low-end policy across it, not a different decision per
+    file. Their meanings are :class:`~fourfloor.remix.RemixOptions`'s.
 
     ``on_event(kind, payload)`` is called as things happen so a terminal (or a
     web app) can draw progress without this module knowing about either.
@@ -274,10 +283,10 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
     sources = find_audio(src_dir)
     if not sources:
         raise BatchError(f"no audio files in {src_dir}")
-    out.mkdir(parents=True, exist_ok=True)
-    if out.resolve() == src_dir.resolve():
+    if out.exists() and out.resolve() == src_dir.resolve():
         raise BatchError("send the remixes somewhere other than the source folder, "
                          "or the next run will remix its own output")
+    out.mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
     on_event("start", {"tracks": len(sources), "bpm": bpm, "set": set_name,
@@ -302,17 +311,34 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
 
     flow: dict[str, dict] = {}
     if key_strategy == "auto" and pending:
+        # A resumed batch has to mix out of what is already on disk: seed the
+        # chain with the key of the last finished track before the first one
+        # still to render.
+        first = sources.index(pending[0])
+        before = [rows[str(p)].camelot for p in sources[:first] if str(p) in rows]
         codes = _source_keys(pending, on_event)
-        for p, step in zip(pending, plan_key_flow(codes)):
+        steps = plan_key_flow(codes, previous=before[-1] if before else None)
+        for p, step in zip(pending, steps):
             flow[str(p)] = step
-        on_event("key_flow", {"steps": [flow[str(p)] for p in pending]})
+        on_event("key_flow", {"steps": steps})
+
+    def _target_key(p: Path) -> str | None:
+        """The key to ask the engine for, or ``None`` to leave the track alone.
+
+        A planned shift of zero is passed as ``None`` rather than as the track's
+        own key: asking for the key it already has would let a disagreement
+        between this pre-pass and the engine's own analysis turn into a shift
+        nobody asked for.
+        """
+        step = flow.get(str(p))
+        if not step or not step.get("shift"):
+            return None
+        return step.get("key") or None
 
     jobs_list = [
         {"source": str(p), "output": str(output_for(p, out)), "bpm": float(bpm),
-         "key": (flow.get(str(p), {}).get("key") or None) if key_strategy == "auto"
-                else None,
-         "stems": stems, "form": form, "length": length, "swing": swing,
-         "seed": seed, "wav": wav, "kit": kit}
+         "key": _target_key(p), "stems": stems, "form": form, "length": length,
+         "swing": swing, "seed": seed, "wav": wav, "kit": kit, "bass": bass}
         for p in pending
     ]
 
@@ -378,6 +404,7 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
         "key_strategy": key_strategy,
         "stems": stems,
         "kit": kit,
+        "bass": bass,
         "form": form,
         "length": length,
         "jobs": jobs,
