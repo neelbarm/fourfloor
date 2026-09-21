@@ -350,3 +350,163 @@ def alignment_report(rendered_audio: np.ndarray, sr: int, bpm: float,
     out["problems"] = problems
     out["ok"] = not problems
     return out
+
+
+# ---------------------------------------------------------------------------
+# two rhythms at once
+# ---------------------------------------------------------------------------
+
+#: How close an onset has to be to a beat or an offbeat eighth to count as
+#: playing the house grid rather than across it.
+HOUSE_TOL = 0.025
+
+
+def house_positions(bpm: float, first_downbeat: float, duration: float) -> np.ndarray:
+    """Beats and offbeat eighths: where a house record puts things.
+
+    Not the sixteenth lattice the phase gate measures against. That question is
+    "is this in time"; this one is "is this playing the same rhythm as the kit",
+    and a part can be perfectly in time on sixteenths while playing a pattern
+    that fights four-on-the-floor all the way through.
+    """
+    return grid_times(bpm, first_downbeat, duration, division=2)
+
+
+def _rhythm_onsets(x: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray]:
+    """Onsets of a layer, measured with a detector that suits what it is.
+
+    A bass layer has to be measured in the band it occupies. The attack
+    envelope uses a 1024-sample window, which is one and a third cycles of a
+    55 Hz note: the band energy ripples at the note's own frequency and the
+    flux finds an "onset" on every ripple. A held bass note comes back as
+    twenty-five onsets a bar that way, when it is one. The sub-band envelope
+    looks at 30-120 Hz over a 46 ms window and reads the same note as one.
+    """
+    mono = _mono(np.asarray(x, dtype=np.float32))
+    full = float(np.sqrt(np.mean(np.square(mono.astype(np.float64)))))
+    if full <= 1e-9:
+        return np.zeros(0), np.zeros(0)
+    low = F.band_energy(mono, sr, 20.0, 200.0, hop=512)
+    wide = F.band_energy(mono, sr, 20.0, 16000.0, hop=512)
+    bassy = float(np.sum(low ** 2) / max(float(np.sum(wide ** 2)), 1e-12))
+    if bassy < 0.7:
+        return onset_times(x, sr)
+    kick, fps = F.kick_envelope(mono, sr, lo=30.0, hi=160.0)
+    if not len(kick) or kick.max() <= 0:
+        return np.zeros(0), np.zeros(0)
+    times = F.attack_times(len(kick), fps)
+    ref = float(np.percentile(kick[kick > 0], 92)) if np.any(kick > 0) else 0.0
+    peaks, _ = sps.find_peaks(kick, height=max(0.18 * ref, 1e-6),
+                              distance=max(1, int(0.07 * fps)))
+    return (times[peaks], kick[peaks]) if len(peaks) else (np.zeros(0), np.zeros(0))
+
+
+def rhythm_report(x: np.ndarray, sr: int, bpm: float, first_downbeat: float = 0.0,
+                  tol: float = HOUSE_TOL) -> dict:
+    """How busy a layer is, and how much of it plays across the house grid.
+
+    Returns onset density per bar -- both a count and an energy-weighted one --
+    and the share of onset energy landing away from every beat and offbeat
+    eighth. A pad reads as nearly no density. A sustained house bass reads as
+    dense and entirely on the grid. A trap 808 reads as dense and substantially
+    off it, and that is the measurement that says a layer is a second rhythm
+    rather than part of the first.
+    """
+    duration = len(x) / float(sr)
+    bars = max(duration / (4.0 * 60.0 / max(bpm, 1e-6)), 1e-9)
+    onsets, strength = _rhythm_onsets(x, sr)
+    rms = float(np.sqrt(np.mean(np.square(_mono(np.asarray(x, dtype=np.float64))))))
+    out = {
+        "rms_db": 20.0 * np.log10(max(rms, 1e-9)),
+        "onsets": int(len(onsets)),
+        "onsets_per_bar": float(len(onsets) / bars),
+        "off_house": 0.0,
+        "off_house_per_bar": 0.0,
+        "strength_per_bar": 0.0,
+    }
+    if not len(onsets):
+        return out
+    grid = house_positions(bpm, first_downbeat, duration)
+    err = np.abs(phase_errors(onsets, grid))
+    w = np.asarray(strength, dtype=float)
+    off = err > tol
+    total = max(float(w.sum()), 1e-12)
+    out["off_house"] = float(w[off].sum() / total)
+    out["off_house_per_bar"] = float(np.sum(off) / bars)
+    out["strength_per_bar"] = float(w.sum() / bars)
+    return out
+
+
+def overlap_report(layers: dict, sr: int, bpm: float, first_downbeat: float = 0.0,
+                   sections: list | None = None, floor_db: float = -45.0) -> dict:
+    """Which layers are carrying a rhythm, whole track and section by section.
+
+    ``sections`` is ``[(label, start_seconds, end_seconds), ...]``; without it
+    the whole track is one section. ``floor_db`` is the level below which a
+    layer is treated as silent, because a layer 45 dB down is not what anybody
+    is hearing two rhythms of.
+    """
+    out: dict = {"bpm": float(bpm), "layers": {}}
+    for name, buf in layers.items():
+        if buf is None:
+            continue
+        whole = rhythm_report(buf, sr, bpm, first_downbeat)
+        entry = {"whole": whole, "silent": bool(whole["rms_db"] < floor_db),
+                 "sections": {}}
+        for label, a, b in (sections or []):
+            seg = buf[int(a * sr):int(b * sr)]
+            if len(seg) < sr // 4:
+                continue
+            entry["sections"][label] = rhythm_report(seg, sr, bpm, first_downbeat)
+        out["layers"][name] = entry
+    return out
+
+
+def bass_collision(bass: np.ndarray, sr: int, bpm: float,
+                   first_downbeat: float = 0.0, tol: float = 0.04) -> dict:
+    """Does this bass part hit where a four-on-the-floor kick is going to hit?
+
+    The complaint a listener makes is "two rhythms at once", and in a house
+    remix of a hip-hop record it is almost always the same two: the kit's kick
+    on every beat, and the source's 808 playing its own pattern in the same two
+    octaves. An 808 is a melodic *percussion* instrument -- it is a kick with a
+    pitch -- so under four-on-the-floor it reads as a second kick drum rather
+    than as a bassline.
+
+    What separates that from a bassline that belongs there is not how busy it
+    is; the house records measured here run six to eight sub attacks a bar, the
+    same as the trap ones. It is *where* the attacks land. A house bass dodges
+    the kick, putting 5-25% of its sub-band attack energy on the beat. Don
+    Toliver's *Body* puts 54% of it there, right on top of where the kick goes.
+
+    Returns the attacks per bar, the share of attack energy on the beat and off
+    the eighth-note grid, how much of the time the sub band is actually
+    sounding, and the level.
+    """
+    mono = _mono(np.asarray(bass, dtype=np.float32))
+    duration = len(mono) / float(sr)
+    bars = max(duration / (4.0 * 60.0 / max(bpm, 1e-6)), 1e-9)
+    rms = float(np.sqrt(np.mean(np.square(mono.astype(np.float64)))))
+    out = {"per_bar": 0.0, "on_beat": 0.0, "off_eighth": 0.0, "sustain": 0.0,
+           "rms_db": 20.0 * np.log10(max(rms, 1e-9))}
+    kick, fps = F.kick_envelope(mono, sr, lo=30.0, hi=120.0)
+    if not len(kick) or kick.max() <= 0:
+        return out
+    low = F.band_energy(mono, sr, 30.0, 120.0, hop=512)
+    out["sustain"] = float(np.mean(low > 0.25 * max(float(low.max()), 1e-9)))
+    times = F.attack_times(len(kick), fps)
+    ref = float(np.percentile(kick[kick > 0], 92)) if np.any(kick > 0) else 0.0
+    peaks, _ = sps.find_peaks(kick, height=max(0.18 * ref, 1e-6),
+                              distance=max(1, int(0.07 * fps)))
+    if not len(peaks):
+        return out
+    hits, w = times[peaks], kick[peaks]
+    total = max(float(w.sum()), 1e-12)
+    beats = grid_times(bpm, first_downbeat, duration, division=1)
+    eighths = grid_times(bpm, first_downbeat, duration, division=2)
+    on_beat = np.abs(phase_errors(hits, beats)) <= tol
+    on_eighth = np.abs(phase_errors(hits, eighths)) <= tol
+    out["per_bar"] = float(len(hits) / bars)
+    out["on_beat"] = float(w[on_beat].sum() / total)
+    out["off_eighth"] = float(w[~on_eighth].sum() / total)
+    return out
