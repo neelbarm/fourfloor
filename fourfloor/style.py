@@ -200,9 +200,14 @@ def profile_track(path: str | Path) -> dict:
     }
 
 
-def learn(folder: str | Path, progress=None) -> Style:
-    """Analyse every audio file in ``folder`` and aggregate a Style."""
-    files = find_audio(folder)
+def learn(folder: str | Path, progress=None, files=None) -> Style:
+    """Analyse every audio file in ``folder`` and aggregate a Style.
+
+    ``files`` overrides the search: ``fourfloor refs`` keeps its references in
+    ``pairs/`` and ``remixes/`` under one folder, and both halves of both belong
+    in one profile. Everything else about the aggregation is the same.
+    """
+    files = list(files) if files is not None else find_audio(folder)
     if not files:
         raise RuntimeError(f"no audio files in {folder}")
     step = progress or (lambda *_a, **_k: None)

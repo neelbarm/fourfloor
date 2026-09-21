@@ -110,6 +110,49 @@ def _parser() -> argparse.ArgumentParser:
     f.add_argument("--json", action="store_true")
     f.add_argument("-q", "--quiet", action="store_true")
 
+    rf = sub.add_parser("refs", help="teach it your taste: ingest remix links as pairs")
+    rsub = rf.add_subparsers(dest="refs_command", required=True)
+
+    def _refs_common(p):
+        p.add_argument("--refs", default=None, metavar="DIR",
+                       help="reference folder (default ~/Music/house-refs)")
+        p.add_argument("--json", action="store_true")
+        return p
+
+    ra = _refs_common(rsub.add_parser(
+        "add", help="ingest remix links: find, verify and file their originals"))
+    ra.add_argument("urls", nargs="*", metavar="URL",
+                    help="remix links (YouTube, SoundCloud…) or files on this machine")
+    ra.add_argument("--file", default=None, metavar="LINKS.TXT",
+                    help="a text file of links, one per line")
+    ra.add_argument("--dry-run", action="store_true",
+                    help="show what was parsed and which original it would fetch")
+    ra.add_argument("--no-kit", action="store_true",
+                    help="do not sample a drum kit from each remix")
+    ra.add_argument("--no-demucs", action="store_true",
+                    help="verify on whole-mix chroma instead of separated vocals "
+                         "(faster, weaker evidence)")
+    ra.add_argument("--candidates", type=int, default=None, metavar="N",
+                    help="how many ranked candidates to download and listen to "
+                         "(default 2)")
+    ra.add_argument("--force", action="store_true",
+                    help="re-do links the ledger has already settled")
+    ra.add_argument("-q", "--quiet", action="store_true")
+
+    _refs_common(rsub.add_parser("list", help="every reference and what is known about it"))
+    _refs_common(rsub.add_parser("review", help="the pairs that need a person to decide"))
+    racc = _refs_common(rsub.add_parser("accept", help="keep a reviewed pair"))
+    racc.add_argument("slug")
+    racc.add_argument("--url", default=None, metavar="LINK",
+                      help="accept this link instead of the top candidate")
+    rrej = _refs_common(rsub.add_parser("reject", help="drop a reviewed pair's candidate"))
+    rrej.add_argument("slug")
+    rlearn = _refs_common(rsub.add_parser(
+        "learn", help="re-learn the style profile from the pairs and remixes"))
+    rlearn.add_argument("--repo", default="styles/pairs.json", metavar="PATH",
+                        help="where the anonymised aggregate goes "
+                             "(default styles/pairs.json; 'none' to skip)")
+
     l = sub.add_parser("learn", help="derive a style profile from a folder of remixes")
     l.add_argument("folder")
     l.add_argument("-o", "--output", default="style.json")
@@ -615,6 +658,87 @@ def cmd_learn(args, c: ui.C) -> int:
     return 0
 
 
+def cmd_refs(args, c: ui.C) -> int:
+    """`fourfloor refs`: ingest remix links, review them, learn from them."""
+    from . import fetch as fetch_mod
+    from .refs import pipeline, report
+    from .refs.ledger import Ledger
+
+    opts = pipeline.Options(home=Path(args.refs).expanduser() if args.refs
+                            else fetch_mod.REFS_HOME)
+    quiet = getattr(args, "quiet", False) or args.json
+    cmd = args.refs_command
+
+    if cmd == "add":
+        links = list(args.urls or [])
+        if args.file:
+            links.extend(pipeline.read_links(args.file))
+        if not links:
+            raise ValueError("give me some links: `fourfloor refs add <url> …` "
+                             "or --file links.txt")
+        opts.dry_run = args.dry_run
+        opts.kit = not args.no_kit
+        opts.demucs = not args.no_demucs
+        opts.force = args.force
+        if args.candidates:
+            opts.candidates = max(1, int(args.candidates))
+        if not quiet:
+            print(ui.header(c, "refs"))
+            print()
+            print(ui.kv(c, "into", c.cyan(str(opts.home))))
+            print(ui.kv(c, "links", f"{len(links)}"
+                        + (c.grey("   dry run") if opts.dry_run else "")))
+        entries = pipeline.add(links, opts, on=report.Run(c, quiet=quiet))
+        if args.json:
+            print(json.dumps([e.to_dict() for e in entries], indent=2))
+        elif not quiet:
+            print()
+            print(report.list_report(entries, c, home=opts.home))
+        return 0 if any(e.status in ("done", "standalone", "dry-run")
+                        for e in entries) or not entries else 1
+
+    if cmd in ("list", "review"):
+        led = Ledger(opts.ledger_path)
+        entries = (led.entries if cmd == "list"
+                   else led.of_status("needs_review"))
+        if args.json:
+            print(json.dumps([e.to_dict() for e in entries], indent=2))
+        elif cmd == "list":
+            print(report.list_report(entries, c, home=opts.home))
+        else:
+            print(report.review_report(entries, c))
+        return 0
+
+    if cmd in ("accept", "reject"):
+        runner = report.Run(c, quiet=quiet)
+        if cmd == "accept":
+            entry = pipeline.accept(args.slug, opts, on=runner, url=args.url)
+        else:
+            entry = pipeline.reject(args.slug, opts, on=runner)
+        if args.json:
+            print(json.dumps(entry.to_dict(), indent=2))
+        else:
+            print()
+            print("\n".join(report.entry_lines(entry, c)))
+            print()
+        return 0
+
+    # learn
+    repo = None if (args.repo or "none").lower() == "none" else args.repo
+    if repo and not Path(repo).parent.is_dir():
+        print(ui.warn(c, f"no folder for {repo}; writing only the private profile"))
+        repo = None
+    if not quiet:
+        print(ui.header(c, "refs learn"))
+        print()
+    result = pipeline.learn(opts, on=report.Run(c, quiet=quiet), repo_out=repo)
+    if args.json:
+        print(json.dumps(result["style"], indent=2))
+    else:
+        print(report.table_report(result, c))
+    return 0
+
+
 def cmd_preview(args, c: ui.C) -> int:
     from .preview import write_preview
 
@@ -736,7 +860,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {"remix": cmd_remix, "inspect": cmd_inspect, "learn": cmd_learn,
                 "preview": cmd_preview, "serve": cmd_serve, "fetch": cmd_fetch,
                 "kit": cmd_kit, "export": cmd_export, "batch": cmd_batch,
-                "critic": critic_command.run}
+                "refs": cmd_refs, "critic": critic_command.run}
     try:
         return handlers[args.command](args, c)
     except KeyboardInterrupt:
