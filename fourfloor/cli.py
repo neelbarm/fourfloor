@@ -65,6 +65,8 @@ def _parser() -> argparse.ArgumentParser:
                         "replaces it with a sub following its pitch; none; synth")
     r.add_argument("--no-kick-reinforce", action="store_true",
                    help="do not put a synth kick under a sampled loop's kicks")
+    r.add_argument("--drums-db", type=float, default=0.0, metavar="DB",
+                   help="trim the drum bus, in decibels (default 0)")
     r.add_argument("--producer", action="store_true",
                    help="ask Claude to plan the arrangement (needs ANTHROPIC_API_KEY)")
     r.add_argument("--seed", type=int, default=0, help="randomisation seed")
@@ -197,7 +199,7 @@ def remix_options(args):
         target_bpm=args.bpm, key=args.key, compatible_with=args.compatible_with,
         stems=args.stems, form=args.form, length=args.length, swing=args.swing,
         producer=args.producer, seed=args.seed, wav=not args.no_wav,
-        kit=args.kit, bass=args.bass,
+        kit=args.kit, bass=args.bass, drums_db=args.drums_db,
         kick_reinforce=not getattr(args, "no_kick_reinforce", False),
     )
 

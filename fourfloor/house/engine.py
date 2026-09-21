@@ -130,6 +130,14 @@ OTHER_SECTION: dict[str, tuple[float, float | None]] = {
     "outro": (0.78, 180.0),
 }
 
+#: How much comes off a sampled loop's own body, in decibels. The listening
+#: note on two renders Neel sat through was the same: "drums a little quieter".
+#: It comes off the loop and the layers on top of it, never off the sub kick
+#: underneath -- what was too loud was the record's mids and highs against the
+#: vocal, not the weight below them, and taking the whole bus down would have
+#: removed exactly the part that was right.
+LOOP_TRIM_DB = -1.75
+
 #: How loud the synthesised kick sits under the loop's own kicks, per section.
 #: A sampled loop from a 2015 record often has less sub than a 2024 system
 #: expects; this puts it back without replacing the loop's character.
@@ -197,7 +205,7 @@ class Engine:
                  semitones: int = 0, swing: float = 0.08, beat_multiple: float = 1.0,
                  src_bar_dur: float = 2.0, seed: int = 0, warp=None,
                  drum_kit=None, kick_reinforce: bool = True,
-                 bass_mode: str = "source") -> None:
+                 bass_mode: str = "source", drums_db: float = 0.0) -> None:
         self.sr = sr
         self.plan = plan
         self.stems = stems
@@ -218,6 +226,7 @@ class Engine:
         self.drum_kit = drum_kit
         self.kick_reinforce = kick_reinforce
         self.bass_mode = bass_mode
+        self.drums_gain = 10.0 ** (float(drums_db) / 20.0)
         self.source_bass_bed: np.ndarray | None = None
         self.rng = np.random.default_rng(seed)
         self.bar_dur = plan.bar_dur
@@ -373,6 +382,7 @@ class Engine:
         bed = _loop_to(np.concatenate([loop, loop]), 0, self.n, period, self.sr)
 
         out = np.zeros((self.n, 2), dtype=np.float32)
+        subs = np.zeros((self.n, 2), dtype=np.float32)      # trimmed separately
         kick_times: list[float] = []
         for slot in self.plan.slots:
             a = self._bar_sample(slot.start_bar)
@@ -392,7 +402,7 @@ class Engine:
             reinforce = KIT_REINFORCE.get(slot.drum_pattern, 0.0) if self.kick_reinforce else 0.0
             for t in self._kick_times_in(kick_offsets, period, a, b):
                 if reinforce > 0:
-                    add_at(out, to_stereo(self.sub_kick),
+                    add_at(subs, to_stereo(self.sub_kick),
                            int(round(t * self.sr)), reinforce)
                 # A muted breakdown has no kick, so nothing should duck to one.
                 if gain > 0.4:
@@ -408,7 +418,8 @@ class Engine:
             if slot.fill:
                 last_bar = (slot.start_bar + slot.bars - 1) * self.bar_dur
                 self._fill(out, last_bar, self.bar_dur / 16.0)
-        return out, sorted(kick_times)
+        trim = 10.0 ** (LOOP_TRIM_DB / 20.0)
+        return (out * trim + subs).astype(np.float32), sorted(kick_times)
 
     def _lift(self, out: np.ndarray, slot: Slot) -> None:
         """An extra offbeat open hat and a shaker over a sampled loop.
@@ -738,10 +749,11 @@ class Engine:
                 self.stems.bass_name, 0.55)
         else:
             bass_gain = 0.55
+        drum_bus = drums * 0.72 * self.drums_gain
         source_bus = harm * 1.35 + perc
-        mix = source_bus + drums * 0.72 + bassline * bass_gain
+        mix = source_bus + drum_bus + bassline * bass_gain
         self.layers.update({"source": source_bus, "harmonic": harm * 1.35,
-                            "kit": drums * 0.72, "bass": bassline * bass_gain})
+                            "kit": drum_bus, "bass": bassline * bass_gain})
         out = DY.master(mix, self.sr, peak_db=-1.0)
 
         metrics = {

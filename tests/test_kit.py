@@ -10,7 +10,7 @@ import pytest
 from fourfloor import kit as K
 from fourfloor.analysis import alignment as A
 from fourfloor.analysis import analyze
-from fourfloor.audio import decode
+from fourfloor.audio import decode, rms_db
 from fourfloor.remix import RemixOptions, remix
 
 from conftest import house_track
@@ -119,3 +119,47 @@ def test_the_synth_kit_is_still_there_when_no_kit_is_wanted(trap_clip,
                 RemixOptions(target_bpm=BPM, length="1:30", wav=False, kit="none"))
     assert res.kit_name is None
     assert res.metrics["kick_count"] > 100
+
+
+def test_drums_db_moves_the_drum_bus_and_nothing_else(built_kit, trap_clip,
+                                                      tmp_path) -> None:
+    """"Drums a little quieter" has to mean the drums and only the drums.
+
+    Two renders of the same source differing by one flag: the drum bus moves by
+    what was asked for, and every other bus comes back sample for sample the
+    same. A trim that also moved the vocal would be a master fader with a
+    misleading name.
+    """
+    def render(db: float):
+        return remix(trap_clip, tmp_path / f"db{db}.mp3",
+                     RemixOptions(target_bpm=BPM, length="1:00", wav=False,
+                                  kit="testkit", bass="source", drums_db=db,
+                                  keep_layers=True))
+
+    flat, quiet = render(0.0), render(-6.0)
+    from fourfloor.audio import rms_db
+
+    moved = rms_db(flat.layers["kit"]) - rms_db(quiet.layers["kit"])
+    assert moved == pytest.approx(6.0, abs=0.15), f"drum bus moved {moved:.2f} dB"
+    for layer in ("source", "harmonic", "bass", "source_perc"):
+        assert np.allclose(flat.layers[layer], quiet.layers[layer], atol=1e-6), \
+            f"{layer} moved too"
+
+
+def test_a_sampled_loop_sits_below_its_own_reinforcement(built_kit, trap_clip,
+                                                         tmp_path) -> None:
+    """The trim comes off the loop, not off the sub kick underneath it.
+
+    What was too loud on the records Neel listened to was the sampled record's
+    mids and highs against the vocal, not the weight below them. Taking the
+    whole bus down would have removed the part that was right, so the bus RMS
+    -- which the sub kick dominates -- moves much less than the loop does.
+    """
+    from fourfloor.house.engine import LOOP_TRIM_DB
+
+    assert -3.0 < LOOP_TRIM_DB < -1.0
+    res = remix(trap_clip, tmp_path / "trim.mp3",
+                RemixOptions(target_bpm=BPM, length="1:00", wav=False,
+                             kit="testkit", bass="none", keep_layers=True))
+    bus = rms_db(res.layers["kit"])
+    assert -30.0 < bus < -5.0, bus

@@ -50,6 +50,8 @@ class RemixOptions:
     grid; ``none`` leaves the low end to the kick; ``synth`` is the old
     chord-guessing bass line."""
     kick_reinforce: bool = True
+    drums_db: float = 0.0
+    """Trim on the drum bus, in decibels, on top of the default level."""
     keep_layers: bool = False
     """Hold on to the engine's individual buses so the alignment gate can
     measure the source layer without the kit shouting over it."""
@@ -137,6 +139,8 @@ def validate_options(opts: RemixOptions, out: str | Path) -> None:
             f"--bpm {opts.target_bpm:g} is out of range; fourfloor targets "
             f"{MIN_TARGET_BPM:g}-{MAX_TARGET_BPM:g} BPM"
         )
+    if not (-24.0 <= opts.drums_db <= 12.0):
+        raise ValueError(f"--drums-db {opts.drums_db:g} is out of range; use -24 to +12")
     if opts.swing is not None and not (0.0 <= opts.swing <= 0.66):
         raise ValueError(f"--swing {opts.swing:g} is out of range; use 0 to 0.66")
     if out.suffix.lower() not in (".mp3", ".wav"):
@@ -229,7 +233,7 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
                     swing=swing, beat_multiple=tempo.beat_multiple,
                     src_bar_dur=a.bar_dur, seed=opts.seed, warp=wmap,
                     drum_kit=drum_kit, kick_reinforce=opts.kick_reinforce,
-                    bass_mode=bass_mode)
+                    bass_mode=bass_mode, drums_db=opts.drums_db)
     audio, metrics = engine.render()
     layers = engine.layers if opts.keep_layers else {}
     spans = list(engine.source_spans)
