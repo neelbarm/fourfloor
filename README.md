@@ -408,6 +408,32 @@ fourfloor remix SONG [-o OUT.mp3]
     -q, --quiet                no progress or report
     --url LINK                 fetch the source from a link instead of naming a file
 
+fourfloor batch FOLDER -o OUT --bpm 126    remix a whole folder into one set
+    --key auto                 shift each track up to ±2 semitones onto a key
+                               that mixes with the one before it
+    --key-lock                 keep every track in its own key (the default)
+    --set "Friday"             name the set and the Rekordbox playlist
+    --length 4:30              target length per track
+    --form club|radio|tool     arrangement preset, same as remix
+    --stems hpss|demucs        separation engine
+    --kit NAME|none            one drum kit for the whole set
+    --bass auto|source|sub|none|synth
+                               one low-end policy for the whole set
+    --jobs 2                   render this many tracks at once
+    --resume                   skip tracks that already have an mp3 and a session
+    --wav                      also write a wav per track
+    --artist NAME              the Artist tag to write (default: fourfloor)
+    --json / -q                print set.json / say nothing
+
+fourfloor export REMIX|FOLDER        write the files a DJ app loads
+    --set "Friday"             name the Rekordbox playlist
+    --format FMT               rekordbox, csv, tags, serato or all; repeat or
+                               comma-separate (default: rekordbox,csv)
+    --out DIR                  where rekordbox.xml and cues.csv go
+    --artist NAME / --suffix   the Artist tag; append " (fourfloor house remix)"
+    --no-verify                skip the ffprobe check that tagging left the audio alone
+    --json                     print what was written as JSON
+
 fourfloor fetch URL                  download a track with yt-dlp (needs yt-dlp on PATH)
     --to remixes|pairs|DIR     where it lands (default ~/Music/house-refs/remixes)
     --name BODY                name it yourself; the body of a pair's name
@@ -443,6 +469,92 @@ what it did instead.
 
 Outputs per remix: the mp3 (320k) and wav, `*.session.json`, `*.plan.json`, and
 optionally `preview.html`.
+
+## Prepare a gig set
+
+One remix is a track. A gig is forty minutes of them that have to mix into each
+other, and a DJ does not want to beat-grid and cue eight files by hand an hour
+before doors. `fourfloor batch` renders a folder at one tempo and writes the
+files Rekordbox, Serato and everything else actually load.
+
+```bash
+# every track in ~/Music/gig-sources, all at 126 BPM, keys left alone
+fourfloor batch ~/Music/gig-sources -o ~/Music/friday --bpm 126 --set "Friday"
+
+# let the set flow: each track shifts up to ±2 semitones onto a key that mixes
+# with the one before it on the Camelot wheel
+fourfloor batch ~/Music/gig-sources -o ~/Music/friday --bpm 126 --set "Friday" \
+    --key auto --kit murph --length 5:00 --jobs 2
+
+# it stopped halfway. carry on.
+fourfloor batch ~/Music/gig-sources -o ~/Music/friday --bpm 126 --set "Friday" \
+    --key auto --kit murph --length 5:00 --resume
+
+# write ID3 tags and Serato cues into the mp3s as well
+fourfloor export ~/Music/friday --set "Friday" --format tags,serato
+```
+
+`--kit` and `--bass` are set-wide on purpose: one drum kit and one low-end
+policy across the night is what makes eight remixes sound like one record rather
+than eight. They mean exactly what they mean on `fourfloor remix` — see
+**Real drums** and **The low end** below. Everything else per track is decided
+from the track.
+
+The output folder then holds, per track, the mp3 + wav + `*.session.json` +
+`*.plan.json` you get from `fourfloor remix`, and for the set as a whole:
+
+| file | what it is |
+| --- | --- |
+| `rekordbox.xml` | a `DJ_PLAYLISTS` collection: tempo, key, a beat-grid anchor and hot cues A–H per track, all in a playlist named after the set |
+| `cues.csv` | every cue as `file, cue, seconds, bar, time, kind, hot_cue` — for Traktor, a spreadsheet, or a printout taped to the mixer |
+| `set.json` | one row per track: source, output, bpm, key, camelot, duration, cues, the key-flow decision, and any track that failed and why |
+
+`batch` never aborts on one bad track. A file the engine refuses is recorded in
+`set.json` with its error and the rest of the set still renders and still
+exports. `--resume` considers a track done only when both its mp3 and its
+session file are on disk, so an interrupted render is redone rather than
+shipped half-written.
+
+### Importing into Rekordbox
+
+1. **Rekordbox → Preferences → Advanced → Database → rekordbox xml.**
+2. Set *Imported Library* to the `rekordbox.xml` in your output folder, and
+   click **Load**. (The *Exported Library* field above it is the other
+   direction — leave it alone.)
+3. Close Preferences. In the tree on the left, **rekordbox xml** now has your
+   set's playlist under it. If you don't see the node: **View → Layout →
+   rekordbox xml**.
+4. Right-click the playlist → **Import Playlist** to copy the tracks and their
+   grids and cues into your own collection.
+
+The tracks carry their tempo (`AverageBpm`), key (`Tonality`), a single `TEMPO`
+beat-grid anchor at the first downbeat — which for a fourfloor remix is genuinely
+sample zero, not an estimate — a memory cue there, and hot cues A–H on intro,
+build 1, drop 1, breakdown, build 2, drop 2 and outro, coloured by section.
+
+`Location` is a percent-encoded `file://localhost/…` URL, so move the folder and
+the tracks will import red. Export after the files are where they are going to
+live, or re-run `fourfloor export <folder> --set "…"` from the new location.
+
+### Serato, and tags for everything else
+
+`--format tags` writes an ID3v2.3 tag onto the mp3 itself: `TIT2`, `TPE1`,
+`TBPM`, `TKEY`, `TLEN`, a `COMM` with the whole cue list, and the
+`TXXX:INITIALKEY` and `TXXX:CAMELOT` frames Rekordbox and Serato read when they
+ignore `TKEY`. The tag is written by hand rather than through ffmpeg
+`-metadata`, so nothing is re-encoded: only the tag at the head of the file is
+replaced and every MPEG frame after it is copied byte for byte. `export`
+re-checks that with ffprobe and refuses to report success if the duration,
+codec, sample rate or channel count moved.
+
+`--format serato` additionally writes hot cues into a `Serato Markers2` GEOB
+frame. **Serato has never published that format**; the encoder follows the
+community reverse-engineering and is round-tripped by the test suite, but it has
+not been confirmed against a real Serato DJ install. Load one track in Serato and
+look at the cue buttons before you rely on it at a gig. `cues.csv` is the
+fallback that always works. fourfloor does not write Serato's `Serato BeatGrid`
+frame at all — Serato will analyse the tempo itself, which on a remix built on an
+exact grid it gets right.
 
 ## Real drums
 
@@ -674,6 +786,19 @@ with no key and no network.
   2.0 GB from a 1-minute source (26 s), 2.9 GB from 3 minutes (44 s), 6.5 GB
   from 10 minutes (6 min). A normal song is comfortable on an 8 GB machine;
   trim a DJ set or a podcast before feeding it in.
+- **Serato cue writing is unverified.** The `Serato Markers2` format is not
+  published; fourfloor's encoder follows the community reverse-engineering and
+  round-trips through its own decoder in the test suite, but nobody has loaded
+  its output into Serato DJ. Rekordbox XML and `cues.csv` are the paths that are
+  known to work. There is no Traktor NML writer and no `Serato BeatGrid` frame.
+- **`--key auto` plans on Camelot adjacency, not on taste.** It keeps
+  consecutive tracks harmonically compatible and nothing more: it will not
+  build an arc, and it will not reorder the set — the order is the folder's
+  sort order, so number your filenames. When no shift within ±2 semitones
+  works, the track is left in its own key and flagged rather than forced.
+- **`--jobs` renders in separate processes**, so each one re-imports numpy and
+  torch and competes for the same BLAS threads. It is a clear win over a folder
+  of ten tracks and roughly a wash over two.
 
 ## Tests
 
