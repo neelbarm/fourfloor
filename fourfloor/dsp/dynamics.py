@@ -41,6 +41,25 @@ def apply_sidechain(x: np.ndarray, env: np.ndarray) -> np.ndarray:
     return (x * (e[:, None] if x.ndim == 2 else e)).astype(np.float32)
 
 
+def split_sidechain(x: np.ndarray, sr: int, env_low: np.ndarray,
+                    env_high: np.ndarray, crossover: float = 220.0) -> np.ndarray:
+    """Duck the bottom of a signal harder and faster than the top.
+
+    One envelope over the whole spectrum is a compromise: deep enough to clear
+    the kick's sub, and the vocal and the hats breathe in and out with it, which
+    is the "pumping wash" a listener hears as amateur. Splitting at ``crossover``
+    lets the low band take the deep, quick duck the kick actually needs while
+    the top keeps most of its level and only moves enough to read as groove.
+
+    The split uses complementary one-pole-ish Butterworth halves, so summing
+    them back with unity gain is close to flat.
+    """
+    low = FL.apply(x, "lowpass", sr, crossover, q=0.707, order=2)
+    high = x - low
+    return (apply_sidechain(low, env_low) + apply_sidechain(high, env_high)
+            ).astype(np.float32)
+
+
 def saturate(x: np.ndarray, drive: float = 1.4) -> np.ndarray:
     """Odd-harmonic soft clip. Normalised so unity input stays near unity out."""
     if drive <= 1.0:

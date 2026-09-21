@@ -34,6 +34,11 @@ class Stems:
     the engine plays it instead of inventing a bassline from a chord estimate,
     which is the difference between a remix of a song and a remix of a guess."""
     bass_name: str = "synth"
+    vocals: np.ndarray | None = None
+    """The voice on its own, when the separation can give one. Kept apart from
+    the rest of the harmonic bed so a drop can push everything else down and
+    out of the vocal's way instead of turning the whole bed down with it."""
+    other: np.ndarray | None = None
 
     @property
     def length(self) -> int:
@@ -100,17 +105,37 @@ KIT_SECTION: dict[str, tuple[float, float | None]] = {
     "intro_full": (0.78, 150.0),
     "build": (0.88, 120.0),
     "drop": (1.0, None),
-    "drop_var": (1.0, None),
+    # The second drop has to be the bigger one, or the track sags where it
+    # should peak: a decibel and a half of level, an extra offbeat hat layer
+    # and a lift at the top of the loop.
+    "drop_var": (1.18, None),
     "breakdown": (0.34, 3800.0),
     "outro": (0.72, 150.0),
+}
+
+#: What a drop does to everything that is not the voice: ``(level, high-pass)``
+#: for the separated ``other`` stem. A rap record's instrumental is a wall of
+#: mid-range, and under a house kit it is the thing the vocal has to fight --
+#: "the vocal drowns under mid-range clutter" was the listening note that put
+#: this here. In the drops it comes down seven decibels and loses everything
+#: below 250 Hz, which is the kick's and the bass's anyway. In the breakdown it
+#: comes all the way back, because there the instrumental *is* the section.
+OTHER_SECTION: dict[str, tuple[float, float | None]] = {
+    "intro": (0.70, 180.0),
+    "intro_full": (0.60, 200.0),
+    "build": (0.58, 220.0),
+    "drop": (0.42, 250.0),
+    "drop_var": (0.40, 260.0),
+    "breakdown": (1.0, None),
+    "outro": (0.78, 180.0),
 }
 
 #: How loud the synthesised kick sits under the loop's own kicks, per section.
 #: A sampled loop from a 2015 record often has less sub than a 2024 system
 #: expects; this puts it back without replacing the loop's character.
 KIT_REINFORCE: dict[str, float] = {
-    "intro": 0.26, "intro_full": 0.36, "build": 0.42,
-    "drop": 0.5, "drop_var": 0.5, "breakdown": 0.0, "outro": 0.34,
+    "intro": 0.34, "intro_full": 0.46, "build": 0.54,
+    "drop": 0.68, "drop_var": 0.72, "breakdown": 0.0, "outro": 0.42,
 }
 
 
@@ -182,6 +207,14 @@ class Engine:
         self.src_bar_dur = src_bar_dur
         self.warp = warp
         self.kit = DR.Kit(sr=sr, swing=swing)
+        # Not the kit's own kick. This one goes underneath a sampled loop that
+        # already has a beater click and a body of its own; what it is there to
+        # add is the sub a record cut in 2015 does not have, so it is tuned an
+        # octave down from the synthesised kit's, with almost no click and a
+        # short tail that clears before the offbeat.
+        self.sub_kick = DR.kick(sr, length=0.42, f_start=130.0, f_end=47.0,
+                                pitch_decay=0.036, amp_decay=0.115, click=0.10,
+                                drive=2.2)
         self.drum_kit = drum_kit
         self.kick_reinforce = kick_reinforce
         self.bass_mode = bass_mode
@@ -242,7 +275,7 @@ class Engine:
             self.source_spans.append((a, a + want))
             period = int(round(max(slot.source_bars, 1) * self.bar_dur * self.sr))
             start = int(round(slot.source_start * self.sr))
-            seg = _loop_to(self.stems.harmonic, start, want, period, self.sr)
+            seg = self._harmonic_span(slot, start, want, period)
             pseg = _loop_to(self.stems.percussive, start, want, period, self.sr)
             if bass is not None:
                 add_at(bass, _loop_to(self.stems.bass, start, want, period, self.sr),
@@ -281,6 +314,25 @@ class Engine:
         self.layers["source_drums"] = perc
         self.source_bass_bed = bass
         return harm, perc
+
+    def _harmonic_span(self, slot: Slot, start: int, want: int,
+                       period: int) -> np.ndarray:
+        """The source bed for one slot, with the instrumental put in its place.
+
+        When the separation gave a vocal and an "everything else" apart, a drop
+        takes seven decibels off the everything-else and high-passes it, so the
+        voice and the kit own the middle of the mix; a breakdown hands it all
+        back, because there the instrumental is the section. Without separate
+        stems this is the harmonic bed as it comes.
+        """
+        if self.stems.vocals is None or self.stems.other is None:
+            return _loop_to(self.stems.harmonic, start, want, period, self.sr)
+        voc = _loop_to(self.stems.vocals, start, want, period, self.sr)
+        oth = _loop_to(self.stems.other, start, want, period, self.sr)
+        gain, hp = OTHER_SECTION.get(slot.drum_pattern, (1.0, None))
+        if hp is not None:
+            oth = FL.apply(oth, "highpass", self.sr, hp, q=0.707, order=2)
+        return (voc + oth * gain).astype(np.float32)
 
     def _throw(self, seg: np.ndarray, slot: Slot) -> np.ndarray:
         """Reverb throw on the last bar of a section (a breakdown's exit gesture)."""
@@ -329,6 +381,8 @@ class Engine:
             seg = np.array(bed[a:b], dtype=np.float32, copy=True)
             if hp is not None:
                 seg = FL.apply(seg, "highpass", self.sr, hp, q=0.707, order=2)
+            if slot.drum_pattern == "drop_var":
+                seg = FL.apply(seg, "highshelf", self.sr, 7000.0, gain_db=2.5)
             edge = min(int(0.008 * self.sr), len(seg) // 8)
             if edge > 1:
                 seg[:edge] *= np.linspace(0.0, 1.0, edge)[:, None]
@@ -338,12 +392,14 @@ class Engine:
             reinforce = KIT_REINFORCE.get(slot.drum_pattern, 0.0) if self.kick_reinforce else 0.0
             for t in self._kick_times_in(kick_offsets, period, a, b):
                 if reinforce > 0:
-                    add_at(out, to_stereo(self.kit.samples["kick"]),
+                    add_at(out, to_stereo(self.sub_kick),
                            int(round(t * self.sr)), reinforce)
                 # A muted breakdown has no kick, so nothing should duck to one.
                 if gain > 0.4:
                     kick_times.append(t)
 
+            if slot.drum_pattern == "drop_var":
+                self._lift(out, slot)
             if slot.riser:
                 self._riser(out, slot)
             if slot.impact:
@@ -353,6 +409,23 @@ class Engine:
                 last_bar = (slot.start_bar + slot.bars - 1) * self.bar_dur
                 self._fill(out, last_bar, self.bar_dur / 16.0)
         return out, sorted(kick_times)
+
+    def _lift(self, out: np.ndarray, slot: Slot) -> None:
+        """An extra offbeat open hat and a shaker over a sampled loop.
+
+        A single eight-bar loop played twice is the same eight bars twice. The
+        cheapest honest way to make the second drop bigger is the way a DJ does
+        it on the fly: put another layer on top of it.
+        """
+        step = self.bar_dur / 16.0
+        for b in range(slot.bars):
+            bar_t = (slot.start_bar + b) * self.bar_dur
+            for k in (2, 6, 10, 14):
+                add_at(out, to_stereo(self.kit.samples["ohat"]),
+                       int(round((bar_t + k * step) * self.sr)), 0.16)
+            for k in range(1, 16, 4):
+                add_at(out, to_stereo(self.kit.samples["shaker"]),
+                       int(round((bar_t + k * step) * self.sr)), 0.09)
 
     def _kick_times_in(self, offsets: list[float], period: int,
                        a: int, b: int) -> list[float]:
@@ -491,9 +564,9 @@ class Engine:
                         continue
                 else:
                     carried = 0
-                while f0 > 90.0:
+                while f0 > 80.0:
                     f0 *= 0.5                # where a system can move air
-                while f0 < 35.0:
+                while f0 < 38.0:
                     f0 *= 2.0
                 if last_f0 <= 0.0 or abs(f0 - last_f0) > 0.5:
                     phase = 0.0              # a new note starts from zero
@@ -509,9 +582,13 @@ class Engine:
     def _sub_note(self, f0: float, n: int, phase: float = 0.0) -> np.ndarray:
         """One sub note: a sine with just enough harmonic to survive a laptop."""
         t = np.arange(n) / self.sr
+        # Almost pure. The listening note on the first attempt was that the low
+        # end was "hollow and mid-heavy": harmonics of a 50 Hz note land in the
+        # mid-range the vocal needs, and they are what makes a sub sound thin
+        # rather than deep. One octave up at a tenth of the level is enough to
+        # say where the note is on a laptop.
         sig = (np.sin(2.0 * np.pi * f0 * t + phase)
-               + 0.20 * np.sin(2.0 * np.pi * 2 * f0 * t + 2 * phase)
-               + 0.07 * np.sin(2.0 * np.pi * 3 * f0 * t + 3 * phase))
+               + 0.11 * np.sin(2.0 * np.pi * 2 * f0 * t + 2 * phase))
         env = np.ones(n, dtype=np.float32)
         attack = max(8, int(0.006 * self.sr))
         release = max(16, int(0.030 * self.sr))
@@ -618,23 +695,32 @@ class Engine:
         drums, kick_times = self.render_drums()
         bassline = self.render_bass(kick_times)
 
-        # sidechain: one envelope per depth value used by the plan
+        # Sidechain, split at 220 Hz. One envelope across the whole spectrum
+        # has to be deep enough to clear the kick's sub, and then the vocal and
+        # the hats breathe in and out with it -- the pumping wash that reads as
+        # amateur. The bottom takes the deep, quick duck the kick needs; the top
+        # moves just enough to read as groove.
+        beat_scale = (60.0 / self.plan.target_bpm) / 0.4839
+        kicks = np.asarray(kick_times)
+        low_env = DY.sidechain_envelope(self.n, self.sr, kicks, depth=0.82,
+                                        release=0.095 * beat_scale)
         depths = sorted({s.sidechain for s in self.plan.slots if s.sidechain > 0})
-        envs = {d: DY.sidechain_envelope(self.n, self.sr, np.asarray(kick_times), depth=d,
-                                         release=0.20 * (60.0 / self.plan.target_bpm) / 0.4839)
+        envs = {d: DY.sidechain_envelope(self.n, self.sr, kicks, depth=0.55 * d,
+                                         release=0.20 * beat_scale)
                 for d in depths}
         for slot in self.plan.slots:
             if slot.sidechain <= 0:
                 continue
             a = self._bar_sample(slot.start_bar)
             b = self._bar_sample(slot.end_bar)
-            env = envs[slot.sidechain][a:b]
-            harm[a:b] = DY.apply_sidechain(harm[a:b], env)
-            perc[a:b] = DY.apply_sidechain(perc[a:b], env)
+            harm[a:b] = DY.split_sidechain(harm[a:b], self.sr, low_env[a:b],
+                                           envs[slot.sidechain][a:b])
+            perc[a:b] = DY.split_sidechain(perc[a:b], self.sr, low_env[a:b],
+                                           envs[slot.sidechain][a:b])
 
         # the bass always ducks under the kick, hard
         bass_env = DY.sidechain_envelope(self.n, self.sr, np.asarray(kick_times),
-                                         depth=0.85, release=0.16)
+                                         depth=0.85, release=0.10 * beat_scale)
         bassline = DY.apply_sidechain(bassline, bass_env)
         # carve 40-90 Hz out of the source so the kick and bass own the sub
         harm = FL.apply(harm, "highpass", self.sr, 105.0, q=0.707, order=2)
@@ -646,7 +732,7 @@ class Engine:
         # isolated instrument, so it carries mud demucs would have given to
         # another stem and comes in lower.
         if self.bass_mode == "sub":
-            bass_gain = 0.55
+            bass_gain = 0.92
         elif self.source_bass_bed is not None and self.bass_mode == "source":
             bass_gain = {"demucs bass": 0.95, "hpss low band": 0.55}.get(
                 self.stems.bass_name, 0.55)

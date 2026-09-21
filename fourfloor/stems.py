@@ -111,7 +111,9 @@ def separate_demucs(x: np.ndarray, sr: int = SR, model: str = DEMUCS_MODEL,
         other = parts["other"] if parts["other"] is not None else zero
         drums = parts["drums"] if parts["drums"] is not None else zero
         bass = parts["bass"] if parts["bass"] is not None else zero
-        return Stems(harmonic=fit(vocals + other, n).astype(np.float32),
+        return Stems(vocals=fit(vocals, n).astype(np.float32),
+                     other=fit(other, n).astype(np.float32),
+                     harmonic=fit(vocals + other, n).astype(np.float32),
                      percussive=fit(drums, n).astype(np.float32),
                      source_name="demucs",
                      bass=fit(bass, n).astype(np.float32) if want_bass else None,
