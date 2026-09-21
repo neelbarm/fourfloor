@@ -88,6 +88,9 @@ def _parser() -> argparse.ArgumentParser:
     kb.add_argument("--json", action="store_true")
     kl = ksub.add_parser("list", help="show the kits you have built")
     kl.add_argument("--json", action="store_true")
+    kd = ksub.add_parser("default", help="pin the kit used when --kit is not given")
+    kd.add_argument("name", nargs="?", default=None,
+                    help="a kit name, or `newest` to go back to the most recently built")
 
     i = sub.add_parser("inspect", help="analyse a track and print a report")
     i.add_argument("input", nargs="?")
@@ -603,12 +606,29 @@ def cmd_kit(args, c: ui.C) -> int:
             return 0
         print(ui.header(c, "kits"))
         print()
-        for i, r in enumerate(rows):
-            tag = c.grey("  (default)") if i == 0 else ""
+        chosen = kit_mod.default_name()
+        how = "pinned" if kit_mod.pinned() else "newest"
+        for r in rows:
+            tag = c.grey(f"  (default, {how})") if r["name"] == chosen else ""
             print(ui.kv(c, r["name"], f"{c.grey(r.get('source', '?')[:44])}   "
                                       f"{r.get('source_bpm', 0):.2f} BPM   "
                                       f"{r.get('bars', 8)} bars{tag}"))
         print()
+        return 0
+
+    if args.kit_command == "default":
+        if args.name is None:
+            chosen = kit_mod.default_name()
+            how = "pinned" if kit_mod.pinned() else "newest built"
+            print(ui.kv(c, "default kit", f"{c.bold(chosen)}  {c.grey(how)}" if chosen
+                        else c.grey("none yet")))
+            return 0
+        try:
+            got = kit_mod.pin(args.name)
+        except (FileNotFoundError, ValueError) as exc:
+            raise CliError(f"no kit called {args.name!r}: {exc}") from exc
+        print(ui.kv(c, "default kit", c.bold(got) if got
+                    else c.grey("unpinned: the most recently built")))
         return 0
 
     if not args.json:

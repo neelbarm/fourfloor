@@ -329,16 +329,60 @@ def catalogue(home: str | Path | None = None) -> list[dict]:
     return sorted(out, key=lambda d: -d["mtime"])
 
 
+#: A one-line file in the kits folder naming the kit to use when none is asked
+#: for. Without it the default would be "whichever kit was built last", and
+#: `fourfloor refs add` builds a kit from every link: a night of pasted
+#: references would quietly change the drums under every remix after it.
+PIN_FILE = "default"
+
+
+def pinned(home: str | Path | None = None) -> str | None:
+    """The pinned default kit's name, if one is set and still exists."""
+    root = kits_home(home)
+    try:
+        name = (root / PIN_FILE).read_text(encoding="utf8").strip()
+    except OSError:
+        return None
+    if not name or not NAME_RE.match(name):
+        return None
+    folder = root / name
+    if (folder / "meta.json").is_file() and (folder / "loop.wav").is_file():
+        return name
+    return None
+
+
+def pin(name: str | None, home: str | Path | None = None) -> str | None:
+    """Pin ``name`` as the default kit; ``None`` or ``"newest"`` clears the pin."""
+    root = kits_home(home)
+    target = root / PIN_FILE
+    if name is None or name.lower() in ("newest", "auto", ""):
+        target.unlink(missing_ok=True)
+        return None
+    load(name, home)                       # raises if it is not a real kit
+    root.mkdir(parents=True, exist_ok=True)
+    target.write_text(name + "\n", encoding="utf8")
+    return name
+
+
+def default_name(home: str | Path | None = None) -> str | None:
+    """The kit a remix gets when none is named: the pin, else the newest."""
+    name = pinned(home)
+    if name:
+        return name
+    rows = catalogue(home)
+    return rows[0]["name"] if rows else None
+
+
 def resolve(name: str | None, home: str | Path | None = None) -> Kit | None:
-    """The kit a remix should use: the one asked for, the newest, or none.
+    """The kit a remix should use: the one asked for, the default, or none.
 
     ``"none"`` is how a caller says "use the synthesised kit even though real
-    ones exist"; anything else is a name; ``None`` means "the most recently
-    built, if there is one".
+    ones exist"; anything else is a name; ``None`` means the pinned default
+    (see :func:`pin`), or the most recently built when nothing is pinned.
     """
     if name and name.lower() == "none":
         return None
     if name:
         return load(name, home)
-    rows = catalogue(home)
-    return load(rows[0]["name"], home) if rows else None
+    chosen = default_name(home)
+    return load(chosen, home) if chosen else None

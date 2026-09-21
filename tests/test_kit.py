@@ -85,6 +85,38 @@ def test_resolve_picks_the_newest_a_name_or_nothing(built_kit) -> None:
         K.resolve("not-a-kit")
 
 
+def test_a_pinned_default_survives_newer_kits(built_kit) -> None:
+    """`refs add` builds a kit per link; the default must not drift with it."""
+    import shutil
+    import time
+
+    home = K.kits_home()
+    newer = home / "newerkit"
+    shutil.copytree(home / "testkit", newer)
+    meta = json.loads((newer / "meta.json").read_text())
+    meta["name"] = "newerkit"
+    time.sleep(0.02)
+    (newer / "meta.json").write_text(json.dumps(meta))
+    try:
+        assert K.resolve(None).name == "newerkit"          # unpinned: newest wins
+        assert K.pin("testkit") == "testkit"
+        assert K.pinned() == "testkit"
+        assert K.resolve(None).name == "testkit"           # pinned: it holds
+        assert K.resolve("newerkit").name == "newerkit"    # an explicit name still wins
+        assert K.resolve("none") is None
+        with pytest.raises(FileNotFoundError):
+            K.pin("not-a-kit")
+        assert K.pinned() == "testkit"                     # a bad pin changes nothing
+        (home / K.PIN_FILE).write_text("../../etc/passwd\n")
+        assert K.pinned() is None                          # a hostile pin is ignored
+        K.pin("testkit")
+        assert K.pin("newest") is None and K.pinned() is None
+        assert K.resolve(None).name == "newerkit"
+    finally:
+        (home / K.PIN_FILE).unlink(missing_ok=True)
+        shutil.rmtree(newer, ignore_errors=True)
+
+
 def test_a_bad_name_is_refused(house_clip, built_kit) -> None:
     with pytest.raises(ValueError):
         K.build(house_clip, name="../../etc/passwd")
