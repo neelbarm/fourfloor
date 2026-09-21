@@ -218,19 +218,51 @@ def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
     hook_at = wm.snap(hook.start)
     hook_bars = _span_bars(wm, hook)
 
+    # Every place in the song the hook happens, as bar lines, best first. A
+    # drop that runs out of song ahead of it needs somewhere *else* to go, and
+    # replaying the drop that just finished is the one answer that is wrong --
+    # "the entire second half is a verbatim loop of the first half" was the
+    # listening note that put this here.
+    hook_anchors: list[float] = []
+    for sec in sections:
+        if sec.label != hook.label:
+            continue
+        at = wm.snap(sec.start)
+        if all(abs(at - other) > bar_dur * 7.5 for other in hook_anchors):
+            hook_anchors.append(at)
+    if hook_at not in hook_anchors:
+        hook_anchors.insert(0, hook_at)
+
     # The breakdown has to be a different part of the song, and long enough to
     # be worth hearing: eight bars of real material, not a four-bar loop with a
     # filter on it. Prefer the quietest candidate that does not sit inside the
     # drop's span at all.
     def breakdown_pick() -> Section:
+        """Somewhere else in the song, and somewhere other than the intro.
+
+        The quietest section is usually the intro, and the intro slot has
+        already taken it -- so without this the breakdown replays the opening
+        bars and the track appears to start over in the middle.
+        """
+        intro_at = wm.snap(intro_src.start)
+        intro_end = intro_at + _span_bars(wm, intro_src) * bar_dur
+
+        def clear_of(sec: Section, a: float, b: float) -> bool:
+            at = wm.snap(sec.start)
+            return not _overlaps(at, at + _span_bars(wm, sec) * bar_dur, a, b)
+
         pool = [s for s in sections
                 if s.label in ("verse", "breakdown", "intro", "section")] or sections
-        ok = [s for s in pool
-              if _span_bars(wm, s) >= 8
-              and not _overlaps(wm.snap(s.start), wm.snap(s.start) + _span_bars(wm, s) * bar_dur,
-                                hook_at, hook_at + hook_bars * bar_dur)]
-        if ok:
-            return min(ok, key=lambda s: s.energy)
+        long_enough = [s for s in pool if _span_bars(wm, s) >= 8]
+        for rule in (
+            lambda s: clear_of(s, hook_at, hook_at + hook_bars * bar_dur)
+            and clear_of(s, intro_at, intro_end),
+            lambda s: clear_of(s, intro_at, intro_end),
+            lambda s: clear_of(s, hook_at, hook_at + hook_bars * bar_dur),
+        ):
+            ok = [s for s in long_enough if rule(s)]
+            if ok:
+                return min(ok, key=lambda s: s.energy)
         other = [s for s in sections if s is not hook and _span_bars(wm, s) >= 8]
         if other:
             return min(other, key=lambda s: s.energy)
@@ -240,23 +272,47 @@ def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
     quiet_at = wm.snap(quiet.start)
 
     def span(anchor: float, want_bars: int) -> tuple[float, int]:
-        """Clamp a wanted span to what the source actually holds after ``anchor``."""
+        """A contiguous span of ``want_bars``, backing up if the song runs out.
+
+        A slot fed fewer bars than it is long loops what it was given, and a
+        listener hears the song stop and start again in the middle of a drop.
+        When there is not enough song after the anchor, the anchor moves
+        earlier rather than the span repeating -- the same music, entered a few
+        bars sooner, which nobody notices.
+        """
         anchor = max(0.0, min(anchor, max(0.0, wm.duration - bar_dur)))
         anchor = round(anchor / bar_dur) * bar_dur
+        short = want_bars - _available_bars(wm, anchor)
+        if short > 0:
+            anchor = max(0.0, anchor - short * bar_dur)
+            anchor = round(anchor / bar_dur) * bar_dur
         return anchor, max(1, min(want_bars, _available_bars(wm, anchor)))
+
+    def fresh_drop(bars: int, used: list[float]) -> float:
+        """A hook anchor as far as possible from the ones already played."""
+        room = [a for a in hook_anchors if _available_bars(wm, a) >= bars]
+        pool = room or hook_anchors
+        unused = [a for a in pool
+                  if all(abs(a - u) > bar_dur * 7.5 for u in used)]
+        if unused:
+            return max(unused, key=lambda a: min(abs(a - u) for u in used))
+        return pool[0]
 
     slots: list[Slot] = []
     bar = 0
     drop_i = 0
     drop_cursor = hook_at          # walks forward through the song across drops
+    used_drops: list[float] = []
     for kind, bars in shape:
         if kind == "drop":
             if drop_i > 0 and _available_bars(wm, drop_cursor) >= bars:
                 src_at = drop_cursor
+            elif drop_i > 0:
+                src_at = fresh_drop(bars, used_drops)
             else:
                 src_at = hook_at
-                drop_cursor = hook_at
             src_at, src_bars = span(src_at, bars)
+            used_drops.append(src_at)
             drop_cursor = src_at + src_bars * bar_dur
             pattern = "drop" if drop_i == 0 else "drop_var"
             s = Slot(kind=kind, index=len(slots), start_bar=bar, bars=bars,
