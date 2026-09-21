@@ -36,6 +36,7 @@ from __future__ import annotations
 import numpy as np
 from scipy import signal as sps
 
+from ..dsp import filters as FL
 from . import features as F
 
 #: Acceptance thresholds. These are the numbers a render has to beat.
@@ -386,10 +387,15 @@ def _rhythm_onsets(x: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray]:
     full = float(np.sqrt(np.mean(np.square(mono.astype(np.float64)))))
     if full <= 1e-9:
         return np.zeros(0), np.zeros(0)
-    low = F.band_energy(mono, sr, 20.0, 200.0, hop=512)
-    wide = F.band_energy(mono, sr, 20.0, 16000.0, hop=512)
-    bassy = float(np.sum(low ** 2) / max(float(np.sum(wide ** 2)), 1e-12))
-    if bassy < 0.7:
+    # "Is this a bass part" has to be asked as a ratio between two bands, not
+    # as a share of total energy: music is 1/f, so a full-range bed with its
+    # bottom rolled off at 105 Hz still holds most of its energy below 200 and
+    # would be measured with a detector that only hears kicks.
+    low = FL.apply(mono, "lowpass", sr, 200.0, q=0.707, order=2)
+    high = FL.apply(mono, "highpass", sr, 200.0, q=0.707, order=2)
+    low_db = 20.0 * np.log10(max(float(np.sqrt(np.mean(low ** 2))), 1e-9))
+    high_db = 20.0 * np.log10(max(float(np.sqrt(np.mean(high ** 2))), 1e-9))
+    if low_db - high_db < 12.0:
         return onset_times(x, sr)
     kick, fps = F.kick_envelope(mono, sr, lo=30.0, hi=160.0)
     if not len(kick) or kick.max() <= 0:
