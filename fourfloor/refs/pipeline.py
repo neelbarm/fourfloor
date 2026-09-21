@@ -444,6 +444,11 @@ def accept(slug: str, opts: Options | None = None, on=None,
         cand = search.Candidate(url=link, title=got.title or entry.original_title,
                                 uploader=got.uploader, duration=got.duration,
                                 score=entry.score)
+        if match.verdict != "match":
+            # filed anyway -- a person looked at it and said yes, which outranks
+            # the threshold -- but the sidecar keeps the number it really scored
+            note("warn", f"it still measures {match.score:.3f} "
+                         f"({match.verdict}); filing it because you said so")
         _file_pair(entry, match, cand, got.path, orig_fp, remix_fp, opts, note)
         entry.verdict = "accepted by hand"
     finally:
@@ -528,10 +533,19 @@ def learn(opts: Options | None = None, on=None, repo_out: str | Path | None = No
     private = style.to_dict()
     private["vocal"] = table
     private["n_pairs"] = table["n_pairs"]
-    ratios = [float(r["tempo_ratio"]) for r in rows if r.get("tempo_ratio")]
-    if ratios:
+    matches = [s.get("match") or {} for s in sidecars(opts)]
+    if matches:
         import numpy as np
-        private["tempo_ratio"] = round(float(np.median(ratios)), 4)
+
+        def med(rows_: list, key: str) -> float | None:
+            values = [float(r[key]) for r in rows_ if r.get(key) is not None]
+            return round(float(np.median(values)), 4) if values else None
+
+        # what the remixers did to the record, across every verified pair
+        private["tempo_ratio"] = med(matches, "tempo_ratio")
+        private["beat_multiple"] = med(matches, "beat_relation")
+        private["semitone_shift"] = med(matches, "semitones")
+        private["match_score"] = med(matches, "score")
     home_path = Path(home_out) if home_out else learned.style_path(opts.kit_home)
     home_path.parent.mkdir(parents=True, exist_ok=True)
     home_path.write_text(json.dumps(private, indent=2) + "\n", encoding="utf8")
@@ -544,17 +558,12 @@ def learn(opts: Options | None = None, on=None, repo_out: str | Path | None = No
         public.pop("per_track", None)
         # the table's cells are counts and medians; the slugs never travel
         public["vocal"] = {k: v for k, v in table.items()}
+        # written, not merged: a stale key from a previous run describes a
+        # different set of references, and sitting next to fresh ones it reads
+        # as though it described these
         repo_path = Path(repo_out)
-        merged = {}
-        if repo_path.is_file():
-            try:
-                merged = json.loads(repo_path.read_text(encoding="utf8"))
-            except (OSError, ValueError):
-                merged = {}
-        merged.update(public)
         repo_path.parent.mkdir(parents=True, exist_ok=True)
-        repo_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf8")
+        repo_path.write_text(json.dumps(public, indent=2) + "\n", encoding="utf8")
         note("ok", f"anonymised aggregate: {repo_path}")
-        public = merged
     return {"style": private, "public": public, "table": table,
             "n_files": len(files), "n_pairs": table["n_pairs"]}

@@ -30,9 +30,11 @@ def suggest_house_tempo(bpm: float, learned: float | None = None) -> float:
     folder of references, the tempo *those* records sit at is a better answer
     than 124 for the person who chose them -- a DJ whose set runs at 130 does
     not want 124 -- so it becomes both the tie-break centre and a candidate in
-    its own right. Passing a number overrides the file; passing nothing reads
-    ``~/.fourfloor/style.json`` if it is there, and nothing changes if it is
-    not.
+    its own right. In practice that means the learned tempo wins unless another
+    lands materially less stretch away, which is the intent: a set wants one
+    tempo, and ``--bpm`` is there for when this one is wrong. Passing a number
+    overrides the file; passing nothing reads ``~/.fourfloor/style.json`` if it
+    is there, and nothing changes if it is not.
     """
     if learned is None:
         from ..refs.learned import learned_bpm

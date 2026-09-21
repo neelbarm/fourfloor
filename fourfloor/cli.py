@@ -117,6 +117,7 @@ def _parser() -> argparse.ArgumentParser:
         p.add_argument("--refs", default=None, metavar="DIR",
                        help="reference folder (default ~/Music/house-refs)")
         p.add_argument("--json", action="store_true")
+        p.add_argument("-q", "--quiet", action="store_true")
         return p
 
     ra = _refs_common(rsub.add_parser(
@@ -137,7 +138,6 @@ def _parser() -> argparse.ArgumentParser:
                          "(default 2)")
     ra.add_argument("--force", action="store_true",
                     help="re-do links the ledger has already settled")
-    ra.add_argument("-q", "--quiet", action="store_true")
 
     _refs_common(rsub.add_parser("list", help="every reference and what is known about it"))
     _refs_common(rsub.add_parser("review", help="the pairs that need a person to decide"))

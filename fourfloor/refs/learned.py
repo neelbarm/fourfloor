@@ -260,12 +260,21 @@ def table(rows: list[dict]) -> dict:
               if r.get("treatment") == "continuous"]
     chopped = [float(r.get("straight") or 0.0) for r in rows
                if r.get("treatment") == "chopped"]
-    if played:
-        # just under the loosest voice anybody still played straight through,
-        # and never below the highest voice anybody chopped
-        lock = min(played) - 0.01
-        if chopped:
-            lock = max(lock, min(max(chopped) + 0.01, min(played) - 0.005))
+    # A threshold is only exported when the two groups actually separate. If
+    # the loosest voice somebody played straight sits *below* the tightest one
+    # somebody chopped, then on this evidence the straight fit does not predict
+    # the treatment, and the honest answer is that there is nothing to learn
+    # yet -- not a number halfway through the overlap.
+    if played and (not chopped or min(played) > max(chopped)):
+        floor = max(chopped) if chopped else min(played) - 0.04
+        lock = 0.5 * (min(played) + floor)
         out["straight_lock"] = round(float(min(0.9, max(0.5, lock))), 3)
+        out["separates"] = True
+    elif played:
+        out["straight_lock"] = None
+        out["separates"] = False
+        out["note"] = ("the straight-lattice fit does not separate the two "
+                       "treatments in these pairs, so --vocal auto keeps its "
+                       "own threshold")
     out["triplet_edge"] = TRIPLET_EDGE
     return out

@@ -384,7 +384,23 @@ def test_the_table_counts_the_cells_and_sets_the_threshold() -> None:
     assert table["n_pairs"] == 3
     assert table["cells"]["straight/continuous"]["n"] == 2
     assert table["cells"]["triplet/chopped"]["n"] == 1
-    assert 0.5 <= table["straight_lock"] < 0.74    # under the loosest one played straight
+    assert 0.52 <= table["straight_lock"] < 0.74   # between the two groups
+    assert table["separates"] is True
+
+
+def test_a_table_whose_groups_overlap_teaches_nothing() -> None:
+    """Two remixers chopped tighter voices than a third played straight: on
+    this evidence the fit does not predict the treatment, and the honest
+    answer is no threshold rather than one drawn through the overlap."""
+    rows = [
+        {"original_lattice": "straight", "treatment": "continuous", "straight": 0.50},
+        {"original_lattice": "straight", "treatment": "chopped", "straight": 0.57},
+        {"original_lattice": "straight", "treatment": "chopped", "straight": 0.47},
+    ]
+    table = learned.table(rows)
+    assert table["straight_lock"] is None
+    assert table["separates"] is False
+    assert "does not separate" in table["note"]
 
 
 # ---------------------------------------------------------------------------

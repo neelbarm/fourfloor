@@ -476,6 +476,21 @@ fourfloor inspect SONG [--json]      tempo, key, structure timeline, house targe
 fourfloor learn FOLDER -o s.json     derive a style profile from the audio files
                                      directly inside FOLDER (not recursive;
                                      --anonymous omits per-file rows)
+
+fourfloor refs add URL [URL …]       ingest remix links as verified pairs
+    --file links.txt           read the links from a file, one per line
+    --dry-run                  parse and search only; download nothing
+    --no-kit                   do not sample a drum kit from each remix
+    --no-demucs                verify on whole-mix chroma, not separated vocals
+    --candidates 2             how many ranked candidates to download and hear
+    --force                    re-do links the ledger has already settled
+    --refs DIR                 a reference folder other than ~/Music/house-refs
+fourfloor refs list [--json]         every reference and what is known about it
+fourfloor refs review [--json]       the pairs waiting on a decision
+fourfloor refs accept SLUG [--url L] keep a reviewed pair (or a link you pick)
+fourfloor refs reject SLUG           drop its candidate; keep the remix alone
+fourfloor refs learn                 re-learn the profile from pairs + remixes
+    --repo styles/pairs.json   where the anonymised aggregate goes ('none' to skip)
 fourfloor preview OUT.mp3            write preview.html next to a finished remix
 
 fourfloor serve                      run the local web app (see "The app" above)
@@ -849,6 +864,152 @@ appended to that folder's `feedback.json` as markers authored `gemini`, in the
 same schema the web app writes, so a model's note and a human's note sit in one
 list. Re-running replaces its own markers and leaves everyone else's alone.
 
+## Teach it your taste
+
+You already have a folder of remixes you like. Every one of them is half of a
+lesson — the other half is the record it was made from, and the difference
+between the two *is* the producer's taste. `fourfloor refs` takes the links,
+finds the originals, proves they are the originals, files the pairs, samples a
+drum kit out of every remix, and folds what it measured into the defaults.
+
+```bash
+# paste as many as you like, in one go
+fourfloor refs add "<remix link>" "<remix link>" "<remix link>" …
+
+# …or keep them in a file, one link per line (# comments are ignored)
+fourfloor refs add --file links.txt
+
+# what would it do? parse the titles, search, rank — download nothing
+fourfloor refs add --file links.txt --dry-run
+
+fourfloor refs list                 # every reference and what is known about it
+fourfloor refs review               # the undecided ones, with the candidate links
+fourfloor refs accept <slug>        # …keep that candidate
+fourfloor refs reject <slug>        # …or drop it; the remix stays as a reference
+fourfloor refs learn                # fold it all into ~/.fourfloor/style.json
+```
+
+A link can also be a file on this machine — `fourfloor refs add ~/Desktop/*.mp3`
+works on the folder of edits you already downloaded, and a SoundCloud set is
+expanded into its tracks.
+
+Per link that costs: one metadata probe, one to four searches, one or two
+candidate downloads, two Demucs runs on 75-second and 180-second excerpts, and a
+kit build. Call it two minutes. Forty links is an hour and a bit, which is why
+it is **resumable**: a ledger in the reference folder is rewritten after every
+step, re-running the same command skips whatever finished, and a link that fails
+leaves one sentence behind and does not stop the next one.
+
+| flag | what it does |
+| --- | --- |
+| `--dry-run` | parse and search only; nothing is downloaded or written |
+| `--no-kit` | skip the drum-kit build (it is the slowest part after Demucs) |
+| `--no-demucs` | verify on whole-mix chroma instead of separated vocals — faster, and marked lower confidence |
+| `--candidates N` | how many ranked candidates to actually download and listen to (default 2) |
+| `--force` | re-do links the ledger has already settled |
+| `--refs DIR` | a reference folder other than `~/Music/house-refs` |
+
+### Reading the title
+
+`Don Toliver - E85 (JLOOD & Kosuk Extended Remix) [FREE DOWNLOAD] | KLICKAUD` has
+three facts in it and a layer of advertising around them. The parser strips the
+download bait, the site names, the label and premiere prefixes and the hashtags;
+reads `(… Remix)`, `[… Edit]` and `- X Bootleg` as credits and `(Extended Mix)`
+as a version tag that names nobody; keeps `feat.` out of the search; and, on
+SoundCloud, reads the uploader as the remixer when the title says a remix was
+made and does not say by whom.
+
+When there are no brackets at all — which is what a downloaded filename looks
+like — the cut is a guess, and the parser says so: `The Sweet Escape BOSEP Remix`
+splits correctly, `E85 JLOOD Kosuk Extended Remix` does not, and the queries it
+generates include the shorter prefixes precisely because it might not have. The
+search and the verification are what settle it.
+
+### Proving it is the original
+
+This is the part that has to be right. If the wrong record is filed as the
+original of a remix, the tool then *learns* from the difference between two
+unrelated songs.
+
+A remix shares almost nothing measurable with its source: different drums,
+different arrangement, 10-20% different tempo, possibly a different key, and a
+replaced bottom end. What survives is the voice. So both files are run through
+Demucs, and the comparison is made on vocal **chroma** — the twelve pitch
+classes, which survive everything a remixer does except pitch.
+
+- **Excerpts, not whole files.** 75 seconds of the remix's most vocal-rich
+  stretch against 180 seconds of the original. The stems are held in memory,
+  measured, and dropped; what is cached is a 30 KB feature file.
+- **Tempo normalised.** Both BPMs are detected and the remix's time base is
+  scaled by the ratio — and by twice and half it, because beat trackers are
+  octave-ambiguous — then refined a few percent either way.
+- **Pitch searched.** The chroma is rotated through −3…+3 semitones, and the
+  rotation that wins is reported as the shift.
+- **Aligned in pieces.** Subsequence DTW with a free start and end, over
+  20-second pieces of the query rather than the whole of it, scored as the mean
+  of the best 60% of them. One long alignment assumes the remix plays the vocal
+  in order, and a remixer chopping a hook breaks exactly that assumption.
+
+Two numbers come out: the **score** (mean cosine similarity along the winning
+path) and the **margin** (how far that winner stands above the median of all 21
+tempo-and-pitch trials on the same two files). The margin is what catches the
+near miss — every alignment of two unrelated songs is equally mediocre, so the
+best one barely clears its own field.
+
+**Calibration.** Five originals against six remixes — thirty comparisons, five
+of them true pairs, twenty-five known-false:
+
+| | score | margin |
+| --- | --- | --- |
+| 4 true pairs | 0.728 – 0.777 | 0.322 – 0.403 |
+| 25 false pairs | 0.346 – 0.459 | 0.019 – 0.106 |
+
+Accept sits in that gap at **0.52 with a margin of 0.15**; between **0.46** and
+accept it is marked `needs_review` and waits for a person; below that it is
+rejected and the next candidate is tried. The fifth true pair is the honest
+caveat and is discussed under [limitations](#honest-limitations).
+
+### What it learns
+
+`fourfloor refs learn` re-measures every reference and writes two files. The
+private one, `~/.fourfloor/style.json`, is what the engine picks up as its
+default style when it exists. The shared one, `styles/pairs.json`, is the same
+aggregate with every per-file row stripped out.
+
+Alongside the usual style numbers it tabulates the decision this project keeps
+getting asked about — what a remixer does with a voice:
+
+| measured on the original | measured on the remix |
+| --- | --- |
+| does the vocal sit on a straight 16th lattice or a triplet one, corrected for the fact that a triplet grid simply covers more of the timeline | continuous or chopped, from the ratio of the two median phrase lengths and how long a remix phrase is in beats |
+| how much of the time it is singing | how much of that singing survived, and at what tempo ratio |
+
+Two call sites read the result when it is there, and behave exactly as before
+when it is not:
+
+- **`--vocal auto`** takes its straight-lock threshold from the pairs instead of
+  from the two records it was originally calibrated on;
+- **`suggest_house_tempo`** treats the tempo the references actually sit at as
+  both the tie-break centre and a candidate in its own right — a DJ whose
+  references run at 130 should not be handed 124.
+
+Neither moves on fewer than three pairs.
+
+### The privacy rule
+
+Nothing you feed it goes into this repository, ever. Remixes, originals, kits,
+the ledger and the per-pair JSON all live under `~/Music/house-refs` and
+`~/.fourfloor`. The only thing that can be committed is `styles/pairs.json`,
+which holds aggregate numbers with no filenames, no titles and no links in it —
+and there is a test asserting exactly that.
+
+> **A plain note about YouTube.** Downloading from YouTube is against its terms
+> of service, and `refs` both searches it and downloads from it. This exists for
+> private, local analysis of records you already have the right to use. Nothing
+> fetched is uploaded, shared or redistributed, and none of it is ever committed.
+> Search politely: the ingest is sequential with a pause between requests, which
+> it is on purpose.
+
 ## Style learning
 
 `fourfloor learn` measures a folder of house remixes you already like and turns
@@ -867,27 +1028,26 @@ aggregate numbers only, no filenames and no audio.
 
 **Pairs teach it more than references do.** A folder of finished house records
 shows you what one looks like; a folder of *pairs* shows you what a remixer
-**changed**. Name two files `<name>.original.mp3` and `<name>.remix.mp3`, in the
-folder you are learning from or in a `pairs/` subfolder of it (which is exactly
-where `fourfloor fetch --original … --remix …` puts them), and `learn` measures
-the difference as well as the remix:
+**changed**. That is what [`fourfloor refs`](#teach-it-your-taste) builds, and
+`fourfloor refs learn` is the command that measures it:
 
 | learned from a pair | what it answers |
 | --- | --- |
-| `tempo_ratio`, `beat_multiple`, `stretch_ratio` | which tempo they landed on, and whether they read the source straight, half- or double-time |
-| `semitone_shift` | whether the key moved at all, by chroma-rotation correlation rather than by trusting two independent key detections |
-| `vocal_band_margin_db` | how far the harmonic content sits over the drums in 300 Hz – 4 kHz, the band that decides whether a vocal survives |
-| `presence_margin_db` | the same comparison at 2 – 5 kHz, where consonants and hi-hats fight |
+| `tempo_ratio`, `beat_multiple` | which tempo they landed on, and whether they read the source straight, half- or double-time |
+| `semitone_shift` | whether the key moved at all, by chroma rotation rather than by trusting two independent key detections |
+| `vocal.cells` | the original's vocal lattice against what the remixer did with it, and how much of the singing survived |
 
 ```bash
-fourfloor learn ~/Music/house-refs -o styles/pairs.json --anonymous
+fourfloor refs learn                  # -> ~/.fourfloor/style.json + styles/pairs.json
 ```
 
-`styles/pairs.json` is that profile for the one pair available here. It reads
-0.8905 (146 → 130 BPM, straight, no half-time trick) and a semitone shift of
-zero: the remix was time-stretched without being repitched, which is why
-fourfloor stretches with a phase vocoder and treats a key change as a separate,
-deliberate step.
+`styles/pairs.json` is that profile for the references on the machine this was
+written on: three verified pairs and five remixes, a working tempo of 131.98
+BPM, a median stretch of 1.068 (120 → 128 BPM) and a semitone shift of zero
+across all three — every one of those remixers time-stretched without
+repitching, which is why fourfloor stretches with a phase vocoder and treats a
+key change as a separate, deliberate step. Aggregate numbers only: no
+filenames, no titles, no links.
 
 ## Optional: demucs stems
 
@@ -915,6 +1075,24 @@ with no key and no network.
 
 ## Honest limitations
 
+- **A chopped vocal can defeat the verifier.** `refs` proves a pair by
+  aligning vocal chroma, and subsequence DTW assumes the remix plays the vocal
+  in the order the record sings it. Aligning in 20-second pieces buys most of
+  the way back, but a bootleg that cuts the hook into 0.29-second stabs — one of
+  the four end-to-end runs, a *Stay Fly* edit — scores 0.41 against the record it
+  is unmistakably made of, inside the range unrelated pairs occupy. There is no
+  threshold that takes it without taking false pairs too, so it is rejected, the
+  remix is kept as a standalone reference with its kit, and `refs review` is
+  where you would put it back by hand.
+- **The search only looks at YouTube**, five results a query, up to four
+  queries. A record that is not on YouTube under a searchable name will not be
+  found, and an obscure edit of an obscure track is the likely miss. Nothing
+  downstream pretends otherwise: no candidate means the remix is filed on its
+  own rather than paired with a guess.
+- **The pair measurements are excerpt-scoped.** What a remixer did with the
+  vocal is measured on the 75 and 180 seconds that were compared, not across
+  both whole records, and `vocal_kept` is a ratio of duty cycles over those
+  excerpts rather than a map of the original's timeline.
 - **The critic scores a render, not a song.** Its similarity anchor is "does
   this sound like these six records", so a good remix in a subgenre the
   reference folder does not contain will score low and be right to. Give it
@@ -998,7 +1176,7 @@ with no key and no network.
 ## Tests
 
 ```bash
-make test     # 295 tests, ~6 min
+make test     # 799 tests, ~7 min
 ```
 
 The longest-running of them are full remixes: the alignment gate, the kit and the
@@ -1036,6 +1214,21 @@ read, and the size cap), the id and path rules, the job queue and its replayable
 event stream, and an end-to-end HTTP test that uploads the fixture, starts a
 remix at 124, consumes the SSE stream to completion and downloads the mp3 —
 asserting its duration against the session file the DJ handoff promises.
+
+Reference ingest is tested with the network, Demucs and the kit builder all
+stood in for: the title parser against 49 real-world-style titles (including the
+five filenames that started this), the candidate ranking against every penalty
+word it knows, the ledger against a half-written file and a crash mid-link, and
+the whole `refs add` run against a fixture copied in as if it had been
+downloaded — filed pair, sidecar, resume, one bad link out of three, no
+candidate at all, a score between the thresholds, accept, reject.
+
+Verification is tested on synthetic music: a melody of harmonic tones, and a
+"remix" of it made by running that melody through this project's own phase
+vocoder at a different tempo, resampling it to a different pitch and laying
+drums over the top. It has to match its source far above the accept threshold
+and report back the tempo ratio and the semitone shift that were applied; a
+different melody in a different key has to be rejected.
 
 Link fetching is tested against a fake `yt-dlp` on `PATH` that prints the same
 progress lines the real one does, so playlists, pair naming, collisions,

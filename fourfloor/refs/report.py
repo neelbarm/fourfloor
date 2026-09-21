@@ -174,5 +174,7 @@ def table_report(result: dict, c: ui.C) -> str:
     if table.get("straight_lock") is not None:
         lines.append(ui.kv(c, "straight lock", f"{table['straight_lock']:.3f}   "
                                                f"{c.grey('--vocal auto plays a voice straight above this')}"))
+    elif table.get("note"):
+        lines.append(ui.warn(c, table["note"]))
     lines.append("")
     return "\n".join(lines)

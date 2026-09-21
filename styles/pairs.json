@@ -1,22 +1,44 @@
 {
-  "bpm": 130.01,
-  "bpm_spread": 0.0,
-  "swing": 0.1791,
+  "bpm": 131.98,
+  "bpm_spread": 1.69,
+  "swing": -0.0269,
   "intro_bars": 8,
   "breakdown_ratio": 1.0,
   "breakdown_bars": 16,
   "spectral_tilt": -15.002,
-  "brightness_hz": 943.4,
-  "rms_db": -9.04,
-  "peak_db": 3.78,
-  "kick_density": 0.559,
-  "length": 225.2,
-  "n_refs": 1,
-  "n_pairs": 1,
-  "tempo_ratio": 0.8905,
+  "brightness_hz": 829.2,
+  "rms_db": -10.56,
+  "peak_db": 2.33,
+  "kick_density": 0.587,
+  "length": 232.7,
+  "n_refs": 5,
+  "schema": 1,
+  "vocal": {
+    "n_pairs": 3,
+    "cells": {
+      "straight/chopped": {
+        "n": 2,
+        "tempo_ratio": 1.0318,
+        "vocal_kept": 1.035,
+        "straight_fit": 0.52,
+        "bpm": 129.84
+      },
+      "straight/continuous": {
+        "n": 1,
+        "tempo_ratio": 1.1019,
+        "vocal_kept": 1.186,
+        "straight_fit": 0.502,
+        "bpm": 132.41
+      }
+    },
+    "straight_lock": null,
+    "separates": false,
+    "note": "the straight-lattice fit does not separate the two treatments in these pairs, so --vocal auto keeps its own threshold",
+    "triplet_edge": 0.06
+  },
+  "n_pairs": 3,
+  "tempo_ratio": 1.0684,
   "beat_multiple": 1.0,
   "semitone_shift": 0.0,
-  "vocal_band_margin_db": -0.48,
-  "presence_margin_db": -5.26,
-  "schema": 1
+  "match_score": 0.7457
 }
