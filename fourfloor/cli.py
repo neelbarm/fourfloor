@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import ui
 from .arrange import FORMS, fmt_time
+from .critic import command as critic_command
 from .style import Style
 
 VERSION = "0.1.0"
@@ -159,6 +160,8 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--json", action="store_true",
                    help="print set.json instead of the report")
     b.add_argument("-q", "--quiet", action="store_true")
+
+    critic_command.add_parser(sub)
 
     s = sub.add_parser("serve", help="run the local web app: drop a song in a browser")
     s.add_argument("--port", type=int, default=4444, help="port to listen on (default 4444)")
@@ -716,7 +719,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     handlers = {"remix": cmd_remix, "inspect": cmd_inspect, "learn": cmd_learn,
                 "preview": cmd_preview, "serve": cmd_serve, "fetch": cmd_fetch,
-                "kit": cmd_kit, "export": cmd_export, "batch": cmd_batch}
+                "kit": cmd_kit, "export": cmd_export, "batch": cmd_batch,
+                "critic": critic_command.run}
     try:
         return handlers[args.command](args, c)
     except KeyboardInterrupt:
