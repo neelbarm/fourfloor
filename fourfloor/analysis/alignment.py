@@ -45,6 +45,13 @@ MAX_MEDIAN_MS = 12.0
 MAX_P90_MS = 25.0
 MIN_ON_GRID = 0.85
 
+#: How far a *sampled* kit may read off its own grid before something is
+#: wrong. A synthesised kit is placed arithmetically and has to be within a
+#: couple of milliseconds; a loop cut off a record carries the push and drag
+#: that makes it sound played, and the bus also carries the risers, impacts and
+#: fills the arrangement adds on top.
+SAMPLED_KIT_MS = 18.0
+
 #: How much louder the offbeat has to be than the beat before a layer counts as
 #: playing half a beat out. House offbeat hats routinely beat the kick by a
 #: fifth in an onset envelope without anything being wrong.
@@ -337,7 +344,7 @@ def alignment_report(rendered_audio: np.ndarray, sr: int, bpm: float,
         problems.append(f"the source's bar one lands on the grid's beat "
                         f"{judged['bar_phase'] + 1}")
     if "kit" in out:
-        limit = 18.0 if kit_is_sampled else 6.0
+        limit = SAMPLED_KIT_MS if kit_is_sampled else 6.0
         if out["kit"]["median_ms"] > limit:
             problems.append(
                 f"the sampled loop is {out['kit']['median_ms']:.1f} ms off the grid "

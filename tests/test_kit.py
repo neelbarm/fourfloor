@@ -99,8 +99,12 @@ def test_a_remix_plays_the_kit_and_stays_on_the_grid(built_kit, trap_clip,
     assert res.kit_name == "testkit"
     rep = A.alignment_report(res.audio, res.sr, BPM, 0.0,
                              source_stem=res.layers["source_perc"],
-                             kit_layer=res.layers["kit"], spans=res.source_spans)
-    assert rep["kit"]["median_ms"] < 10.0, rep["kit"]
+                             kit_layer=res.layers["kit"], spans=res.source_spans,
+                             kit_is_sampled=True)
+    assert rep["problems"] == [], rep
+    # The gate's own limit for a loop cut off a record, not a second number
+    # kept in a test to drift away from it.
+    assert rep["kit"]["median_ms"] < A.SAMPLED_KIT_MS, rep["kit"]
     # The source's own drums have to be *gone*, not merely turned down: a
     # second drummer playing the source's rhythm under a record's is the
     # other thing a listener hears as two rhythms at once. Measured, because
