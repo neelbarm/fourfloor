@@ -13,10 +13,11 @@ the translator between that file and the three things a DJ actually loads:
 * **cues.csv** -- a plain sheet for anything else (Traktor, a spreadsheet, a
   printout taped to the mixer).
 
-Everything here is stdlib only, and the ID3 writer only ever replaces the tag
-at the head of the file: the MPEG frames are copied through byte for byte, so
-the audio cannot be damaged by tagging. :func:`probe` re-checks that with
-ffprobe anyway.
+Every format here is written with the standard library alone -- there is no
+mutagen in this project and ffmpeg ``-metadata`` would remux the file -- and the
+ID3 writer only ever replaces the tag at the head of the mp3: the MPEG frames
+are copied through byte for byte, so the audio cannot be damaged by tagging.
+:func:`probe` re-checks that with ffprobe anyway.
 
 Serato's hot cues live in a ``Serato Markers2`` GEOB frame whose format is not
 published by Serato; the encoder here follows the community reverse-engineering
@@ -340,6 +341,7 @@ def rekordbox_xml(tracks: list[Track], set_name: str, version: str = "0.1.0") ->
 
 def write_rekordbox(tracks: list[Track], out_dir: str | Path, set_name: str,
                     filename: str = "rekordbox.xml") -> Path:
+    """Write the collection to ``<out_dir>/rekordbox.xml`` and return the path."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     path = out / filename
@@ -376,6 +378,7 @@ def cues_csv(tracks: list[Track]) -> str:
 
 def write_csv(tracks: list[Track], out_dir: str | Path,
               filename: str = "cues.csv") -> Path:
+    """Write the cue sheet to ``<out_dir>/cues.csv`` and return the path."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     path = out / filename
@@ -441,11 +444,13 @@ def _frame(frame_id: str, body: bytes) -> bytes:
 
 
 def text_frame(frame_id: str, value: str) -> bytes:
+    """A ``T***`` text frame -- TIT2, TBPM, TKEY and the rest."""
     enc, data, _ = _encode_text(value)
     return _frame(frame_id, bytes([enc]) + data)
 
 
 def comment_frame(value: str, description: str = "", lang: str = "eng") -> bytes:
+    """A ``COMM`` frame: language, a short description, then the comment."""
     enc, data, term = _encode_text(value)
     denc, ddata, _ = _encode_text(description)
     if denc != enc:                       # both strings share one encoding byte
@@ -455,6 +460,7 @@ def comment_frame(value: str, description: str = "", lang: str = "eng") -> bytes
 
 
 def txxx_frame(description: str, value: str) -> bytes:
+    """A ``TXXX`` user-defined text frame, keyed by its description."""
     enc, data, term = _encode_text(value)
     denc, ddata, _ = _encode_text(description)
     if denc != enc:
@@ -574,9 +580,10 @@ def serato_markers2(cues: list[Cue], **kw) -> bytes:
 
 
 def parse_serato_markers2(data: bytes) -> list[dict]:
-    """Decode what :func:`serato_markers2` wrote. Used by the tests and by
+    """Decode what :func:`serato_markers2` wrote.
 
-    anyone who wants to check a tagged file without opening Serato.
+    Used by the tests, and by anyone who wants to check what is actually in a
+    tagged file without opening Serato.
     """
     if not data.startswith(b"\x01\x01"):
         raise ExportError("not a Serato Markers2 object (bad version header)")
@@ -622,14 +629,16 @@ def probe(path: str | Path) -> dict | None:
     Returning ``None`` when ffprobe is missing keeps tagging usable on a machine
     without it; the verification step simply does not run.
     """
+    from .audio import _tool             # same resolution order as the decoder
+
     try:
         proc = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries",
+            [_tool("ffprobe"), "-v", "error", "-show_entries",
              "format=duration:stream=codec_name,sample_rate,channels",
              "-select_streams", "a:0", "-of", "json", str(path)],
             capture_output=True, check=False, timeout=60,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, RuntimeError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None
