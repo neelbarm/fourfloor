@@ -165,7 +165,7 @@ def test_the_whole_library_of_notes_comes_back_at_once(app, built) -> None:
     assert rid in ids and other in ids
     row = next(r for r in data["remixes"] if r["id"] == other)
     assert row["rating"]["stars"] == 3
-    assert row["feedback"]["markers"][0]["note"] == "same 8 bars"
+    assert "same 8 bars" in [m["note"] for m in row["feedback"]["markers"]]
     assert [c["code"] for c in data["categories"]] == list(feedback.CATEGORIES)
     assert "listening notes" in data["digest"]
 
@@ -183,6 +183,10 @@ def test_the_digest_is_available_as_plain_text_for_a_terminal(app, built) -> Non
 def test_the_page_is_served_gemini_markers_alongside_neels(app, built) -> None:
     """The critic writes into the same file; the page has to render both."""
     _, (rid, _) = built
+    # this module shares one library across its tests and they do not run in a
+    # fixed order, so put a marker of our own in rather than assuming one
+    app.json(f"/api/remixes/{rid}/feedback", "POST",
+             {"marker": {"time": 12.0, "category": "boring", "note": "flat"}})
     home = Path(app.json("/api/config")[1]["home"]).expanduser()
     folder = store.Library(home).remix_dir(rid)
     path = folder / "feedback.json"
@@ -209,7 +213,7 @@ def test_the_page_is_served_gemini_markers_alongside_neels(app, built) -> None:
     row = next(r for r in all_of_it["remixes"] if r["id"] == rid)
     assert "gemini" in {m["author"] for m in row["feedback"]["markers"]}
     assert "(Gemini)" in all_of_it["digest"]
-    assert "artifact" in all_of_it["digest"]
+    assert "Artifact" in all_of_it["digest"], "a category we do not have a chip for"
 
 
 def test_a_marker_the_app_posts_is_attributed_to_neel(app, built) -> None:
