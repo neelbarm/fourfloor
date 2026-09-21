@@ -90,12 +90,15 @@ def _gemini_block(g: dict, c: ui.C, w: int) -> list[str]:
     if issues:
         out.append("")
         for i in issues[:14]:
-            sev = _SEV.get(int(i.get("severity", 2)), "!")
-            mark = c.red(sev) if i.get("severity", 2) >= 3 else (
-                c.yellow(sev) if i.get("category") != "good" else c.green("+"))
+            sev = int(i.get("severity", 2))
+            good = i.get("category") == "good"
+            mark = c.green("+") if good else (
+                c.red(_SEV.get(sev, "!")) if sev >= 3 else c.yellow(_SEV.get(sev, "!")))
             t = float(i.get("time_sec", 0))
-            out.append(f"  {mark} {c.grey(f'{int(t) // 60}:{int(t) % 60:02d}')} "
-                       f"{c.dim(i.get('category', ''))}  {i.get('note', '')}")
+            stamp = f"{int(t) // 60}:{int(t) % 60:02d}"
+            head = f"  {mark:<3} {c.grey(stamp)} {c.dim(i.get('category', ''))}"
+            out.append(head)
+            out += _wrap(i.get("note", ""), w - 12, " " * 9)
     sections = g.get("sections") or {}
     if sections:
         out.append("")
