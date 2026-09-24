@@ -198,6 +198,15 @@ def _parts(reader: _Reader, boundary: bytes, dest: Path) -> Iterator[Part]:
                 if not fill():
                     raise MultipartError(
                         f"multipart part {part.name!r} ended before its boundary")
+        except BaseException:
+            # this part was never handed to the caller, so nobody else knows
+            # its temporary exists: a cancelled 200 MB upload would stay put
+            if part.path is not None:
+                if sink is not None:
+                    sink.close()
+                    sink = None
+                part.path.unlink(missing_ok=True)
+            raise
         finally:
             if sink is not None:
                 sink.close()
