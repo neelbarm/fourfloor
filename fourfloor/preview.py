@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -224,6 +225,11 @@ const COLORS = { intro:'#2ee6d6', build:'#ffb340', drop:'#ff4d9d',
 
 const fmt = s => { const m = Math.floor(s/60), r = Math.round(s%60);
                    return m + ':' + String(r).padStart(2,'0'); };
+/* the session file carries free text from other writers -- listening notes,
+   the critic's -- so nothing from it goes into markup unescaped */
+const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;')
+  .replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const col = k => COLORS[k] || '#6e6e73';
 
 /* ---------- count-up stats ---------- */
 const STATS = [
@@ -238,8 +244,8 @@ const statsEl = document.getElementById('stats');
 STATS.forEach((s, i) => {
   const el = document.createElement('div');
   el.className = 'stat';
-  el.innerHTML = `<div class="v ${s.cls||''}">${s.t !== undefined ? s.t : '0'}</div>
-                  <div class="k">${s.k}</div>`;
+  el.innerHTML = `<div class="v ${s.cls||''}">${s.t !== undefined ? esc(s.t) : '0'}</div>
+                  <div class="k">${esc(s.k)}</div>`;
   statsEl.appendChild(el);
   if (s.v === undefined) return;
   const out = el.querySelector('.v');
@@ -328,9 +334,9 @@ cv.addEventListener('mousemove', e => {
   const sec = (e.clientX - r.left) / r.width * total;
   const s = SESSION.sections.find(v => sec >= v.start && sec < v.end);
   if (!s) { tip.style.opacity = 0; return; }
-  tip.innerHTML = `<b style="color:${COLORS[s.kind]||'#fff'}">${s.kind} &middot; ${s.bars} bars</b>
+  tip.innerHTML = `<b style="color:${COLORS[s.kind]||'#fff'}">${esc(s.kind)} &middot; ${esc(s.bars)} bars</b>
     <span>${fmt(s.start)}–${fmt(s.end)} &middot; from the source <b style="color:#f5f5f7">
-    ${s.source_label}</b> at ${fmt(s.source_start)}<br>${s.note}</span>`;
+    ${esc(s.source_label)}</b> at ${fmt(s.source_start)}<br>${esc(s.note)}</span>`;
   tip.style.left = e.clientX + 'px';
   tip.style.top = r.top + 'px';
   tip.style.opacity = 1;
@@ -342,7 +348,7 @@ const legend = document.getElementById('legend');
 SESSION.cues.filter(c => c.kind !== 'end').forEach(c => {
   const b = document.createElement('button');
   b.className = 'chip';
-  b.innerHTML = `<i style="background:${COLORS[c.kind]||'#6e6e73'}"></i>${c.name}
+  b.innerHTML = `<i style="background:${col(c.kind)}"></i>${esc(c.name)}
                  <small>${fmt(c.time)}</small>`;
   b.addEventListener('click', () => { audio.currentTime = c.time; audio.play(); });
   legend.appendChild(b);
@@ -351,11 +357,11 @@ SESSION.cues.filter(c => c.kind !== 'end').forEach(c => {
 const rows = document.getElementById('rows');
 SESSION.sections.forEach(s => {
   const tr = document.createElement('tr');
-  tr.innerHTML = `<td><span class="tag"><i style="background:${COLORS[s.kind]||'#6e6e73'}"></i>
-                  ${s.kind}</span></td>
-                  <td>${fmt(s.start)}</td><td>${s.bars}</td>
-                  <td>${s.source_label} @ ${fmt(s.source_start)}</td>
-                  <td class="note">${s.note}</td>`;
+  tr.innerHTML = `<td><span class="tag"><i style="background:${col(s.kind)}"></i>
+                  ${esc(s.kind)}</span></td>
+                  <td>${fmt(s.start)}</td><td>${esc(s.bars)}</td>
+                  <td>${esc(s.source_label)} @ ${fmt(s.source_start)}</td>
+                  <td class="note">${esc(s.note)}</td>`;
   rows.appendChild(tr);
 });
 
@@ -394,21 +400,40 @@ def write_preview(audio_path: str | Path, session: dict, out: str | Path | None 
     shift_txt = f" &middot; shifted <b>{shift:+d}</b> semitones" if shift else ""
     sess_name = f"{audio_path.stem}.session.json"
 
-    html = (_HTML
-            .replace("__TITLE__", _esc(title))
-            .replace("__BPM__", f"{session['bpm']:.2f}")
-            .replace("__KEY__", _esc(str(session["key"])))
-            .replace("__CAMELOT__", _esc(str(session["camelot"])))
-            .replace("__LENGTH__", _fmt(session["duration"]))
-            .replace("__SOURCE__", _esc(str(session.get("source", {}).get("file", "the source"))))
-            .replace("__SHIFT__", shift_txt)
-            .replace("__AUDIO__", _esc(_audio_src(audio_path, out_path)))
-            .replace("__SESSION_JSON__", json.dumps(session))
-            .replace("__WAVE_JSON__", json.dumps(wave))
-            .replace("__SESSION__", _esc(sess_name)))
+    fill = {
+        "TITLE": _esc(title),
+        "BPM": f"{session['bpm']:.2f}",
+        "KEY": _esc(str(session["key"])),
+        "CAMELOT": _esc(str(session["camelot"])),
+        "LENGTH": _fmt(session["duration"]),
+        "SOURCE": _esc(str(session.get("source", {}).get("file", "the source"))),
+        "SHIFT": shift_txt,
+        "AUDIO": _esc(_audio_src(audio_path, out_path)),
+        "SESSION_JSON": _script_json(session),
+        "WAVE_JSON": _script_json(wave),
+        "SESSION": _esc(sess_name),
+    }
+    # one pass over the template, so text already put in -- a note that says
+    # __WAVE_JSON__ -- is never itself read as a placeholder
+    html = _PLACEHOLDER.sub(lambda m: fill.get(m.group(1), m.group(0)), _HTML)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf8")
     return out_path
+
+
+_PLACEHOLDER = re.compile(r"__([A-Z_]+?)__")
+
+
+def _script_json(data) -> str:
+    """JSON that cannot end the ``<script>`` block it is written into.
+
+    ``json.dumps`` leaves ``</script>`` as it is, and the session file holds
+    free text other tools wrote. Escaped, a note reads the same to the page
+    and cannot become markup.
+    """
+    return (json.dumps(data).replace("<", "\\u003c").replace(">", "\\u003e")
+            .replace("&", "\\u0026").replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
 
 
 def _esc(s: str) -> str:
