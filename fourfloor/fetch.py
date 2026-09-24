@@ -35,6 +35,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -140,6 +141,26 @@ def available() -> bool:
 
 _LOCAL_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "broadcasthost"}
 
+#: A host made only of numbers -- ``127.1``, ``0x7f.1``, ``0177.0.0.1``,
+#: ``2130706433`` -- is an IPv4 address in one of the shorthand spellings the C
+#: resolver accepts and :mod:`ipaddress` does not. No real site is named that.
+_NUMERIC_HOST = re.compile(r"^(0x[0-9a-f]*|[0-9]+)(\.(0x[0-9a-f]*|[0-9]+))*$")
+
+_LOCAL = "that is a local address, not a link to a track."
+
+
+def _is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Whether an address is on the public internet.
+
+    ``is_global`` rather than a list of private ranges, so the shared
+    100.64.0.0/10 block -- where Tailscale puts every machine on a tailnet --
+    is local too. An IPv4 address wrapped in IPv6 is judged as the IPv4 one.
+    """
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return bool(ip.is_global) and not ip.is_multicast
+
 
 def check_url(url: str) -> str:
     """Return ``url`` if it is a public http(s) link, else raise.
@@ -163,18 +184,46 @@ def check_url(url: str) -> str:
     host = (parts.hostname or "").strip(".").lower()
     if not host:
         raise FetchError("that link has no host in it.")
-    if host in _LOCAL_NAMES or host.endswith(".local") or host.endswith(".internal"):
-        raise FetchError("that is a local address, not a link to a track.")
+    if host in _LOCAL_NAMES or host.endswith(".local") or host.endswith(".internal") \
+            or host.endswith(".localhost"):
+        raise FetchError(_LOCAL)
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         if "." not in host:                       # a bare name is a machine on this LAN
-            raise FetchError("that is a local address, not a link to a track.") from None
+            raise FetchError(_LOCAL) from None
+        if _NUMERIC_HOST.match(host):
+            raise FetchError(_LOCAL) from None
     else:
-        if (ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
-                or ip.is_multicast or ip.is_unspecified):
-            raise FetchError("that is a local address, not a link to a track.")
+        if not _is_public(ip):
+            raise FetchError(_LOCAL)
     return raw
+
+
+def check_resolves(url: str, resolve=socket.getaddrinfo) -> None:
+    """Refuse a link whose host *name* leads to a local machine.
+
+    :func:`check_url` reads the name as written; ``127.0.0.1.nip.io`` or a
+    domain pointed at a LAN address passes that. This asks the resolver and
+    refuses unless every address it gives is public. A name that does not
+    resolve is left to yt-dlp to report -- it cannot reach anything either.
+    The answer can still change between this check and yt-dlp's own lookup;
+    that is a narrower hole than none.
+    """
+    host = (urlsplit(url).hostname or "").strip(".")
+    if not host:
+        raise FetchError("that link has no host in it.")
+    try:
+        infos = resolve(host, None)
+    except (OSError, UnicodeError):
+        return
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(str(info[4][0]).split("%", 1)[0])
+        except (ValueError, IndexError, TypeError):
+            continue
+        if not _is_public(ip):
+            raise FetchError(_LOCAL)
 
 
 def site_of(url: str) -> str:

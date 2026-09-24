@@ -154,6 +154,17 @@ def test_a_public_link_is_accepted(url) -> None:
     ("http://172.16.4.4/x", "local address"),
     ("http://nas.local/song.mp3", "local address"),
     ("http://router/x", "local address"),
+    # the shorthand and octal/hex spellings the resolver takes for 127.0.0.1
+    ("http://127.1:4444/api/config", "local address"),
+    ("http://0x7f.1/", "local address"),
+    ("http://0177.0.0.1/", "local address"),
+    ("http://2130706433/", "local address"),
+    ("http://0x7f000001/", "local address"),
+    # Tailscale's shared range, and loopback wrapped in IPv6
+    ("http://100.64.0.1/", "local address"),
+    ("http://100.101.102.103:8080/", "local address"),
+    ("http://[::ffff:127.0.0.1]/", "local address"),
+    ("http://app.localhost/", "local address"),
     ("https://example.com/\nHost: evil", "control characters"),
     ("https://" + "a" * 3000, "implausibly long"),
 ])
@@ -161,6 +172,36 @@ def test_a_link_we_will_not_follow_is_refused(url, needle) -> None:
     with pytest.raises(fetch.FetchError) as exc:
         fetch.check_url(url)
     assert needle in str(exc.value)
+
+
+def _resolver(table):
+    def resolve(host, port):
+        if host not in table:
+            raise OSError("no such name")
+        return [(2, 1, 6, "", (ip, 0)) for ip in table[host]]
+    return resolve
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1.nip.io:4444/",
+    "http://localtest.me/",
+    "http://mixed.example/",                      # one public answer, one private
+    "http://tailnet.example/",
+])
+def test_a_name_that_resolves_to_a_local_machine_is_refused(url) -> None:
+    table = {"127.0.0.1.nip.io": ["127.0.0.1"], "localtest.me": ["127.0.0.1", "::1"],
+             "mixed.example": ["93.184.216.34", "192.168.1.4"],
+             "tailnet.example": ["100.88.1.2"]}
+    fetch.check_url(url)                          # the name alone looks public
+    with pytest.raises(fetch.FetchError) as exc:
+        fetch.check_resolves(url, _resolver(table))
+    assert "local address" in str(exc.value)
+
+
+def test_a_public_name_or_one_that_does_not_resolve_is_let_through() -> None:
+    table = {"soundcloud.com": ["18.238.96.1", "2600:9000:2000::1"]}
+    fetch.check_resolves("https://soundcloud.com/a/b", _resolver(table))
+    fetch.check_resolves("https://nowhere.invalid/x", _resolver(table))
 
 
 def test_the_site_label_reads_like_a_person_wrote_it() -> None:
