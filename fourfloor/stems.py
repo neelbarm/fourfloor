@@ -18,11 +18,38 @@ from pathlib import Path
 
 import numpy as np
 
-from .audio import SR, decode, fit, write_wav
+from .audio import SR, decode, fit
 from .dsp.hpss import hpss_stereo
 from .house.engine import Stems
 
 DEMUCS_MODEL = "htdemucs"
+
+#: How demucs is asked to run, beyond the model and the worker count.
+#:
+#: ``--shifts 0``: demucs's default is one *random* shift of the input (up to
+#: half a second, ``random.randint`` in ``demucs/apply.py``) before separating.
+#: One shift is not an average of anything -- it is the same separation at a
+#: random offset -- so all it bought was a different set of stems on every run.
+#: Everything downstream reads those stems (the vocal and bass decisions, the
+#: chop's slice starts), so the same command gave an audibly different remix
+#: every time, and the render a listener approved was not what a re-render at
+#: the gig would play.
+#:
+#: ``--float32 --clip-mode none``: the default writes 16-bit stems and divides
+#: any stem that peaks near full scale by its own peak, which changes the
+#: vocal/other/bass balance stem by stem. The engine's stem gains assume each
+#: stem is at the record's own level, so the stems come back as floats, exactly
+#: as separated.
+DEMUCS_ARGS = ("--shifts", "0", "--float32", "--clip-mode", "none")
+
+
+def _write_float_wav(path: Path, x: np.ndarray, sr: int) -> Path:
+    """A 32-bit float WAV, *not* clipped -- demucs's input."""
+    import soundfile as sf
+
+    y = np.asarray(x, dtype=np.float32)
+    sf.write(str(path), y if y.ndim == 2 else y[:, None], sr, subtype="FLOAT")
+    return path
 
 
 def demucs_available() -> bool:
@@ -81,14 +108,17 @@ def separate_demucs(x: np.ndarray, sr: int = SR, model: str = DEMUCS_MODEL,
         )
     tmp = Path(tempfile.mkdtemp(prefix="fourfloor-demucs-"))
     try:
-        src = write_wav(tmp / "warped.wav", x, sr)
+        # Float, unclipped: the decode and the phase vocoder both leave samples
+        # above full scale on a loud master, and a 24-bit file would hard-clip
+        # them into every stem before demucs saw them.
+        src = _write_float_wav(tmp / "warped.wav", x, sr)
         # torch defaults to one thread per core *inside each* of the -j workers,
         # which oversubscribes badly on a laptop; give each worker a fair share.
         env = dict(os.environ)
         env.setdefault("OMP_NUM_THREADS", str(max(1, (os.cpu_count() or 4) // jobs)))
         proc = subprocess.run(
             [sys.executable, "-m", "demucs", "-n", model, "-j", str(jobs),
-             "-o", str(tmp), str(src)],
+             *DEMUCS_ARGS, "-o", str(tmp), str(src)],
             capture_output=True, text=True, check=False, env=env,
         )
         if proc.returncode != 0:
