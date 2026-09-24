@@ -20,22 +20,63 @@ def frame_rate(sr: int, hop: int = HOP) -> float:
     return sr / float(hop)
 
 
+#: Frames per block when a long STFT is reduced as it goes (see
+#: :func:`stft_reduce`). 2048 frames of a 2048-point transform is 16 MB of
+#: windowed samples and 16 MB of spectrum.
+STFT_BLOCK = 2048
+
+
+def _frames(x: np.ndarray, n_fft: int, hop: int, center: bool) -> np.ndarray:
+    """A read-only ``(n_frames, n_fft)`` view of the signal's analysis frames.
+
+    A strided view rather than a gather through an index matrix: the index
+    matrix alone was eight bytes per sample per frame, the same size as the
+    frames it picked out.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if center:
+        x = np.pad(x, n_fft // 2, mode="reflect")
+    if len(x) < n_fft:
+        x = np.pad(x, (0, n_fft - len(x)))
+    n_frames = 1 + (len(x) - n_fft) // hop
+    return np.lib.stride_tricks.sliding_window_view(x, n_fft)[::hop][:n_frames]
+
+
 def stft(x: np.ndarray, n_fft: int = N_FFT, hop: int = HOP, center: bool = True) -> np.ndarray:
     """Short-time Fourier transform → complex array of shape (1 + n_fft//2, n_frames).
 
     Uses a periodic Hann window, which satisfies COLA at hop = n_fft/4 so the
     same framing is reusable for the phase vocoder's overlap-add.
     """
-    x = np.asarray(x, dtype=np.float64)
+    frames = _frames(x, n_fft, hop, center)
     win = sps.get_window("hann", n_fft, fftbins=True)
-    if center:
-        x = np.pad(x, n_fft // 2, mode="reflect")
-    if len(x) < n_fft:
-        x = np.pad(x, (0, n_fft - len(x)))
-    n_frames = 1 + (len(x) - n_fft) // hop
-    idx = np.arange(n_fft)[None, :] + hop * np.arange(n_frames)[:, None]
-    frames = x[idx] * win[None, :]
-    return np.fft.rfft(frames, n=n_fft, axis=1).T
+    return np.fft.rfft(frames * win[None, :], n=n_fft, axis=1).T
+
+
+def stft_reduce(x: np.ndarray, reduce, n_fft: int = N_FFT, hop: int = HOP,
+                center: bool = True, block: int = STFT_BLOCK) -> np.ndarray:
+    """``reduce(|STFT|)`` computed a block of frames at a time.
+
+    ``reduce`` takes a magnitude block of shape ``(1 + n_fft//2, frames)`` and
+    returns ``(k, frames)`` -- a filterbank product, a band's RMS. The answer is
+    the one :func:`stft` followed by ``reduce`` gives, frame for frame, but the
+    whole complex spectrum never exists at once.
+
+    That matters at the attack envelope's 64-sample hop: a whole-song float64
+    spectrum there is about 1.5 GB per minute of audio before the magnitudes,
+    and the beat and alignment analysis asks for several of them, which peaked
+    at over 8 GB on a four-minute record.
+    """
+    frames = _frames(x, n_fft, hop, center)
+    win = sps.get_window("hann", n_fft, fftbins=True)
+    n = frames.shape[0]
+    parts = []
+    for a in range(0, n, block):
+        mag = np.abs(np.fft.rfft(frames[a:a + block] * win[None, :], n=n_fft, axis=1)).T
+        parts.append(np.asarray(reduce(mag)))
+    if not parts:
+        return np.asarray(reduce(np.zeros((n_fft // 2 + 1, 0))))
+    return np.concatenate(parts, axis=-1)
 
 
 def istft(spec: np.ndarray, n_fft: int = N_FFT, hop: int = HOP, length: int | None = None,
@@ -86,9 +127,8 @@ def mel_filterbank(sr: int, n_fft: int = N_FFT, n_mels: int = 96,
 
 def log_mel(x: np.ndarray, sr: int, n_mels: int = 96, hop: int = HOP) -> np.ndarray:
     """Log-compressed mel spectrogram, (n_mels, n_frames)."""
-    mag = np.abs(stft(x, N_FFT, hop))
     fb = mel_filterbank(sr, N_FFT, n_mels)
-    return np.log1p(1000.0 * (fb @ mag))
+    return np.log1p(1000.0 * stft_reduce(x, lambda mag: fb @ mag, N_FFT, hop))
 
 
 def onset_strength(x: np.ndarray, sr: int, hop: int = HOP) -> np.ndarray:
@@ -152,9 +192,9 @@ def attack_envelope(x: np.ndarray, sr: int, hop: int = ATTACK_HOP,
     x = np.asarray(x, dtype=np.float64)
     if len(x) < n_fft:
         return np.zeros(0), sr / float(hop)
-    mag = np.abs(stft(x, n_fft, hop))
     n_mels = 64 if fmax is None else 16
-    bands = mel_filterbank(sr, n_fft, n_mels=n_mels, fmax=fmax) @ mag
+    fb = mel_filterbank(sr, n_fft, n_mels=n_mels, fmax=fmax)
+    bands = stft_reduce(x, lambda mag: fb @ mag, n_fft, hop)
     flux = np.maximum(0.0, bands[:, lag:] - bands[:, :-lag]).sum(axis=0)
     flux = np.concatenate([np.zeros(lag), flux])
     fps = sr / float(hop)
@@ -209,12 +249,11 @@ def attack_times(n: int, fps: float, lag: int = ATTACK_LAG) -> np.ndarray:
 
 def band_energy(x: np.ndarray, sr: int, lo: float, hi: float, hop: int = HOP) -> np.ndarray:
     """Per-frame RMS energy inside a frequency band, from the magnitude STFT."""
-    mag = np.abs(stft(x, N_FFT, hop))
     freqs = np.fft.rfftfreq(N_FFT, 1.0 / sr)
     sel = (freqs >= lo) & (freqs < hi)
     if not sel.any():
-        return np.zeros(mag.shape[1])
-    return np.sqrt(np.mean(mag[sel] ** 2, axis=0))
+        return np.zeros(_frames(x, N_FFT, hop, True).shape[0])
+    return stft_reduce(x, lambda mag: np.sqrt(np.mean(mag[sel] ** 2, axis=0)), N_FFT, hop)
 
 
 # ---------------------------------------------------------------------------
@@ -232,36 +271,43 @@ def estimate_tuning(x: np.ndarray, sr: int, n_fft: int = CHROMA_FFT) -> float:
     (Hann) main lobe, and only peaks above 250 Hz are used -- below that a single
     FFT bin spans more than a fifth of a semitone and the deviation is noise.
     """
-    mag = np.abs(stft(x, n_fft, n_fft // 4))
     freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
-    if mag.shape[1] == 0:
-        return 0.0
-    logmag = np.log(mag + 1e-10)
     devs: list[np.ndarray] = []
     weights: list[np.ndarray] = []
     band = (freqs > 250.0) & (freqs < 4000.0)
-    for t in range(0, mag.shape[1], 4):
-        col = mag[:, t]
-        ceiling = col.max()
-        if ceiling <= 1e-8:
-            continue
-        # per-frame threshold: only true partials, well above this frame's floor
-        peaks, props = sps.find_peaks(col, height=0.06 * ceiling, prominence=0.03 * ceiling)
-        if not len(peaks):
-            continue
-        keep = band[peaks] & (peaks > 1) & (peaks < len(col) - 1)
-        peaks = peaks[keep]
-        if not len(peaks):
-            continue
-        lc = logmag[:, t]
-        a, b, c = lc[peaks - 1], lc[peaks], lc[peaks + 1]
-        denom = a - 2 * b + c
-        shift = np.where(np.abs(denom) > 1e-9, 0.5 * (a - c) / np.where(denom == 0, 1e-9, denom), 0.0)
-        shift = np.clip(shift, -0.5, 0.5)
-        f = (peaks + shift) * sr / n_fft
-        midi = 69.0 + 12.0 * np.log2(np.maximum(f, 1e-6) / 440.0)
-        devs.append(midi - np.round(midi))
-        weights.append(col[peaks])
+    # Every fourth frame, a block at a time so the whole spectrum never exists
+    # at once; the block is a multiple of four so the stride carries across.
+    block = 4 * (STFT_BLOCK // 4)
+
+    def frames_of(mag: np.ndarray) -> np.ndarray:
+        logmag = np.log(mag + 1e-10)
+        for t in range(0, mag.shape[1], 4):
+            col = mag[:, t]
+            ceiling = col.max()
+            if ceiling <= 1e-8:
+                continue
+            # per-frame threshold: only true partials, well above this frame's floor
+            peaks, props = sps.find_peaks(col, height=0.06 * ceiling,
+                                          prominence=0.03 * ceiling)
+            if not len(peaks):
+                continue
+            keep = band[peaks] & (peaks > 1) & (peaks < len(col) - 1)
+            peaks = peaks[keep]
+            if not len(peaks):
+                continue
+            lc = logmag[:, t]
+            a, b, c = lc[peaks - 1], lc[peaks], lc[peaks + 1]
+            denom = a - 2 * b + c
+            shift = np.where(np.abs(denom) > 1e-9,
+                             0.5 * (a - c) / np.where(denom == 0, 1e-9, denom), 0.0)
+            shift = np.clip(shift, -0.5, 0.5)
+            f = (peaks + shift) * sr / n_fft
+            midi = 69.0 + 12.0 * np.log2(np.maximum(f, 1e-6) / 440.0)
+            devs.append(midi - np.round(midi))
+            weights.append(col[peaks])
+        return np.zeros((0, mag.shape[1]))
+
+    stft_reduce(x, frames_of, n_fft, n_fft // 4, block=block)
     if not devs:
         return 0.0
     allv = np.concatenate(devs)
@@ -283,18 +329,21 @@ def chromagram(x: np.ndarray, sr: int, hop: int = HOP, tuning: float | None = No
     """
     if tuning is None:
         tuning = estimate_tuning(x, sr, n_fft)
-    mag = np.abs(stft(x, n_fft, hop))
     freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
     sel = (freqs >= 55.0) & (freqs <= 2093.0)
     midi = 69.0 + 12.0 * np.log2(np.maximum(freqs[sel], 1e-6) / 440.0) - tuning
     pc = np.mod(np.round(midi).astype(int), 12)
-    sub = mag[sel] ** 2
-    out = np.zeros((12, mag.shape[1]))
-    for k in range(12):
-        m = pc == k
-        if m.any():
-            out[k] = sub[m].sum(axis=0)
-    out = np.sqrt(out)
+
+    def fold(mag: np.ndarray) -> np.ndarray:
+        sub = mag[sel] ** 2
+        out = np.zeros((12, mag.shape[1]))
+        for k in range(12):
+            m = pc == k
+            if m.any():
+                out[k] = sub[m].sum(axis=0)
+        return out
+
+    out = np.sqrt(stft_reduce(x, fold, n_fft, hop))
     norm = out.sum(axis=0, keepdims=True)
     return out / np.maximum(norm, 1e-9)
 
@@ -309,8 +358,11 @@ def mfcc(x: np.ndarray, sr: int, n_mfcc: int = 13, hop: int = HOP) -> np.ndarray
 
 def rms_envelope(x: np.ndarray, hop: int = HOP, win: int = N_FFT) -> np.ndarray:
     """Frame-wise RMS of a time-domain signal at the feature hop."""
+    x = np.asarray(x)
     n_frames = 1 + max(0, (len(x) - win)) // hop
-    if n_frames <= 0:
+    if len(x) < win:
         return np.array([float(np.sqrt(np.mean(np.square(x)))) if len(x) else 0.0])
-    idx = np.arange(win)[None, :] + hop * np.arange(n_frames)[:, None]
-    return np.sqrt(np.mean(x[idx] ** 2, axis=1))
+    view = np.lib.stride_tricks.sliding_window_view(x, win)[::hop][:n_frames]
+    step = max(1, STFT_BLOCK)
+    return np.concatenate([np.sqrt(np.mean(view[a:a + step] ** 2, axis=1))
+                           for a in range(0, n_frames, step)])

@@ -62,6 +62,10 @@ def _stack(feat: np.ndarray, lag: int = 4, step: int = 2) -> np.ndarray:
     return np.vstack(cols)[:, : feat.shape[1] - (lag - 1) * step or None]
 
 
+#: Rows of the self-similarity matrix built at once by :func:`novelty_curve`.
+NOVELTY_BLOCK = 1024
+
+
 def novelty_curve(chroma: np.ndarray, timbre: np.ndarray, kernel: int = 32) -> np.ndarray:
     """Foote novelty from a cosine self-similarity matrix of stacked features."""
     def norm_rows(a: np.ndarray) -> np.ndarray:
@@ -74,13 +78,22 @@ def novelty_curve(chroma: np.ndarray, timbre: np.ndarray, kernel: int = 32) -> n
     feat = _stack(feat)
     norms = np.linalg.norm(feat, axis=0, keepdims=True)
     unit = feat / np.maximum(norms, 1e-9)
-    ssm = unit.T @ unit
-    m = ssm.shape[0]
+    m = unit.shape[1]
     k = min(kernel, max(4, m // 8))
     kern = _checkerboard(k)
     nov = np.zeros(m)
-    for i in range(k, m - k):
-        nov[i] = float(np.sum(ssm[i - k:i + k, i - k:i + k] * kern))
+    # The kernel only ever reads the self-similarity matrix within k frames of
+    # its diagonal, so it is built a block of rows at a time: the whole matrix
+    # is m-squared, which on a four-minute song at hop 512 is 3.8 GB and grows
+    # with the square of the song's length.
+    for i0 in range(k, m - k, NOVELTY_BLOCK):
+        i1 = min(i0 + NOVELTY_BLOCK, m - k)
+        lo, hi = i0 - k, i1 + k
+        part = unit[:, lo:hi]
+        ssm = part.T @ part
+        for i in range(i0, i1):
+            a = i - k - lo
+            nov[i] = float(np.sum(ssm[a:a + 2 * k, a:a + 2 * k] * kern))
     nov = np.maximum(nov, 0.0)
     if nov.max() > 0:
         nov /= nov.max()
