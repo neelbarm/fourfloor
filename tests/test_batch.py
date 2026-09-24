@@ -475,6 +475,67 @@ def test_resuming_with_key_auto_mixes_out_of_what_is_already_there(
     assert manifest["key_flow"][0]["camelot"] in _wheel(manifest["tracks"][0]["camelot"])
 
 
+def _set_rendered_key(out: Path, name: str, camelot: str) -> None:
+    """Pretend a finished render came out in ``camelot``."""
+    from fourfloor.export import session_path_for
+
+    path = session_path_for(out / name)
+    sess = json.loads(path.read_text(encoding="utf8"))
+    sess["camelot"] = camelot
+    path.write_text(json.dumps(sess), encoding="utf8")
+
+
+def test_resume_plans_each_track_against_the_one_really_before_it(
+        tmp_path, engine, monkeypatch) -> None:
+    """A(done 8A) B(to do, 8A) C(done 3A) D(to do, 3A): D already matches C
+    and must be left alone, not pitched to follow B."""
+    folder = tmp_path / "originals"
+    folder.mkdir()
+    names = ("A.mp3", "B.mp3", "C.mp3", "D.mp3")
+    for name in names:
+        (folder / name).write_bytes(b"\xff\xfb\x90\x00" + b"\x00" * 64)
+    monkeypatch.setattr("fourfloor.analysis.analyze", stub_analyze(
+        {"A.mp3": "8A", "B.mp3": "8A", "C.mp3": "3A", "D.mp3": "3A"}))
+    out = tmp_path / "gig"
+    engine(fail_on=("B.", "D."))
+    batch.run(folder, out, bpm=128.0, key_strategy="auto")
+    _set_rendered_key(out, "A.house.mp3", "8A")
+    _set_rendered_key(out, "C.house.mp3", "3A")
+
+    state = engine()
+    state["keys"].clear()
+    manifest = batch.run(folder, out, bpm=128.0, key_strategy="auto", resume=True)
+    assert manifest["summary"]["skipped"] == 2
+    flow = {s["source"] + str(i): s for i, s in enumerate(manifest["key_flow"])}
+    assert [s["shift"] for s in manifest["key_flow"]] == [0, 0]
+    assert [s["camelot"] for s in manifest["key_flow"]] == ["8A", "3A"]
+    assert state["keys"] == {"B.mp3": None, "D.mp3": None}
+    assert all(s["compatible"] for s in flow.values())
+    assert "C.mp3" not in state["keys"]
+
+
+def test_resume_leaves_the_first_track_alone_when_only_later_ones_are_done(
+        tmp_path, engine, monkeypatch) -> None:
+    """A(to do, 8A) B(done 3A) C(done 3A): finished tracks after A are not
+    something A mixes out of."""
+    folder = tmp_path / "originals"
+    folder.mkdir()
+    for name in ("A.mp3", "B.mp3", "C.mp3"):
+        (folder / name).write_bytes(b"\xff\xfb\x90\x00" + b"\x00" * 64)
+    monkeypatch.setattr("fourfloor.analysis.analyze", stub_analyze(
+        {"A.mp3": "8A", "B.mp3": "3A", "C.mp3": "3A"}))
+    out = tmp_path / "gig"
+    engine(fail_on=("A.",))
+    batch.run(folder, out, bpm=128.0, key_strategy="auto")
+    _set_rendered_key(out, "B.house.mp3", "3A")
+    _set_rendered_key(out, "C.house.mp3", "3A")
+    engine()
+    manifest = batch.run(folder, out, bpm=128.0, key_strategy="auto", resume=True)
+    # A is first in the set: nothing before it, so it keeps its key
+    assert manifest["key_flow"] == [
+        {"source": "8A", "shift": 0, "camelot": "8A", "key": "Am", "compatible": True}]
+
+
 def test_a_track_the_analyser_cannot_read_still_gets_remixed(originals, tmp_path,
                                                              engine,
                                                              monkeypatch) -> None:

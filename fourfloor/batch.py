@@ -427,6 +427,18 @@ def _remix_one(job: dict) -> dict:
 # the batch
 # ---------------------------------------------------------------------------
 
+def _camelot_or_none(code: str | None) -> str | None:
+    """``code`` as a Camelot code the planner can mix out of, else ``None``."""
+    from .analysis.key import camelot_to_key
+
+    code = (code or "").strip().upper()
+    try:
+        camelot_to_key(code)
+    except ValueError:
+        return None
+    return code
+
+
 def _source_keys(sources: list[Path], on_event) -> list[str]:
     """Camelot code of every source, for the key-flow pre-pass.
 
@@ -561,15 +573,25 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
 
     flow: dict[str, dict] = {}
     if key_strategy == "auto" and pending:
-        # A resumed batch has to mix out of what is already on disk: seed the
-        # chain with the key of the last finished track before the first one
-        # still to render.
-        first = sources.index(pending[0])
-        before = [rows[str(p)].camelot for p in sources[:first] if str(p) in rows]
-        codes = _source_keys(pending, on_event)
-        steps = plan_key_flow(codes, previous=before[-1] if before else None)
-        for p, step in zip(pending, steps):
+        # A resumed batch has to mix out of what is already on disk. Walk the
+        # whole set in order: a finished track is a fixed point in the chain
+        # (its rendered key), and each track still to render is planned
+        # against whatever really comes before it -- not against the previous
+        # *pending* track, which after scattered failures is two or more
+        # places back.
+        codes = dict(zip((str(p) for p in pending), _source_keys(pending, on_event)))
+        previous: str | None = None
+        steps = []
+        for p in sources:
+            done_row = rows.get(str(p))
+            if done_row is not None:
+                previous = _camelot_or_none(done_row.camelot)
+                continue
+            step = plan_key_flow([codes[str(p)]], previous=previous)[0]
             flow[str(p)] = step
+            steps.append(step)
+            if step["key"]:              # an unreadable key leaves the chain as it was
+                previous = step["camelot"]
         on_event("key_flow", {"steps": steps})
 
     def _target_key(p: Path) -> str | None:
