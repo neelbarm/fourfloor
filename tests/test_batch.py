@@ -651,6 +651,75 @@ def test_the_playlist_follows_the_source_order(tmp_path, engine) -> None:
     assert _playlist(out) == order
 
 
+def fake_pool(killer: str, dies_alone: bool):
+    """A ProcessPoolExecutor stand-in, in-process, where one track kills its worker.
+
+    When a real worker dies the pool breaks: every job still queued *or running
+    in the other workers* raises BrokenProcessPool. With as many workers as
+    tracks, all of them are running when the killer's worker dies.
+    """
+    from concurrent.futures import Future
+    from concurrent.futures.process import BrokenProcessPool
+
+    pools = []
+
+    class Pool:
+        def __init__(self, max_workers=None, **_kw):
+            self.workers, self.pending, self.broken = max_workers, [], False
+            pools.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def submit(self, fn, job):
+            fut = Future()
+            dies = killer in job["source"] and (self.workers > 1 or dies_alone)
+            if self.broken or dies:
+                self.broken = True
+                for f in self.pending + [fut]:
+                    f.set_exception(BrokenProcessPool("a child process terminated"))
+                self.pending = []
+            elif self.workers > 1:
+                self.pending.append(fut)       # still running when the killer dies
+            else:
+                fut.set_result(fn(job))
+            return fut
+
+    return Pool, pools
+
+
+def test_a_dead_worker_does_not_take_the_other_tracks_with_it(originals, tmp_path,
+                                                             engine,
+                                                             monkeypatch) -> None:
+    """The OOM case: track 02's worker is killed while three share the RAM.
+    Rendered on its own afterwards, it fits."""
+    state = engine()
+    Pool, pools = fake_pool("02", dies_alone=False)
+    monkeypatch.setattr(batch, "ProcessPoolExecutor", Pool)
+    manifest = batch.run(originals, tmp_path / "gig", bpm=128.0, jobs=3)
+    assert [t["status"] for t in manifest["tracks"]] == ["ok", "ok", "ok"]
+    assert sorted(state["calls"]) == ["01 first.mp3", "02 Nuit — Blanche.mp3",
+                                      "03 third.mp3"]
+    assert [p.workers for p in pools] == [3, 1, 1, 1]
+
+
+def test_a_track_that_kills_every_worker_is_the_only_failure(originals, tmp_path,
+                                                            engine,
+                                                            monkeypatch) -> None:
+    engine()
+    Pool, _ = fake_pool("02", dies_alone=True)
+    monkeypatch.setattr(batch, "ProcessPoolExecutor", Pool)
+    manifest = batch.run(originals, tmp_path / "gig", bpm=128.0, jobs=3)
+    status = {Path(t["source"]).name: t for t in manifest["tracks"]}
+    assert status["01 first.mp3"]["status"] == "ok"
+    assert status["03 third.mp3"]["status"] == "ok"
+    assert status["02 Nuit — Blanche.mp3"]["status"] == "failed"
+    assert "worker died" in status["02 Nuit — Blanche.mp3"]["error"]
+
+
 # ---------------------------------------------------------------------------
 # resume
 # ---------------------------------------------------------------------------

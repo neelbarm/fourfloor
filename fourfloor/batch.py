@@ -23,6 +23,7 @@ import json
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -427,6 +428,42 @@ def _remix_one(job: dict) -> dict:
 # the batch
 # ---------------------------------------------------------------------------
 
+def _died(job: dict, exc: BaseException) -> dict:
+    return asdict(TrackRow(source=job["source"], status=STATUS_FAILED,
+                           error=f"worker died: {type(exc).__name__}: {exc}"))
+
+
+def _run_pool(jobs_list: list[dict], workers: int, record) -> list[dict]:
+    """Render ``jobs_list`` across ``workers`` processes.
+
+    Returns the jobs that never got a result because the pool broke: when one
+    worker process dies, :class:`ProcessPoolExecutor` fails every job still
+    queued or running, including those in healthy workers.
+    """
+    orphans: list[dict] = []
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_remix_one, j): j for j in jobs_list}
+        for fut in as_completed(futures):
+            job = futures[fut]
+            try:
+                record(fut.result())
+            except BrokenProcessPool:
+                orphans.append(job)
+            except Exception as exc:                  # noqa: BLE001 - a dead worker
+                record(_died(job, exc))
+    order = {j["source"]: i for i, j in enumerate(jobs_list)}
+    return sorted(orphans, key=lambda j: order[j["source"]])
+
+
+def _run_alone(job: dict) -> dict:
+    """One track in a worker process of its own: if it dies, only it fails."""
+    try:
+        with ProcessPoolExecutor(max_workers=1) as solo:
+            return solo.submit(_remix_one, job).result()
+    except Exception as exc:                          # noqa: BLE001 - it died again
+        return _died(job, exc)
+
+
 def _camelot_or_none(code: str | None) -> str | None:
     """``code`` as a Camelot code the planner can mix out of, else ``None``."""
     from .analysis.key import camelot_to_key
@@ -619,21 +656,21 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
 
     if jobs > 1 and len(jobs_list) > 1:
         try:
-            with ProcessPoolExecutor(max_workers=jobs) as pool:
-                futures = {pool.submit(_remix_one, j): j for j in jobs_list}
-                for fut in as_completed(futures):
-                    job = futures[fut]
-                    try:
-                        _record(fut.result())
-                    except Exception as exc:          # noqa: BLE001 - a dead worker
-                        _record(asdict(TrackRow(
-                            source=job["source"], status=STATUS_FAILED,
-                            error=f"worker died: {type(exc).__name__}: {exc}")))
+            orphans = _run_pool(jobs_list, jobs, _record)
         except Exception as exc:                      # noqa: BLE001 - pool never started
             on_event("pool_failed", {"error": str(exc)})
+            orphans = []
             for j in jobs_list:
                 if j["source"] not in rows:
                     _record(_remix_one(j))
+        if orphans:
+            # One worker died (macOS kills one for memory when several Demucs
+            # runs share 16 GB) and took the pool, and every track in it, down
+            # with it. Give each of those tracks a process of its own, one at a
+            # time, so only a track that kills its worker by itself fails.
+            on_event("pool_broken", {"tracks": len(orphans)})
+            for j in orphans:
+                _record(_run_alone(j))
     else:
         for j in jobs_list:
             _record(_remix_one(j))
@@ -757,6 +794,9 @@ class Reporter:
             self._key_flow(payload.get("steps", []))
         elif kind in ("track", "skipped"):
             self._track_line(payload)
+        elif kind == "pool_broken":
+            print(ui.warn(c, "a worker process died; rendering the {} track(s) it "
+                          "took down one at a time".format(payload.get("tracks", 0))))
         elif kind == "renamed":
             print(ui.warn(c, str(payload.get("note", ""))))
         elif kind == "resume_stale":
