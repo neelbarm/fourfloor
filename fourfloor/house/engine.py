@@ -86,7 +86,10 @@ def _loop_to(src: np.ndarray, start: int, want: int, period: int, sr: int) -> np
         n = min(period + fade, want - pos)
         seg = np.array(take(start, n), dtype=np.float32, copy=True)
         if rise is not None and pos > 0:
-            seg[:fade] *= rise
+            # The last repeat can be shorter than the crossfade itself when the
+            # two roundings (period and total length) leave a few samples over.
+            k = min(fade, n)
+            seg[:k] *= rise[:k]
         if rise is not None and pos + period < want and n >= fade:
             seg[period:period + fade] *= fall[: max(0, n - period)]
         out[pos:pos + n] += seg
