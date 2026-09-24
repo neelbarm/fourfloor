@@ -419,6 +419,65 @@ def test_a_batch_where_everything_fails_still_writes_set_json(originals, tmp_pat
     assert any("nothing rendered" in n for n in manifest["notes"])
 
 
+def _playlist(out: Path) -> list[str]:
+    """The file names in rekordbox.xml's playlist, in playlist order."""
+    import xml.etree.ElementTree as ET
+    from urllib.parse import unquote
+
+    root = ET.fromstring((out / "rekordbox.xml").read_text(encoding="utf8"))
+    by_id = {t.get("TrackID"): unquote(t.get("Location")).rsplit("/", 1)[-1]
+             for t in root.iterfind("COLLECTION/TRACK")}
+    return [by_id[t.get("Key")] for t in root.iterfind("PLAYLISTS/NODE/NODE/TRACK")]
+
+
+def test_the_export_holds_only_this_runs_tracks(originals, tmp_path, engine) -> None:
+    """A song dropped from the folder, or one that failed tonight, stays out."""
+    engine()
+    out = tmp_path / "gig"
+    batch.run(originals, out, bpm=126.0)              # last week: all three
+    (originals / "01 first.mp3").unlink()             # dropped from the set
+    engine(fail_on=("02",))                           # fails tonight
+    manifest = batch.run(originals, out, bpm=128.0)
+    assert manifest["summary"]["ok"] == 1
+    assert _playlist(out) == ["03 third.house.mp3"]
+    import csv
+    rows = list(csv.DictReader((out / "cues.csv").read_text(encoding="utf8")
+                               .splitlines()))
+    assert {r["file"] for r in rows} == {"03 third.house.mp3"}
+
+
+def test_one_unreadable_session_drops_one_track_not_the_whole_export(
+        originals, tmp_path, engine, monkeypatch) -> None:
+    engine()
+    out = tmp_path / "gig"
+    real = batch._remix_one
+
+    def _remix_then_break(job):
+        row = real(job)
+        if "02" in job["source"]:                    # truncated by a crash
+            Path(row["session"]).write_text("{ not json", encoding="utf8")
+        return row
+
+    monkeypatch.setattr(batch, "_remix_one", _remix_then_break)
+    manifest = batch.run(originals, out, bpm=126.0)
+    assert _playlist(out) == ["01 first.house.mp3", "03 third.house.mp3"]
+    assert any("02 Nuit" in n and "left" in n for n in manifest["notes"])
+
+
+def test_the_playlist_follows_the_source_order(tmp_path, engine) -> None:
+    """The sources sort 'Song.intro' first; their outputs sort the other way."""
+    folder = tmp_path / "originals"
+    folder.mkdir()
+    for name in ("Song.mp3", "Song.intro.mp3"):
+        (folder / name).write_bytes(b"\xff\xfb\x90\x00" + b"\x00" * 64)
+    engine()
+    out = tmp_path / "gig"
+    manifest = batch.run(folder, out, bpm=126.0)
+    order = [Path(t["output"]).name for t in manifest["tracks"]]
+    assert order == ["Song.intro.house.mp3", "Song.house.mp3"]
+    assert _playlist(out) == order
+
+
 # ---------------------------------------------------------------------------
 # resume
 # ---------------------------------------------------------------------------

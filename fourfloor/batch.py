@@ -380,16 +380,24 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
 
     exports: dict[str, str] = {}
     notes: list[str] = []
-    if done:
-        from . import export as export_mod
+    # Export exactly this set -- the tracks this run rendered or kept, in the
+    # order of the source folder -- rather than every remix in the output
+    # folder: an old render of a song since dropped, or of one that failed
+    # tonight, must not turn up in the Rekordbox playlist.
+    from . import export as export_mod
+    tracks, bad = (export_mod.load_tracks([r.output for r in done if r.output],
+                                          artist=artist) if done else ([], []))
+    notes.extend(bad)
+    if tracks:
         try:
-            result = export_mod.export(out, set_name, formats=("rekordbox", "csv"),
-                                       out_dir=out, artist=artist)
-            exports = {k: str(v) for k, v in result.files.items()}
-            notes.extend(result.notes)
+            exports["rekordbox"] = str(export_mod.write_rekordbox(tracks, out, set_name))
+            exports["csv"] = str(export_mod.write_csv(tracks, out))
         except Exception as exc:                      # noqa: BLE001 - the audio is safe
             notes.append(f"export failed: {type(exc).__name__}: {exc}")
             on_event("export_failed", {"error": str(exc)})
+    elif done:
+        notes.append("no session file could be read, so no rekordbox.xml or "
+                     "cues.csv was written")
     else:
         notes.append("nothing rendered, so no rekordbox.xml or cues.csv was written")
 
