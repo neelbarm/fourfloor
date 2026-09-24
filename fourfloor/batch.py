@@ -20,6 +20,7 @@ matters when the folder is thirty tracks and the render is not fast.
 from __future__ import annotations
 
 import json
+import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
@@ -174,12 +175,159 @@ def output_for(source: Path, out_dir: Path) -> Path:
     return Path(out_dir) / f"{Path(source).stem}.house.mp3"
 
 
-def already_done(source: Path, out_dir: Path) -> bool:
-    """True when both the mp3 and its session file are already on disk."""
-    from .export import session_path_for
+#: What a render was asked for, as far as ``--resume`` cares: change any of
+#: these and a finished track is no longer the track this batch wants.
+RENDER_KEYS = ("bpm", "key_strategy", "stems", "kit", "bass", "form", "length",
+               "swing", "seed", "vocal", "drums_db", "kick_reinforce")
 
-    out = output_for(source, out_dir)
-    return out.is_file() and out.stat().st_size > 0 and session_path_for(out).is_file()
+#: Every fourfloor mp3 is 320 kbit/s constant bitrate: 40 000 bytes a second.
+MP3_BYTES_PER_SEC = 320_000 / 8
+#: An mp3 shorter than this share of its session's duration was cut off.
+MIN_COMPLETE = 0.98
+
+
+def stamp_path_for(out: Path) -> Path:
+    """``X.house.mp3`` -> ``X.house.batch.json``: what the batch asked for."""
+    return Path(out).with_suffix(".batch.json")
+
+
+def plan_path_for(out: Path) -> Path:
+    return Path(out).with_suffix(".plan.json")
+
+
+def render_params(job: dict) -> dict:
+    """The part of a job that decides what the render sounds like."""
+    defaults = {"key_strategy": "lock", "stems": "hpss", "kit": None,
+                "bass": "auto", "form": "club", "length": None, "swing": None,
+                "seed": 0, "vocal": "auto", "drums_db": 0.0,
+                "kick_reinforce": True}
+    params = {k: job.get(k, defaults.get(k)) for k in RENDER_KEYS}
+    params["bpm"] = float(params["bpm"])
+    params["drums_db"] = float(params["drums_db"])
+    params["kick_reinforce"] = bool(params["kick_reinforce"])
+    return json.loads(json.dumps(params))           # the form it has on disk
+
+
+def audio_bytes(path: Path) -> int:
+    """Size of an mp3 without its leading ID3v2 tag.
+
+    Tagging (``fourfloor export --format tags``) rewrites only the tag, so
+    this number is the same before and after, and different for any new or
+    cut-off encode.
+    """
+    path = Path(path)
+    size = path.stat().st_size
+    with path.open("rb") as fh:
+        head = fh.read(10)
+    if len(head) == 10 and head[:3] == b"ID3":
+        tag = (head[6] << 21) | (head[7] << 14) | (head[8] << 7) | head[9]
+        size -= 10 + tag + (10 if head[5] & 0x10 else 0)
+    return max(size, 0)
+
+
+def _write_stamp(out: Path, job: dict) -> None:
+    """Record, after a finished render, what it was asked for and how big it is."""
+    stamp = stamp_path_for(out)
+    tmp = stamp.with_name(stamp.name + ".tmp")
+    data = {"generator": "fourfloor", "params": render_params(job),
+            "audio_bytes": audio_bytes(out)}
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf8")
+    os.replace(tmp, stamp)
+
+
+def _legacy_mismatch(sess: dict, want: dict) -> str | None:
+    """Compare a render with no stamp against the request, by its session.
+
+    The session records the tempo, the key shift and the separation, kit,
+    bass and vocal it used. Anything a session cannot vouch for (a drum trim,
+    no kick reinforcement) has to be a render made before these existed, which
+    used the defaults.
+    """
+    src = sess.get("source") or {}
+    if abs(float(sess.get("bpm") or 0.0) - want["bpm"]) > 0.01:
+        return f"rendered at {sess.get('bpm')} BPM, not {want['bpm']:g}"
+    if want["key_strategy"] == "lock" and int(sess.get("semitone_shift") or 0):
+        return (f"shifted {int(sess['semitone_shift']):+d} st, but keys are "
+                "locked for this set")
+    if src.get("separation") and src["separation"] != want["stems"]:
+        return f"separated with {src['separation']}, not {want['stems']}"
+    kit = want["kit"] or "none"
+    drums = "synth" if kit.lower() == "none" else kit
+    if src.get("drums") and src["drums"] != drums:
+        return f"drums from {src['drums']}, not {drums}"
+    if want["vocal"] != "auto" and src.get("vocal") and src["vocal"] != want["vocal"]:
+        return f"vocal {src['vocal']}, not {want['vocal']}"
+    label = src.get("bass")
+    if want["bass"] != "auto" and label:
+        fits = {"source": label in ("demucs bass", "hpss low band"),
+                "sub": label.startswith("pitch-tracked sub"),
+                "none": label.startswith("none"),
+                "synth": label == "synth"}.get(want["bass"], True)
+        if not fits:
+            return f"bass {label}, not {want['bass']}"
+    if want["drums_db"] != 0.0 or not want["kick_reinforce"]:
+        return "no record of the drum settings it was rendered with"
+    return None
+
+
+def resume_check(source: Path, out_dir: Path, want: dict | None = None,
+                 dest: Path | None = None) -> tuple[bool, str]:
+    """Whether a finished render can stand in for this batch's, and why not.
+
+    Finished means the mp3, its session and its plan are all there and the mp3
+    is whole. The batch stamps each render it finishes with what it was asked
+    for and the size of its audio; a render whose stamp matches ``want`` (see
+    :func:`render_params`) is kept. A render with no stamp, or whose audio has
+    changed since -- an older batch, ``fourfloor remix`` writing over it, a
+    re-render interrupted mid-encode -- is judged by what its session says it
+    is, and by whether its mp3 is as long as the session says.
+    """
+    from .export import load_session, session_path_for
+
+    out = Path(dest) if dest is not None else output_for(source, out_dir)
+    if not out.is_file() or out.stat().st_size == 0:
+        return False, "no mp3"
+    if not session_path_for(out).is_file():
+        return False, "no session file"
+    try:
+        sess = load_session(out)
+    except Exception as exc:                          # noqa: BLE001
+        return False, str(exc)
+    if not plan_path_for(out).is_file():
+        return False, "no plan file (the render did not finish)"
+    if want is not None and want.get("wav") and not out.with_suffix(".wav").is_file():
+        return False, "no wav"
+    size = audio_bytes(out)
+
+    stamp = None
+    try:
+        stamp = json.loads(stamp_path_for(out).read_text(encoding="utf8"))
+    except (OSError, ValueError):
+        pass
+    if isinstance(stamp, dict) and stamp.get("audio_bytes") == size:
+        if want is None:
+            return True, ""
+        have = stamp.get("params") or {}
+        want_p = render_params(want)
+        diff = [f"{k} {have.get(k)!r} -> {want_p[k]!r}" for k in RENDER_KEYS
+                if have.get(k) != want_p[k]]
+        return (not diff), ("rendered with " + ", ".join(diff)) if diff else ""
+
+    duration = float(sess.get("duration") or 0.0)
+    if duration > 0 and size < MIN_COMPLETE * duration * MP3_BYTES_PER_SEC:
+        return False, (f"the mp3 holds {size / MP3_BYTES_PER_SEC:.1f}s of a "
+                       f"{duration:.1f}s render (cut off)")
+    if want is not None:
+        why = _legacy_mismatch(sess, render_params(want))
+        if why:
+            return False, why
+    return True, ""
+
+
+def already_done(source: Path, out_dir: Path, want: dict | None = None,
+                 dest: Path | None = None) -> bool:
+    """True when a finished render of ``source`` can be kept; see :func:`resume_check`."""
+    return resume_check(source, out_dir, want, dest)[0]
 
 
 def _row_from_session(source: Path, out: Path, sess: dict, status: str,
@@ -210,6 +358,10 @@ def _remix_one(job: dict) -> dict:
     try:
         from .remix import RemixOptions, remix
 
+        # Until this render finishes, whatever is at ``out`` is not a render of
+        # this job: an interrupted encode must not pass for a finished one.
+        stamp_path_for(out).unlink(missing_ok=True)
+
         opts = RemixOptions(
             target_bpm=job["bpm"], key=job.get("key"), stems=job.get("stems", "hpss"),
             form=job.get("form", "club"), length=job.get("length"),
@@ -220,8 +372,12 @@ def _remix_one(job: dict) -> dict:
             kick_reinforce=bool(job.get("kick_reinforce", True)),
         )
         res = remix(source, out, opts)
-        row = _row_from_session(source, Path(res.paths.get("mp3", out)), res.session,
-                                STATUS_OK, time.time() - t0)
+        mp3 = Path(res.paths.get("mp3", out))
+        try:
+            _write_stamp(mp3, job)
+        except OSError:
+            pass                    # still a good render; resume judges it by its session
+        row = _row_from_session(source, mp3, res.session, STATUS_OK, time.time() - t0)
         row.alignment = _alignment_of(getattr(res, "metrics", None))
         return asdict(row)
     except Exception as exc:                          # noqa: BLE001 - isolation is the point
@@ -335,22 +491,34 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
     on_event("start", {"tracks": len(sources), "bpm": bpm, "set": set_name,
                        "key_strategy": key_strategy, "out": str(out)})
 
+    # What every track is asked for; the key is added per track below.
+    request = {"bpm": float(bpm), "key_strategy": key_strategy, "stems": stems,
+               "form": form, "length": length, "swing": swing, "seed": seed,
+               "wav": wav, "kit": kit, "bass": bass, "vocal": vocal,
+               "drums_db": float(drums_db), "kick_reinforce": bool(kick_reinforce)}
+
     rows: dict[str, TrackRow] = {}
     pending: list[Path] = []
     for p in sources:
-        if resume and already_done(p, out):
-            dest = output_for(p, out)
-            try:
-                from .export import load_session
-                rows[str(p)] = _row_from_session(p, dest, load_session(dest),
-                                                 STATUS_SKIPPED)
-            except Exception as exc:                  # noqa: BLE001 - re-render it
-                on_event("resume_unreadable", {"source": str(p), "error": str(exc)})
-                pending.append(p)
-                continue
-            on_event("skipped", asdict(rows[str(p)]))
-        else:
+        if not resume:
             pending.append(p)
+            continue
+        dest = output_for(p, out)
+        keep, why = resume_check(p, out, request, dest=dest)
+        if not keep:
+            if dest.exists():
+                on_event("resume_stale", {"source": str(p), "reason": why})
+            pending.append(p)
+            continue
+        try:
+            from .export import load_session
+            rows[str(p)] = _row_from_session(p, dest, load_session(dest),
+                                             STATUS_SKIPPED)
+        except Exception as exc:                      # noqa: BLE001 - re-render it
+            on_event("resume_unreadable", {"source": str(p), "error": str(exc)})
+            pending.append(p)
+            continue
+        on_event("skipped", asdict(rows[str(p)]))
 
     flow: dict[str, dict] = {}
     if key_strategy == "auto" and pending:
@@ -379,11 +547,8 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
         return step.get("key") or None
 
     jobs_list = [
-        {"source": str(p), "output": str(output_for(p, out)), "bpm": float(bpm),
-         "key": _target_key(p), "stems": stems, "form": form, "length": length,
-         "swing": swing, "seed": seed, "wav": wav, "kit": kit, "bass": bass,
-         "vocal": vocal, "drums_db": float(drums_db),
-         "kick_reinforce": bool(kick_reinforce)}
+        {**request, "source": str(p), "output": str(output_for(p, out)),
+         "key": _target_key(p)}
         for p in pending
     ]
 
@@ -532,6 +697,10 @@ class Reporter:
             self._key_flow(payload.get("steps", []))
         elif kind in ("track", "skipped"):
             self._track_line(payload)
+        elif kind == "resume_stale":
+            print("  " + c.grey("redo") + " "
+                  + _clip(Path(payload["source"]).name, 40).ljust(42)
+                  + c.yellow(_clip(payload.get("reason") or "", 56)))
         elif kind == "export_failed":
             print(ui.warn(c, "export failed: " + str(payload.get("error"))))
 

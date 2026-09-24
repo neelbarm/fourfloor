@@ -148,6 +148,7 @@ def stub_remix(*, fail_on=(), calls=None, key_seen=None, opts_seen=None):
                             file=out.name)
         from fourfloor.export import session_path_for
         session_path_for(out).write_text(json.dumps(sess), encoding="utf8")
+        out.with_suffix(".plan.json").write_text("{}", encoding="utf8")
         return FakeResult({"mp3": out}, sess, {"alignment_score": 0.93})
 
     return _remix
@@ -662,6 +663,131 @@ def test_resume_re_renders_a_track_whose_session_file_is_corrupt(originals, tmp_
     assert state["calls"] == ["02 Nuit — Blanche.mp3"]
 
 
+def test_resume_re_renders_what_was_rendered_at_another_tempo(originals, tmp_path,
+                                                            engine) -> None:
+    """124 last week, 128 tonight: --resume must not keep the 124 renders."""
+    state = engine()
+    out = tmp_path / "gig"
+    batch.run(originals, out, bpm=124.0)
+    state["calls"].clear()
+    manifest = batch.run(originals, out, bpm=128.0, resume=True)
+    assert len(state["calls"]) == 3
+    assert manifest["summary"]["skipped"] == 0
+    assert {t["bpm"] for t in manifest["tracks"]} == {128.0}
+
+
+@pytest.mark.parametrize("change", [
+    {"stems": "demucs"}, {"bass": "sub"}, {"form": "tool"},
+    {"length": "3:00"}, {"seed": 7}, {"swing": 0.2}, {"key_strategy": "auto"},
+    {"vocal": "flow"}, {"drums_db": -1.75}, {"kick_reinforce": False},
+])
+def test_resume_re_renders_what_was_rendered_another_way(originals, tmp_path,
+                                                         engine, monkeypatch,
+                                                         change) -> None:
+    monkeypatch.setattr("fourfloor.analysis.analyze", stub_analyze({
+        "01 first.mp3": "8A", "02 Nuit — Blanche.mp3": "8A", "03 third.mp3": "8A"}))
+    state = engine()
+    out = tmp_path / "gig"
+    batch.run(originals, out, bpm=128.0)
+    state["calls"].clear()
+    batch.run(originals, out, bpm=128.0, resume=True, **change)
+    assert len(state["calls"]) == 3
+
+
+def test_resume_re_renders_what_was_rendered_with_another_kit(originals, tmp_path,
+                                                            engine,
+                                                            kits_home) -> None:
+    kits_home("murph")
+    state = engine()
+    out = tmp_path / "gig"
+    batch.run(originals, out, bpm=128.0)               # the default: murph
+    state["calls"].clear()
+    batch.run(originals, out, bpm=128.0, kit="murph", resume=True)
+    assert state["calls"] == []                        # same kit, named or not
+    batch.run(originals, out, bpm=128.0, kit="none", resume=True)
+    assert len(state["calls"]) == 3
+
+
+def test_resume_still_keeps_a_render_that_was_only_tagged(originals, tmp_path,
+                                                          engine) -> None:
+    """`export --format tags` rewrites the ID3 tag; the audio is the same."""
+    from fourfloor import export
+
+    state = engine()
+    out = tmp_path / "gig"
+    batch.run(originals, out, bpm=128.0)
+    for mp3 in out.glob("*.house.mp3"):
+        raw = mp3.read_bytes()
+        mp3.write_bytes(export.id3v23_tag([export.text_frame("TBPM", "128.00")]) + raw)
+    state["calls"].clear()
+    manifest = batch.run(originals, out, bpm=128.0, resume=True)
+    assert state["calls"] == [] and manifest["summary"]["skipped"] == 3
+
+
+def test_an_interrupted_re_render_is_not_mistaken_for_a_finished_one(
+        originals, tmp_path, engine, monkeypatch) -> None:
+    """A crash mid-encode over last night's render leaves a cut-off mp3 next
+    to last night's session. --resume has to render it again."""
+    engine()
+    out = tmp_path / "gig"
+    batch.run(originals, out, bpm=128.0)
+
+    def _crash_mid_encode(path, out_path, opts=None, **_kw):
+        if "02" in Path(path).name:
+            Path(out_path).write_bytes(b"\xff\xfb")    # the encoder got this far
+            raise KeyboardInterrupt
+        return stub_remix()(path, out_path, opts)
+
+    monkeypatch.setattr("fourfloor.remix.remix", _crash_mid_encode)
+    with pytest.raises(KeyboardInterrupt):
+        batch.run(originals, out, bpm=128.0)
+
+    state = engine()
+    state["calls"].clear()
+    batch.run(originals, out, bpm=128.0, resume=True)
+    assert state["calls"] == ["02 Nuit — Blanche.mp3"]
+
+
+def test_resume_keeps_an_older_render_that_matches(originals, tmp_path,
+                                                   engine) -> None:
+    """A set rendered before the batch stamped its renders is judged by its
+    session: same tempo, separation and kit, and the whole mp3 is there."""
+    out = tmp_path / "gig"
+    for p in sorted(originals.iterdir()):
+        _finished_by_hand(batch.output_for(p, out), bpm=128.0,
+                          separation="demucs", drums="synth")
+    state = engine()
+    manifest = batch.run(originals, out, bpm=128.0, stems="demucs", resume=True)
+    assert state["calls"] == [] and manifest["summary"]["skipped"] == 3
+
+
+def test_resume_judges_an_older_render_by_its_session(originals, tmp_path,
+                                                      engine) -> None:
+    out = tmp_path / "gig"
+    names = sorted(originals.iterdir())
+    _finished_by_hand(batch.output_for(names[0], out), bpm=124.0)          # tempo
+    _finished_by_hand(batch.output_for(names[1], out), bpm=128.0,
+                      separation="hpss")                                   # stems
+    _finished_by_hand(batch.output_for(names[2], out), bpm=128.0,
+                      separation="demucs", complete=False)                 # cut off
+    state = engine()
+    batch.run(originals, out, bpm=128.0, stems="demucs", resume=True)
+    assert len(state["calls"]) == 3
+
+
+def test_resume_says_why_it_renders_a_track_again(originals, tmp_path, engine,
+                                                  capsys) -> None:
+    from fourfloor import ui
+
+    engine()
+    out = tmp_path / "gig"
+    batch.run(originals, out, bpm=124.0)
+    batch.run(originals, out, bpm=128.0, resume=True,
+              on_event=batch.Reporter(ui.C(False)))
+    text = capsys.readouterr().out
+    assert "redo" in text and "124" in text and "128" in text
+
+
 def test_a_skipped_track_still_appears_in_the_export(originals, tmp_path,
                                                      engine) -> None:
     engine()
@@ -673,17 +799,35 @@ def test_a_skipped_track_still_appears_in_the_export(originals, tmp_path,
     assert root.find("COLLECTION").get("Entries") == "3"
 
 
-def test_already_done_needs_both_files(originals, tmp_path) -> None:
+def _finished_by_hand(dest: Path, bpm: float = 126.0, seconds: float = 2.0,
+                     complete: bool = True, **source) -> None:
+    """A render with no batch stamp: what an older batch or `remix` leaves."""
+    from fourfloor.export import session_path_for
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    whole = int(seconds * batch.MP3_BYTES_PER_SEC)
+    dest.write_bytes(b"\xff\xfb\x90\x00" * (whole // 4 if complete else whole // 40))
+    sess = make_session(bpm=bpm, duration=seconds, file=dest.name)
+    sess["source"].update(source)
+    session_path_for(dest).write_text(json.dumps(sess), encoding="utf8")
+    batch.plan_path_for(dest).write_text("{}", encoding="utf8")
+
+
+def test_already_done_needs_the_mp3_the_session_and_the_plan(originals,
+                                                             tmp_path) -> None:
+    from fourfloor.export import session_path_for
+
     out = tmp_path / "gig"
     src = originals / "01 first.mp3"
-    assert batch.already_done(src, out) is False
     dest = batch.output_for(src, out)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(b"\x00")
     assert batch.already_done(src, out) is False
-    from fourfloor.export import session_path_for
-    session_path_for(dest).write_text("{}", encoding="utf8")
+    _finished_by_hand(dest)
     assert batch.already_done(src, out) is True
+    batch.plan_path_for(dest).unlink()
+    assert batch.already_done(src, out) is False       # died before the plan
+    batch.plan_path_for(dest).write_text("{}", encoding="utf8")
+    session_path_for(dest).write_text("{}", encoding="utf8")
+    assert batch.already_done(src, out) is False       # not a session file
 
 
 def test_output_naming_keeps_the_original_name(tmp_path) -> None:
