@@ -50,6 +50,24 @@ class Job:
             self._cv.notify_all()
         return event
 
+    def finish(self, state: str, type: str, **data: Any) -> dict:
+        """End the job: its last event and its final state, in one step.
+
+        A follower stops once it sees a finished job with nothing left to
+        read. If the state changed first and the event came after, a follower
+        waking in between would stop without the ``done`` or ``error`` -- the
+        page is then told the stream ended and never hears how.
+        """
+        with self._cv:
+            self.finished = time.time()
+            event = {"type": type,
+                     "at": round(self.finished - (self.started or self.created), 3),
+                     **data}
+            self.events.append(event)
+            self.state = state
+            self._cv.notify_all()
+        return event
+
     @property
     def is_finished(self) -> bool:
         return self.state in (DONE, FAILED)
@@ -161,16 +179,12 @@ class JobQueue:
                 result = fn(job)
             except Exception as exc:                # noqa: BLE001 - reported to the browser
                 job.error = str(exc) or exc.__class__.__name__
-                job.state = FAILED
-                job.finished = time.time()
-                job.emit("error", message=job.error,
-                         detail=traceback.format_exc(limit=3).strip().splitlines()[-1])
+                detail = traceback.format_exc(limit=3).strip().splitlines()[-1]
+                job.finish(FAILED, "error", message=job.error, detail=detail)
             else:
                 job.result = result
-                job.state = DONE
-                job.finished = time.time()
-                job.emit("done", result=result,
-                         elapsed=round(job.finished - job.started, 2))
+                job.finish(DONE, "done", result=result,
+                           elapsed=round(time.time() - job.started, 2))
 
 
 class PhaseTimer:
