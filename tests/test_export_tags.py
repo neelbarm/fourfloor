@@ -222,3 +222,59 @@ def test_export_with_serato_says_the_format_is_unverified(remix, tmp_path) -> No
     res = export.export(remix.path, "Friday", formats=["serato"], out_dir=tmp_path)
     assert any("Serato" in n and "check one track" in n for n in res.notes)
     assert res.tagged and res.tagged[0]["serato"] is True
+
+
+# ---------------------------------------------------------------------------
+# rekordbox.xml after tagging
+# ---------------------------------------------------------------------------
+
+def _xml_sizes(xml_path) -> dict[str, str]:
+    import xml.etree.ElementTree as ET
+    from urllib.parse import unquote
+
+    root = ET.parse(xml_path).getroot()
+    return {unquote(t.get("Location")).rsplit("/", 1)[-1]: t.get("Size")
+            for t in root.iterfind("COLLECTION/TRACK")}
+
+
+def test_tagging_later_refreshes_the_size_in_rekordbox_xml(remix) -> None:
+    """The documented flow: batch writes the XML, `export --format tags` tags.
+
+    Tagging changes the file's size, so the collection has to follow it.
+    """
+    folder = remix.path.parent
+    export.export(folder, "Friday", formats=["rekordbox", "csv"])
+    before = _xml_sizes(folder / "rekordbox.xml")[remix.path.name]
+    assert before == str(remix.path.stat().st_size)
+
+    export.export(folder, "Friday", formats=["tags", "serato"])
+    after = _xml_sizes(folder / "rekordbox.xml")[remix.path.name]
+    assert remix.path.stat().st_size != int(before)
+    assert after == str(remix.path.stat().st_size)
+
+
+def test_exporting_everything_at_once_describes_the_tagged_file(remix) -> None:
+    folder = remix.path.parent
+    export.export(folder, "Friday", formats=["all"])
+    size = _xml_sizes(folder / "rekordbox.xml")[remix.path.name]
+    assert size == str(remix.path.stat().st_size)
+
+
+def test_refreshing_sizes_keeps_the_rest_of_the_collection(remix) -> None:
+    import xml.etree.ElementTree as ET
+
+    folder = remix.path.parent
+    export.export(folder, "Friday", formats=["rekordbox"])
+    xml_path = folder / "rekordbox.xml"
+    root = ET.parse(xml_path).getroot()
+    before = {k: v for k, v in root.find("COLLECTION/TRACK").attrib.items()
+              if k != "Size"}
+    export.export(folder, "Friday", formats=["tags"])
+    text = xml_path.read_text(encoding="utf8")
+    assert text.startswith('<?xml version="1.0" encoding="UTF-8"?>')
+    root = ET.fromstring(text)
+    after = {k: v for k, v in root.find("COLLECTION/TRACK").attrib.items()
+             if k != "Size"}
+    assert after == before
+    assert root.find("PLAYLISTS/NODE/NODE").get("Name") == "Friday"
+    assert len(root.findall("COLLECTION/TRACK/POSITION_MARK")) >= 2

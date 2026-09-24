@@ -229,14 +229,34 @@ def collect(target: str | Path, artist: str = GENERATOR,
     else:
         raise FileNotFoundError(str(target))
 
-    tracks = []
-    for p in candidates:
-        sess = load_session(p)
-        name = title_from_path(p)
-        tracks.append(Track(path=p, session=sess,
-                            title=name + (TITLE_SUFFIX if suffix else ""),
-                            artist=artist))
-    return tracks
+    return [_track(p, load_session(p), artist, suffix) for p in candidates]
+
+
+def _track(path: Path, sess: dict, artist: str, suffix: bool) -> Track:
+    return Track(path=path, session=sess,
+                 title=title_from_path(path) + (TITLE_SUFFIX if suffix else ""),
+                 artist=artist)
+
+
+def load_tracks(paths, artist: str = GENERATOR,
+                suffix: bool = False) -> tuple[list[Track], list[str]]:
+    """Tracks for exactly these remixes, in this order, one session at a time.
+
+    What a batch exports: the tracks it just produced, not whatever else is
+    lying in the folder. A session that cannot be read drops that one track,
+    with a note saying so, instead of the whole set's rekordbox.xml.
+    """
+    tracks: list[Track] = []
+    notes: list[str] = []
+    for p in paths:
+        p = Path(p)
+        try:
+            sess = load_session(p)
+        except ExportError as exc:
+            notes.append(f"left {p.name} out of the export: {exc}")
+            continue
+        tracks.append(_track(p, sess, artist, suffix))
+    return tracks, notes
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +367,54 @@ def write_rekordbox(tracks: list[Track], out_dir: str | Path, set_name: str,
     path = out / filename
     path.write_text(rekordbox_xml(tracks, set_name), encoding="utf8")
     return path
+
+
+def _location_key(location: str) -> str:
+    """A ``Location`` URL as a comparable real path."""
+    from urllib.parse import unquote
+
+    text = location
+    for prefix in ("file://localhost", "file://"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return os.path.realpath(unquote(text))
+
+
+def refresh_rekordbox_sizes(xml_path: str | Path, paths) -> int:
+    """Rewrite the ``Size`` of every collection entry for ``paths``.
+
+    Tagging replaces the ID3 tag at the head of an mp3, so the file grows or
+    shrinks by a few hundred bytes while its audio stays identical. A
+    rekordbox.xml written before that would describe a file that no longer
+    exists byte for byte. Everything else in the document is left as it was.
+    Returns how many entries changed.
+    """
+    xml_path = Path(xml_path)
+    wanted = {os.path.realpath(str(Path(p).expanduser().absolute())): Path(p)
+              for p in paths}
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    changed = 0
+    for el in root.iterfind("COLLECTION/TRACK"):
+        p = wanted.get(_location_key(el.get("Location", "")))
+        if p is None or not p.is_file():
+            continue
+        size = str(p.stat().st_size)
+        if el.get("Size") != size:
+            el.set("Size", size)
+            changed += 1
+    if changed:
+        body = ET.tostring(root, encoding="unicode")
+        tmp = xml_path.with_name(xml_path.name + ".fourfloor-tmp")
+        try:
+            tmp.write_text('<?xml version="1.0" encoding="UTF-8"?>\n' + body + "\n",
+                           encoding="utf8")
+            os.replace(tmp, xml_path)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +870,18 @@ def export(target: str | Path, set_name: str, formats=None,
         want_serato = "serato" in wanted
         for t in tracks:
             res.tagged.append(tag_file(t, serato=want_serato, verify=verify))
+        # A rekordbox.xml -- this run's, or the one a batch left beside the
+        # files -- recorded each mp3's size before its tag changed.
+        xmls = {out / "rekordbox.xml"} | {t.path.parent / "rekordbox.xml"
+                                          for t in tracks}
+        for xml_path in sorted(xmls):
+            if not xml_path.is_file():
+                continue
+            try:
+                refresh_rekordbox_sizes(xml_path, [t.path for t in tracks])
+            except (OSError, ET.ParseError) as exc:
+                res.notes.append(f"could not update the file sizes in {xml_path}: "
+                                 f"{exc}; export --format rekordbox again")
         if want_serato:
             res.notes.append(
                 "Serato cues were written to a 'Serato Markers2' GEOB frame from "
