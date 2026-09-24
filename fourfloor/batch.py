@@ -215,7 +215,9 @@ def _remix_one(job: dict) -> dict:
             form=job.get("form", "club"), length=job.get("length"),
             swing=job.get("swing"), seed=job.get("seed", 0),
             wav=bool(job.get("wav", False)), kit=job.get("kit"),
-            bass=job.get("bass", "auto"),
+            bass=job.get("bass", "auto"), vocal=job.get("vocal", "auto"),
+            drums_db=float(job.get("drums_db", 0.0)),
+            kick_reinforce=bool(job.get("kick_reinforce", True)),
         )
         res = remix(source, out, opts)
         row = _row_from_session(source, Path(res.paths.get("mp3", out)), res.session,
@@ -254,17 +256,54 @@ def _source_keys(sources: list[Path], on_event) -> list[str]:
     return codes
 
 
+def _check_options(out: Path, *, bpm, stems, kit, bass, length, form, swing, seed,
+                   wav, vocal, drums_db, kick_reinforce) -> str:
+    """Refuse a bad flag before any track is analysed, and name the one kit.
+
+    Without this a typo reached every track separately: a misspelt ``--kit``
+    was only noticed after each track's decode, analysis, warp and (with
+    Demucs) minutes of separation, and the whole set came out empty.
+
+    Returns the concrete kit name every track will use -- the one asked for,
+    else the default right now, else ``"none"`` for the synthesised kit.
+    """
+    from . import kit as kit_mod
+    from .remix import RemixOptions, validate_options
+
+    opts = RemixOptions(target_bpm=float(bpm), stems=stems, form=form, length=length,
+                        swing=swing, seed=seed, wav=wav, kit=kit, bass=bass,
+                        vocal=vocal, drums_db=float(drums_db),
+                        kick_reinforce=bool(kick_reinforce))
+    try:
+        validate_options(opts, out / "check.house.mp3")
+    except ValueError as exc:
+        raise BatchError(str(exc)) from exc
+    name = kit or kit_mod.default_name() or "none"
+    if name.lower() != "none":
+        try:
+            kit_mod.load(name)
+        except FileNotFoundError as exc:
+            raise BatchError(str(exc)) from exc
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise BatchError(f"the {name!r} kit could not be read: {exc}") from exc
+    return name
+
+
 def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
         key_strategy: str = "lock", stems: str = "hpss", kit: str | None = None,
         bass: str = "auto", jobs: int = 1, resume: bool = False,
         length: str | None = None, form: str = "club", swing: float | None = None,
         seed: int = 0, wav: bool = False, set_name: str | None = None,
-        artist: str = "fourfloor", on_event=None) -> dict:
+        artist: str = "fourfloor", vocal: str = "auto", drums_db: float = 0.0,
+        kick_reinforce: bool = True, on_event=None) -> dict:
     """Remix every track in ``folder`` at ``bpm`` and export the set.
 
-    ``kit`` and ``bass`` are handed to every track unchanged: a set wants one
-    drum kit and one low-end policy across it, not a different decision per
-    file. Their meanings are :class:`~fourfloor.remix.RemixOptions`'s.
+    ``kit``, ``bass``, ``vocal``, ``drums_db`` and ``kick_reinforce`` are
+    handed to every track unchanged: a set wants one drum kit and one low-end
+    policy across it, not a different decision per file. Their meanings are
+    :class:`~fourfloor.remix.RemixOptions`'s. With no ``kit`` the default kit
+    is looked up once, here, so a kit built while the batch runs cannot change
+    the drums halfway through the set.
 
     ``on_event(kind, payload)`` is called as things happen so a terminal (or a
     web app) can draw progress without this module knowing about either.
@@ -277,6 +316,10 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
         raise NotADirectoryError(str(src_dir))
     if key_strategy not in ("lock", "auto"):
         raise BatchError(f"key strategy must be 'lock' or 'auto', not {key_strategy!r}")
+    kit = _check_options(out, bpm=bpm, stems=stems, kit=kit, bass=bass,
+                         length=length, form=form, swing=swing, seed=seed, wav=wav,
+                         vocal=vocal, drums_db=drums_db,
+                         kick_reinforce=kick_reinforce)
     jobs = max(1, int(jobs))
     set_name = set_name or src_dir.name
 
@@ -338,7 +381,9 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
     jobs_list = [
         {"source": str(p), "output": str(output_for(p, out)), "bpm": float(bpm),
          "key": _target_key(p), "stems": stems, "form": form, "length": length,
-         "swing": swing, "seed": seed, "wav": wav, "kit": kit, "bass": bass}
+         "swing": swing, "seed": seed, "wav": wav, "kit": kit, "bass": bass,
+         "vocal": vocal, "drums_db": float(drums_db),
+         "kick_reinforce": bool(kick_reinforce)}
         for p in pending
     ]
 
@@ -413,6 +458,9 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
         "stems": stems,
         "kit": kit,
         "bass": bass,
+        "vocal": vocal,
+        "drums_db": float(drums_db),
+        "kick_reinforce": bool(kick_reinforce),
         "form": form,
         "length": length,
         "jobs": jobs,

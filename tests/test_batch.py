@@ -164,6 +164,30 @@ def originals(tmp_path) -> Path:
 
 
 @pytest.fixture
+def kits_home(tmp_path, monkeypatch):
+    """A private FOURFLOOR_HOME, and a way to put a kit in it."""
+    import time as _time
+
+    import numpy as np
+
+    from fourfloor.audio import write_wav
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("FOURFLOOR_HOME", str(home))
+
+    def add(name: str) -> str:
+        folder = home / "kits" / name
+        folder.mkdir(parents=True)
+        write_wav(folder / "loop.wav", np.zeros(4410, dtype=np.float32))
+        (folder / "meta.json").write_text(json.dumps({"name": name, "bars": 8}),
+                                          encoding="utf8")
+        _time.sleep(0.01)                   # newest-built is judged by mtime
+        return name
+
+    return add
+
+
+@pytest.fixture
 def engine(monkeypatch):
     """Install a stub renderer and hand back the knobs to configure it."""
     state = {"calls": [], "keys": {}, "opts": {}}
@@ -237,8 +261,9 @@ def test_every_track_is_rendered_at_the_one_tempo(originals, tmp_path, engine) -
 
 
 def test_one_kit_and_one_bass_policy_reach_every_track(originals, tmp_path,
-                                                       engine) -> None:
+                                                       engine, kits_home) -> None:
     """A set wants one drum kit and one low end, not a decision per file."""
+    kits_home("murph")
     state = engine()
     manifest = batch.run(originals, tmp_path / "gig", bpm=126.0,
                          kit="murph", bass="sub", stems="hpss", form="tool")
@@ -286,6 +311,92 @@ def test_key_lock_asks_the_engine_for_no_key_change(originals, tmp_path,
     batch.run(originals, tmp_path / "gig", bpm=126.0, key_strategy="lock")
     assert set(state["keys"].values()) == {None}
     assert batch.run(originals, tmp_path / "gig2", bpm=126.0)["key_flow"] == []
+
+
+def test_the_default_kit_is_chosen_once_for_the_whole_set(originals, tmp_path,
+                                                         engine, kits_home,
+                                                         monkeypatch) -> None:
+    """A kit built halfway through a batch must not change the drums mid-set."""
+    kits_home("first-kit")
+    state = engine()
+    real = batch._remix_one
+
+    def _build_a_kit_after_track_one(job):
+        row = real(job)
+        if "01" in job["source"]:
+            kits_home("built-meanwhile")          # e.g. `fourfloor refs add`
+        return row
+
+    monkeypatch.setattr(batch, "_remix_one", _build_a_kit_after_track_one)
+    manifest = batch.run(originals, tmp_path / "gig", bpm=126.0)
+    assert {o.kit for o in state["opts"].values()} == {"first-kit"}
+    assert manifest["kit"] == "first-kit"
+
+
+def test_with_no_kits_at_all_the_set_uses_the_synthesised_kit(originals, tmp_path,
+                                                              engine,
+                                                              kits_home) -> None:
+    state = engine()
+    manifest = batch.run(originals, tmp_path / "gig", bpm=126.0)
+    assert {o.kit for o in state["opts"].values()} == {"none"}
+    assert manifest["kit"] == "none"
+
+
+def test_a_misspelt_kit_is_refused_before_any_track_is_touched(originals, tmp_path,
+                                                               engine,
+                                                               kits_home) -> None:
+    kits_home("murph")
+    state = engine()
+    with pytest.raises(BatchError, match="murhp"):
+        batch.run(originals, tmp_path / "gig", bpm=128.0, kit="murhp")
+    assert state["calls"] == []
+
+
+@pytest.mark.parametrize("bad", [
+    {"bpm": 400.0}, {"length": "forever"}, {"swing": 0.9}, {"stems": "magic"},
+    {"bass": "tuba"}, {"form": "opera"}, {"vocal": "yodel"}, {"drums_db": 40.0},
+])
+def test_a_bad_option_is_refused_before_any_track_is_read(originals, tmp_path,
+                                                          engine, monkeypatch,
+                                                          bad) -> None:
+    """Even with --key auto, whose pre-pass analyses every track first."""
+    state = engine()
+    read = []
+    monkeypatch.setattr("fourfloor.analysis.analyze",
+                        lambda p, **_k: read.append(p) or (_ for _ in ()).throw(
+                            RuntimeError("should not be reached")))
+    kw = {"bpm": 128.0, "key_strategy": "auto", **bad}
+    with pytest.raises(BatchError):
+        batch.run(originals, tmp_path / "gig", **kw)
+    assert read == [] and state["calls"] == []
+    assert not (tmp_path / "gig").exists()
+
+
+def test_vocal_drum_trim_and_kick_reach_every_track(originals, tmp_path,
+                                                    engine) -> None:
+    """What `remix` can ask for one track, a set can ask for all of them."""
+    state = engine()
+    manifest = batch.run(originals, tmp_path / "gig", bpm=128.0, vocal="flow",
+                         drums_db=-1.75, kick_reinforce=False)
+    for opts in state["opts"].values():
+        assert opts.vocal == "flow"
+        assert opts.drums_db == -1.75
+        assert opts.kick_reinforce is False
+    assert (manifest["vocal"], manifest["drums_db"],
+            manifest["kick_reinforce"]) == ("flow", -1.75, False)
+
+
+def test_the_new_options_default_to_what_remix_does(originals, tmp_path,
+                                                    engine) -> None:
+    """The loved CAN'T SAY recipe renders the same through batch as remix."""
+    from fourfloor.remix import RemixOptions
+
+    state = engine()
+    batch.run(originals, tmp_path / "gig", bpm=128.0)
+    d = RemixOptions()
+    for opts in state["opts"].values():
+        assert (opts.vocal, opts.drums_db, opts.kick_reinforce) == (
+            d.vocal, d.drums_db, d.kick_reinforce)
 
 
 # ---------------------------------------------------------------------------
