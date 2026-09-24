@@ -14,66 +14,87 @@ continuously. Cut it into pieces that each begin on a syllable and each land on
 a beat, repeat the good ones, and leave gaps. Every slice re-synchronises at
 its own start, so nothing has time to drift.
 
-The measurement decides. A voice that already sits on the straight grid is
-played straight through, which is what a listener liked about the CAN'T SAY
-render; a voice that sits on a triplet grid is chopped.
+The measurement decides, and it has to be a measurement that can say "I do
+not know". The first version compared how much of the voice sat on a
+sixteenth lattice with how much sat on a six-per-beat one, each within 30 ms.
+The denser lattice wins that by luck -- a voice with no rhythm at all reads 51%
+against 77% at 128 BPM -- so every real voice came out a triplet flow and was
+chopped: CAN'T SAY, whose flowing vocal is the render a listener loved, and
+sung pop along with it. Measured on the separated, warped stems, CAN'T SAY
+(62/83) and *Body* (63/83) were indistinguishable on it.
+
+What decides now is a comparison luck cannot win: of the syllables that land
+on a triplet-only position or a sixteenth-only one -- two zones of the same
+width -- the share on the triplet ones, phrase after phrase, with the voice's
+own lag behind the beat taken out first. Luck gives one half at any tempo. A
+voice is chopped only when that share is well clear of a half *and* it holds in
+most four-bar phrases; everything else is played as it was sung, which is the
+default the loved render had.
+
+Calibration, on the demucs vocal stems (``--shifts 0``) warped to 128, read by
+:func:`~fourfloor.analysis.alignment.vocal_fit` -- triplet share, share of
+four-bar phrases where the triplet positions win, and what the old lattice fit
+said (straight / six-per-beat):
+
+======================  =====  =====  =========
+CAN'T SAY               0.47   0.31   0.62/0.83
+Body                    0.55   0.64   0.63/0.83
+You Belong With Me      0.51   0.44   0.59/0.78
+Never Be Like You       0.49   0.42   0.43/0.77
+The Sweet Escape        0.39   0.30   0.51/0.85
+E85                     0.44   0.32   0.64/0.80
+Cold Shoulder           0.47   0.40   0.56/0.77
+rhythmless voice        0.43-0.60  0.29-0.78  (36 synthetic runs, 100-150 BPM)
+======================  =====  =====  =========
+
+*Body* leans to the triplet grid more than any of the others -- but no further
+than a voice with syllables placed at random does by luck, so a threshold that
+chopped it would chop about one rhythmless voice in five. The thresholds sit
+above what luck reaches: a voice is chopped only when its syllables are clearly
+on the triplet grid, phrase after phrase, and everything else is played as it
+was sung, the default the loved CAN'T SAY render had. ``--vocal chop`` chops a
+voice on request (*Body* included) and ``--vocal flow`` never does.
 """
 
 from __future__ import annotations
 
-#: How much of a voice has to sit on the straight sixteenth lattice before it
-#: can simply be played. Measured on two Don Toliver records warped to 128:
-#: CAN'T SAY, which a listener called amazing played straight, and *Body*,
-#: which he called "terrible with overlaps".
-STRAIGHT_LOCK = 0.72
+#: Of the syllables on a triplet-only or a sixteenth-only position, the share
+#: on triplet ones before a voice counts as a triplet flow. Chance is 0.5 at
+#: any tempo, and a rhythmless voice reached 0.60 by luck in 36 runs.
+TRIPLET_SHARE = 0.62
 
-#: ...and how much better the triplet lattice has to fit before the voice is
-#: treated as a triplet flow rather than as a loose straight one.
-TRIPLET_EDGE = 0.06
-
-#: How far under the lock a voice has to sit before it is chopped even though
-#: no other grid fits it better -- a voice this loose is not playing anything a
-#: four-on-the-floor kit agrees with. Expressed as a distance from the lock
-#: rather than as its own number, so that a lock learned from reference pairs
-#: moves the whole decision with it: ``0.72 - 0.12`` is the 0.60 this was
-#: calibrated at.
-LOOSE_MARGIN = 0.12
+#: ...and the share of four-bar phrases that have to agree (luck reached 0.78,
+#: but never together with a share this high).
+TRIPLET_WINDOWS = 0.65
 
 #: Below this there is not enough voice in the stem to be worth deciding about.
 MIN_DUTY = 0.05
 
 
-def choose_vocal(vocals, sr: int, bpm: float,
-                 learned: dict | None = None) -> tuple[str, dict, str]:
+def choose_vocal(vocals, sr: int, bpm: float) -> tuple[str, dict, str]:
     """``("flow" | "chop", measurement, why)`` for a separated vocal stem.
 
-    ``learned`` replaces the two thresholds with ones measured from reference
-    pairs -- what *this* DJ's remixers did with voices that fitted the grid this
-    well (:mod:`fourfloor.refs.learned`). Without it, or with fewer than a
-    handful of pairs behind it, the numbers below stand.
+    Thresholds learned from reference pairs (``straight_lock`` in the style
+    file) are no longer read here: they were fitted on the raw sixteenth-lattice
+    fit of each *original* at its own tempo, a number dominated by how much of
+    the timeline the lattice covers at that tempo, so it was not on the scale of
+    anything the engine measures and three chance-level pairs could flip the
+    decision.
     """
     from ..analysis.alignment import vocal_fit
-
-    if learned is None:
-        from ..refs.learned import vocal_thresholds
-        learned = vocal_thresholds()
-    lock = float(learned.get("straight_lock", STRAIGHT_LOCK)) if learned else STRAIGHT_LOCK
-    edge = float(learned.get("triplet_edge", TRIPLET_EDGE)) if learned else TRIPLET_EDGE
-    floor = max(0.0, lock - LOOSE_MARGIN)
 
     m = vocal_fit(vocals, sr, bpm)
     if m["duty"] < MIN_DUTY:
         return "flow", m, "there is barely a vocal in this to arrange"
-    if m["straight"] >= lock:
-        return "flow", m, (
-            f"{m['straight']:.0%} of the vocal already lands on the grid, so it "
-            "is played as it was sung")
-    if m["advantage"] >= edge or m["straight"] < floor:
+    share, windows = m["triplet_share"], m["triplet_windows"]
+    if share >= TRIPLET_SHARE and windows >= TRIPLET_WINDOWS:
         return "chop", m, (
-            f"the vocal fits a triplet grid better than a straight one "
-            f"({m['triplet']:.0%} against {m['straight']:.0%}) -- a triplet flow "
-            "will not lock to four-on-the-floor however it is warped, so it is "
-            "chopped into slices that each start on a syllable and land on a beat")
+            f"the vocal is a triplet flow: {share:.0%} of its off-grid syllables "
+            f"land on triplet positions, in {windows:.0%} of its phrases -- a "
+            "triplet flow will not lock to four-on-the-floor however it is "
+            "warped, so it is chopped into slices that each start on a syllable "
+            "and land on a beat")
     return "flow", m, (
-        f"{m['straight']:.0%} of the vocal lands on the grid and no other grid "
-        "fits it better, so it is played as it was sung")
+        f"the vocal is not a triplet flow ({share:.0%} of its off-grid syllables "
+        "sit on triplet positions, where chance alone gives 50%), so it is "
+        "played as it was sung")

@@ -15,17 +15,19 @@ both halves:
 * how much of the singing **survived**, as the ratio of the two duty cycles.
 
 :func:`table` tabulates those against the tempo the remixer chose, across every
-pair, and that table is written into ``~/.fourfloor/style.json``. Two call sites
-read it when it is there:
+pair, and that table is written into ``~/.fourfloor/style.json``.
+:func:`~fourfloor.analysis.suggest_house_tempo` reads it when it is there, and
+biases its tie-break toward the tempo the references actually sit at instead of
+a flat 124 -- conservatively: no file, no change, and a table built from fewer
+than :data:`MIN_PAIRS` pairs is not trusted.
 
-* :func:`~fourfloor.house.vocal.choose_vocal`, which is what ``--vocal auto``
-  runs, takes its straight-lock threshold from the pairs instead of from the two
-  records it was originally calibrated on;
-* :func:`~fourfloor.analysis.suggest_house_tempo` biases its tie-break toward
-  the tempo the references actually sit at instead of a flat 124.
-
-Both are conservative by construction: no file, no change, and a table built
-from fewer than :data:`MIN_PAIRS` pairs is not trusted with either.
+The vocal table's ``straight_lock`` is recorded and reported, but ``--vocal
+auto`` (:func:`~fourfloor.house.vocal.choose_vocal`) no longer reads it. It is
+the raw sixteenth-lattice fit of each *original*, at the original's own tempo
+and phase, and at a fixed tolerance that number is mostly the share of the
+timeline the lattice covers at that tempo (0.51 at 128 BPM, 0.60 at 150): three
+chance-level pairs moved the engine's lock from 0.72 to 0.5, which was enough to
+flip a decision, and it was not on the scale of anything the engine measures.
 """
 
 from __future__ import annotations
@@ -116,7 +118,9 @@ def learned_bpm(home_dir: str | os.PathLike | None = None) -> float | None:
 
 
 def vocal_thresholds(home_dir: str | os.PathLike | None = None) -> dict | None:
-    """Learned ``straight_lock`` / ``triplet_edge`` for ``--vocal auto``.
+    """Learned ``straight_lock`` / ``triplet_edge``, for the report.
+
+    Not read by ``--vocal auto`` any more; see the module docstring.
 
     The rule the pairs imply is simple and it is the one a producer would state:
     the lowest straight-lattice fit among the originals that were nonetheless

@@ -2,11 +2,12 @@
 
 A listener called one of these renders amazing and the other "terrible with
 overlaps". The plans were structurally identical; what differed was the voice.
-CAN'T SAY sits on a straight sixteenth lattice and can simply be played. *Body*
-is a triplet flow -- three syllables to the beat -- which lands a third of a
-beat from anything on that lattice and will not lock to four-on-the-floor
-however it is warped. These tests pin down the measurement that tells them
-apart and the chopping that rescues the second case.
+CAN'T SAY is played as it was sung. A triplet flow -- three syllables to the
+beat -- lands a third of a beat from anything on a sixteenth lattice and will
+not lock to four-on-the-floor however it is warped. These tests pin down the
+measurement that tells the two apart (and that a voice with no rhythm at all
+is *not* a triplet flow, which the first measure got wrong: it chopped CAN'T
+SAY), and the chopping that rescues the second case.
 """
 
 from __future__ import annotations
@@ -83,14 +84,121 @@ def test_a_voice_that_locks_is_played_as_it_was_sung() -> None:
     """The CAN'T SAY case, and the one a listener liked."""
     mode, m, why = choose_vocal(voice(STRAIGHT), SR, BPM)
     assert mode == "flow", (m, why)
-    assert "lands on the grid" in why
+    assert "played as it was sung" in why
 
 
 def test_a_voice_that_will_not_lock_is_chopped() -> None:
-    """The Body case, and the one he called terrible."""
+    """A triplet flow, the case chopping exists for."""
     mode, m, why = choose_vocal(voice(TRIPLET), SR, BPM)
     assert mode == "chop", (m, why)
     assert "triplet" in why
+
+
+def voice_at(times, seconds: float, hz: float = 220.0, sr: int = SR) -> np.ndarray:
+    """Syllables at arbitrary times, in seconds."""
+    n = int(seconds * sr)
+    x = np.zeros(n, dtype=np.float32)
+    ln = int(0.13 * sr)
+    t = np.arange(ln) / sr
+    syl = (np.sin(2 * np.pi * hz * t) * (1 + 0.5 * np.sin(2 * np.pi * 6 * t))
+           * np.exp(-t / 0.05)).astype(np.float32)
+    for s in times:
+        a = int(round(s * sr))
+        b = min(n, a + ln)
+        if 0 <= a < b:
+            x[a:b] += syl[: b - a]
+    return x
+
+
+def flow(positions_per_beat, seconds=180.0, lag=0.0, jitter=0.0, keep=1.0, seed=0):
+    """A voice on the given in-beat positions, ``lag`` seconds late, each
+    syllable jittered by up to ``jitter``. ``positions_per_beat`` maps each
+    position to the probability a syllable is sung there."""
+    rng = np.random.default_rng(seed)
+    beats = np.arange(0.0, seconds - 1.0, BEAT)
+    times = [b + p * BEAT for b in beats for p, prob in positions_per_beat.items()
+             if rng.random() < prob * keep]
+    times = np.sort(np.asarray(times) + lag + rng.uniform(-jitter, jitter, len(times)))
+    return voice_at(times, seconds)
+
+
+#: A sung or rapped straight line leans on the beat and the "and"; the
+#: sixteenths between are the ornaments.
+STRAIGHT_LINE = {0.0: 0.9, 0.25: 0.35, 0.5: 0.8, 0.75: 0.35}
+TRIPLET_LINE = {0.0: 0.8, 1 / 3: 0.7, 2 / 3: 0.7}
+
+
+def test_a_voice_with_no_rhythm_is_not_called_a_triplet_flow() -> None:
+    """The regression that chopped CAN'T SAY.
+
+    The old rule compared a 16th lattice with a denser six-per-beat one at the
+    same +/-30 ms tolerance, so syllables placed at random scored about +0.26
+    "triplet advantage" -- four times the edge -- and every real voice, rap or
+    sung, was chopped. Random syllables must be played as sung.
+    """
+    chopped = 0
+    for seed in range(6):
+        rng = np.random.default_rng(seed)
+        x = voice_at(np.sort(rng.uniform(0.0, 179.0, 1000)), 180.0)
+        f = A.vocal_fit(x, SR, BPM)
+        assert f["advantage"] > 0.1, "the old measure still reads luck as triplet"
+        mode, m, why = choose_vocal(x, SR, BPM)
+        chopped += mode == "chop"
+        assert 0.4 < m["triplet_share"] < 0.6, m
+    assert chopped == 0, f"{chopped} of 6 rhythmless voices were chopped"
+
+
+def test_a_singer_behind_the_beat_is_not_a_triplet_flow() -> None:
+    """Sung pop sits 40-50 ms behind the grid (Never Be Like You read +50 ms,
+    The Sweet Escape +45). That puts its sixteenths on the triplet zone of a
+    fixed ruler; the lag is measured and taken out first."""
+    x = flow(STRAIGHT_LINE, lag=0.047, jitter=0.012)
+    f = A.vocal_fit(x, SR, BPM)
+    assert f["advantage"] > 0.06, "the old rule would have chopped this"
+    mode, m, why = choose_vocal(x, SR, BPM)
+    assert mode == "flow", (m, why)
+    assert 35.0 < m["lag_ms"] < 60.0, m
+    assert m["triplet_share"] < 0.3, m
+
+
+def test_a_loose_straight_flow_is_played() -> None:
+    """The CAN'T SAY shape: a straight flow, a little late and a little loose."""
+    x = flow(STRAIGHT_LINE, lag=0.012, jitter=0.022, seed=1)
+    mode, m, why = choose_vocal(x, SR, BPM)
+    assert mode == "flow", (m, why)
+    assert "not a triplet flow" in why
+
+
+def test_a_loose_triplet_flow_is_chopped() -> None:
+    """A real triplet flow: triplet syllables, late and loose, some dropped."""
+    x = flow(TRIPLET_LINE, lag=0.015, jitter=0.015, seed=2)
+    mode, m, why = choose_vocal(x, SR, BPM)
+    assert mode == "chop", (m, why)
+    assert m["triplet_share"] > 0.8 and m["triplet_windows"] > 0.8, m
+
+
+def test_the_measure_does_not_depend_on_the_tempo() -> None:
+    """Chance is one half at any tempo: a random voice reads about the same at
+    100 and 150 BPM, where the old fits' chance levels were 0.40 and 0.60."""
+    rng = np.random.default_rng(9)
+    x = voice_at(np.sort(rng.uniform(0.0, 179.0, 1000)), 180.0)
+    for bpm in (100.0, 150.0):
+        mode, m, _why = choose_vocal(x, SR, bpm)
+        assert mode == "flow" and 0.4 < m["triplet_share"] < 0.6, (bpm, m)
+
+
+def test_real_stem_calibration_is_what_the_thresholds_split() -> None:
+    """The numbers measured on the real separated stems (house/vocal.py's
+    table): none of them is a triplet flow by more than luck gives, so all of
+    them -- CAN'T SAY first -- are played as sung."""
+    from fourfloor.house import vocal as V
+
+    measured = {"CAN'T SAY": (0.472, 0.308), "Body": (0.546, 0.636),
+                "You Belong With Me": (0.509, 0.444),
+                "Never Be Like You": (0.485, 0.423), "The Sweet Escape": (0.385, 0.296),
+                "E85": (0.438, 0.316), "Cold Shoulder": (0.468, 0.400)}
+    for name, (share, windows) in measured.items():
+        assert not (share >= V.TRIPLET_SHARE and windows >= V.TRIPLET_WINDOWS), name
 
 
 # ---------------------------------------------------------------------------

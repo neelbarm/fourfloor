@@ -465,29 +465,34 @@ def test_one_reference_is_not_enough_to_move_the_default(learned_style) -> None:
     assert suggest_house_tempo(97.0) <= 128.0
 
 
-def test_a_learned_threshold_changes_what_vocal_auto_does(learned_style) -> None:
-    """A voice at 0.55 straight is chopped by the built-in threshold and played
-    by one learned from pairs whose remixers played looser voices than that."""
+def test_a_learned_lock_cannot_flip_what_vocal_auto_does(learned_style) -> None:
+    """The learned ``straight_lock`` is the raw sixteenth-lattice fit of each
+    *original* at its own tempo -- a number mostly set by how much of the
+    timeline the lattice covers there (0.51 of it at 128 BPM, 0.60 at 150) --
+    so it is not on the scale of anything the engine measures. Three pairs at
+    chance level used to drop the lock from 0.72 to 0.5 and play a voice the
+    built-in rule chopped. It no longer moves the decision either way."""
     import numpy as np
 
     from fourfloor.house import vocal as vocal_mod
 
-    measured = {"straight": 0.55, "triplet": 0.40, "advantage": -0.15,
-                "duty": 0.6, "scatter_ms": 30.0, "onsets_per_bar": 9.0}
-    vocal_mod_fit = lambda *_a, **_k: measured                      # noqa: E731
+    measured = {"straight": 0.58, "triplet": 0.85, "advantage": 0.27,
+                "duty": 0.6, "scatter_ms": 30.0, "onsets_per_bar": 9.0,
+                "triplet_share": 0.9, "triplet_windows": 0.9, "lag_ms": 0.0,
+                "syllables_per_bar": 9.0}
     import fourfloor.analysis.alignment as align_mod
     original = align_mod.vocal_fit
-    align_mod.vocal_fit = vocal_mod_fit
+    align_mod.vocal_fit = lambda *_a, **_k: measured
     try:
         silence = np.zeros(1024, dtype=np.float32)
         plain, _m, _why = vocal_mod.choose_vocal(silence, 44100, 128.0)
-        write_style(learned_style, vocal={"n_pairs": 4, "straight_lock": 0.62,
+        write_style(learned_style, vocal={"n_pairs": 3, "straight_lock": 0.5,
                                           "triplet_edge": 0.06})
         taught, _m2, _why2 = vocal_mod.choose_vocal(silence, 44100, 128.0)
     finally:
         align_mod.vocal_fit = original
     assert plain == "chop"
-    assert taught == "flow"
+    assert taught == "chop"
 
 
 def test_a_table_from_too_few_pairs_is_not_trusted(learned_style) -> None:

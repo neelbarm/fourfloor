@@ -546,16 +546,42 @@ def vocal_fit(vocals: np.ndarray, sr: int, bpm: float,
     lattice, the share that sits on a triplet one, how much of the time the
     voice is sounding at all, and how scattered its timing is against the
     straight grid.
+
+    **Those two shares cannot be compared with each other.** At a fixed
+    +/-30 ms tolerance the six-per-beat lattice covers 77% of the timeline at
+    128 BPM and the sixteenth lattice 51%, so a voice with no rhythm at all
+    reads +0.26 "triplet advantage", and every real voice measured -- rap and
+    sung pop alike -- came out a triplet flow. They are kept for reporting and
+    for the reference-pair fingerprints; the decision reads the two numbers
+    below, which have the same chance level (one half) at every tempo:
+
+    * ``triplet_share``: of the syllables that land on a triplet-only position
+      (a third or two thirds of a beat) or a sixteenth-only one (a quarter or
+      three quarters), the share, by strength, on the triplet ones. The two
+      zones are the same width, so luck gives 0.5 wherever the tempo is.
+    * ``triplet_windows``: the share of four-bar windows in which the triplet
+      positions outweigh the sixteenth ones -- a flow has to keep doing it, not
+      win once on a single phrase.
+
+    Both are read on *syllables* (rises of the voice's own level) rather than
+    on the spectral-flux onsets above, which on a separated vocal fire on
+    every consonant and breath, and both are read after removing the voice's
+    constant lag behind the grid (``lag_ms``, from the eighth-note phase of its
+    syllables): a singer 45 ms behind the beat puts every sixteenth right on
+    the triplet zone, which is what made sung pop measure as a triplet flow.
     """
     mono = _mono(np.asarray(vocals, dtype=np.float32))
     duration = len(mono) / float(sr)
     out = {"straight": 0.0, "triplet": 0.0, "advantage": 0.0,
-           "duty": 0.0, "scatter_ms": 0.0, "onsets_per_bar": 0.0}
+           "duty": 0.0, "scatter_ms": 0.0, "onsets_per_bar": 0.0,
+           "triplet_share": 0.5, "triplet_windows": 0.0, "lag_ms": 0.0,
+           "syllables_per_bar": 0.0}
     if duration <= 1.0:
         return out
     rms = F.rms_envelope(mono, hop=512, win=2048)
     peak = max(float(rms.max()), 1e-9)
     out["duty"] = float(np.mean(rms > 0.12 * peak))
+    out.update(_triplet_evidence(mono, sr, bpm, first_downbeat))
     onsets, strength = onset_times(vocals, sr)
     if not len(onsets):
         return out
@@ -573,4 +599,83 @@ def vocal_fit(vocals: np.ndarray, sr: int, bpm: float,
     # how scattered, in the syllables that are not already on the grid
     loose = err_s[err_s > tol]
     out["scatter_ms"] = float(np.median(loose) * 1000.0) if len(loose) else 0.0
+    return out
+
+
+#: How far apart two syllables have to be to count as two, in seconds. A
+#: sixteenth at 150 BPM is 100 ms.
+SYLLABLE_GAP = 0.10
+
+#: How concentrated a voice's eighth-note phase has to be (0 to 1) before its
+#: lag behind the grid is read from it.
+LAG_CONCENTRATION = 0.08
+
+#: The window :func:`vocal_fit` votes over, in bars.
+TRIPLET_WINDOW_BARS = 4
+
+
+def syllable_times(x: np.ndarray, sr: int, hop: int = 256, win: int = 1024
+                   ) -> tuple[np.ndarray, np.ndarray]:
+    """Where a voice's syllables start: the peaks of the rise of its level.
+
+    Spectral flux (:func:`onset_times`) is the right ruler for drums and the
+    wrong one for a separated vocal, where it fires on consonants, breaths and
+    separation artefacts four to the beat whatever the flow is. A syllable is a
+    rise in the voice's *level*: the RMS envelope, lightly smoothed, and the
+    peaks of its positive slope, no closer than :data:`SYLLABLE_GAP`. Times are
+    the centre of the analysis window. Returns ``(times, strengths)``.
+    """
+    from scipy.signal import savgol_filter
+
+    env = F.rms_envelope(np.asarray(_mono(x), dtype=np.float32), hop=hop, win=win)
+    if len(env) < 9:
+        return np.zeros(0), np.zeros(0)
+    env = savgol_filter(env, 7, 2)
+    rise = np.maximum(0.0, np.diff(env, prepend=env[0]))
+    if not np.any(rise > 0):
+        return np.zeros(0), np.zeros(0)
+    fps = sr / float(hop)
+    ref = float(np.percentile(rise[rise > 0], 95))
+    peaks, _ = sps.find_peaks(rise, height=max(0.1 * ref, 1e-9),
+                              distance=max(1, int(SYLLABLE_GAP * fps)))
+    if not len(peaks):
+        return np.zeros(0), np.zeros(0)
+    return (peaks * hop + (win - hop) / 2.0) / sr, rise[peaks].astype(float)
+
+
+def _triplet_evidence(mono: np.ndarray, sr: int, bpm: float,
+                      first_downbeat: float = 0.0) -> dict:
+    """``triplet_share``, ``triplet_windows``, ``lag_ms`` -- see :func:`vocal_fit`."""
+    out = {"triplet_share": 0.5, "triplet_windows": 0.0, "lag_ms": 0.0,
+           "syllables_per_bar": 0.0}
+    t, w = syllable_times(mono, sr)
+    if len(t) < 8 or float(w.sum()) <= 0:
+        return out
+    beat = 60.0 / max(bpm, 1e-6)
+    duration = len(mono) / float(sr)
+    out["syllables_per_bar"] = float(len(t) / max(duration / (4 * beat), 1e-9))
+    phase = ((t - first_downbeat) / beat) % 1.0
+    # The voice's constant lag, from the eighth-note phase of its syllables:
+    # every real voice measured leans on the beat and the "and" (eighth-comb
+    # concentration 0.20-0.39), so this is where its phase shows. A voice that
+    # does not -- evenly spread sixteenths, or a pure triplet flow, whose
+    # positions cancel in any eighth-note comb -- has no phase to read here,
+    # and is read as on the grid rather than as noise.
+    z = np.sum(w * np.exp(4j * np.pi * phase))
+    lag = float(np.angle(z) / (4 * np.pi)) if abs(z) > LAG_CONCENTRATION * float(w.sum()) else 0.0
+    out["lag_ms"] = lag * beat * 1000.0
+    pos = np.round(((phase - lag) % 1.0) * 12).astype(int) % 12
+    trip = np.isin(pos, (4, 8))            # a third, two thirds
+    six = np.isin(pos, (3, 9))             # a quarter, three quarters
+    tw, sw = float(w[trip].sum()), float(w[six].sum())
+    if tw + sw <= 0:
+        return out
+    out["triplet_share"] = tw / (tw + sw)
+    block = np.floor((t - first_downbeat) / (TRIPLET_WINDOW_BARS * 4 * beat)).astype(int)
+    votes = []
+    for b in np.unique(block):
+        k = block == b
+        if int(np.count_nonzero(k & (trip | six))) >= 6:
+            votes.append(float(w[k & trip].sum()) > float(w[k & six].sum()))
+    out["triplet_windows"] = float(np.mean(votes)) if votes else 0.0
     return out
