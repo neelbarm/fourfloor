@@ -9,6 +9,13 @@ The rules it holds to:
 
 * **127.0.0.1 only**, plus a ``Host`` check, so a page on the internet cannot
   reach the API through a rebound DNS name.
+* **Nothing changes state for another site.** The ``Host`` check does not stop
+  a page sending a request straight to ``http://127.0.0.1:4444`` -- its Host is
+  local. So every request other than a GET must come from this page: an
+  ``Origin`` or ``Sec-Fetch-Site`` naming anywhere else is refused, and the
+  JSON routes insist on ``Content-Type: application/json``, which a
+  cross-site form or ``no-cors`` fetch cannot send without a preflight this
+  server never answers.
 * **Options go through the CLI parser.** A request is rendered as the flags a
   person would have typed and handed to :func:`fourfloor.cli.parse_remix_args`,
   so the app cannot ask for anything ``fourfloor remix`` would refuse.
@@ -25,15 +32,18 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
+import shutil
 import socket
 import sys
 import threading
 import time
+import unicodedata
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse, urlsplit
 
 from . import cli, feedback, store, ui
 from .arrange import FORMS, fmt_time
@@ -47,6 +57,11 @@ STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; ch
                 ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
                 ".json": "application/json", ".ico": "image/x-icon"}
 SSE_TIMEOUT = 3600.0
+#: Jobs allowed to wait behind the one running. A queue with no bound is a
+#: queue any stray loop can bury the remix you actually need behind.
+MAX_PENDING = 16
+#: A JSON body is a few hundred bytes; anything near this is not from the page.
+MAX_JSON_BYTES = 1024 * 1024
 CSP = ("default-src 'self'; media-src 'self' blob:; img-src 'self' data: blob:; "
        "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; "
        "form-action 'none'; base-uri 'none'; frame-ancestors 'none'")
@@ -111,6 +126,36 @@ def resolve_style(lib: Library, name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# download names
+# ---------------------------------------------------------------------------
+
+#: Typographic marks a title picks up from Finder or a store, and the ASCII a
+#: person would have typed for each.
+_ASCII_MARKS = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201a": "'",
+                              "\u201c": "", "\u201d": "", "\u201e": "",
+                              "\u2013": "-", "\u2014": "-", "\u2212": "-",
+                              "\u2026": "...", "\u00a0": " "})
+
+
+def content_disposition(stem: str, suffix: str) -> str:
+    """``attachment`` with a name every browser can read, whatever the title.
+
+    ``http.server`` writes header lines as strict latin-1, so a title with a
+    curly apostrophe, a dash or any non-latin script used to raise halfway
+    through the headers and send the JSON error in place of the mp3. The name
+    goes out twice instead (RFC 6266): a plain ASCII ``filename`` for old
+    clients and the real one, percent-encoded UTF-8, as ``filename*``.
+    """
+    full = f"{stem} (fourfloor){suffix}"
+    plain = unicodedata.normalize("NFKD", stem.translate(_ASCII_MARKS))
+    plain = plain.encode("ascii", "ignore").decode("ascii")
+    plain = re.sub(r"[^A-Za-z0-9 ._()&+,'!-]+", " ", plain)
+    plain = re.sub(r"\s+", " ", plain).strip(" .") or "remix"
+    return (f'attachment; filename="{plain} (fourfloor){suffix}"; '
+            f"filename*=UTF-8''{quote(full, safe='')}")
+
+
+# ---------------------------------------------------------------------------
 # the app
 # ---------------------------------------------------------------------------
 
@@ -121,6 +166,9 @@ class App:
         self.lib = lib
         self.queue = JobQueue()
         self.lib.sweep_uploads()
+        # a crash or restart forgets the queue, and whatever it had half-built
+        # is a folder nothing lists; clear those out once they are stale
+        self.lib.sweep_orphans()
 
     # -- config -----------------------------------------------------------
 
@@ -165,24 +213,29 @@ class App:
         except ValueError as exc:
             raise HttpError(400, str(exc)) from None
         part = multipart.Part(name=part_name, filename=filename, path=tmp_path)
-        multipart.move(part, target)
-
         try:
-            a = analyze(target)
-        except Exception as exc:                      # noqa: BLE001
-            raise HttpError(400, f"could not read that audio: {exc}") from None
+            multipart.move(part, target)
+            try:
+                a = analyze(target)
+            except Exception as exc:                  # noqa: BLE001
+                raise HttpError(400, f"could not read that audio: {exc}") from None
 
-        meta = {
-            "id": sid,
-            "name": store.display_name(filename),
-            "title": store.title_of(filename),
-            "created": time.time(),
-            "bytes": target.stat().st_size,
-            "analysis": a.to_dict(),
-            "suggested_bpm": suggest_house_tempo(a.grid.bpm),
-            "wave": waveform_of(a.clip.mono, 900) if a.clip is not None else [],
-        }
-        self.lib.save_source_meta(sid, meta)
+            meta = {
+                "id": sid,
+                "name": store.display_name(filename),
+                "title": store.title_of(filename),
+                "created": time.time(),
+                "bytes": target.stat().st_size,
+                "analysis": a.to_dict(),
+                "suggested_bpm": suggest_house_tempo(a.grid.bpm),
+                "wave": waveform_of(a.clip.mono, 900) if a.clip is not None else [],
+            }
+            self.lib.save_source_meta(sid, meta)
+        except BaseException:
+            # without a meta.json nothing lists this folder or deletes it, so
+            # a file that would not decode must not stay behind in it
+            self.lib.discard_source(sid)
+            raise
         return meta
 
     # -- fetch ------------------------------------------------------------
@@ -205,11 +258,18 @@ class App:
         if not fetch_mod.available():
             raise HttpError(400, "yt-dlp is not installed on this machine, so "
                                  "fourfloor cannot read a link. `brew install yt-dlp`")
+        self._room_in_queue()
+        self.lib.sweep_uploads()
         jid = store.new_id()
         job = self.queue.submit(jid, lambda j: self._run_fetch(j, url),
                                 label=fetch_mod.site_of(url))
         return {"job": jid, "url": url, "site": fetch_mod.site_of(url),
                 "queued": self.queue.depth(), "state": job.state}
+
+    def _room_in_queue(self) -> None:
+        if self.queue.depth() >= MAX_PENDING:
+            raise HttpError(429, f"{MAX_PENDING} jobs are already waiting; let "
+                                 "some of them finish first")
 
     def _run_fetch(self, job, url: str) -> dict:
         import shutil
@@ -218,7 +278,16 @@ class App:
         from . import fetch as fetch_mod
 
         job.emit("phase", name="fetch", detail="reading the link")
+        # the name is only looked up now, on the worker, so a slow resolver
+        # never holds up the page's request
+        fetch_mod.check_resolves(url)
         info = fetch_mod.probe(url)
+        # the site may have redirected somewhere else; that is checked too
+        for key in ("webpage_url", "original_url"):
+            landed = str(info.get(key) or "")
+            if landed and landed != url:
+                fetch_mod.check_url(landed)
+                fetch_mod.check_resolves(landed)
         if fetch_mod.is_playlist(info):
             n = len(fetch_mod.entries_of(info))
             raise fetch_mod.FetchError(
@@ -255,6 +324,7 @@ class App:
         source_id = store.safe_id(str(payload.get("source", "")))
         src_meta = lib.source_meta(source_id)
         src_path = lib.source_audio(source_id)
+        self._room_in_queue()
 
         rid, out_dir = lib.create_remix()
         out = out_dir / "remix.mp3"
@@ -321,11 +391,22 @@ class App:
 
         timer = PhaseTimer(job)
         try:
-            res = remix(src_path, out_dir / "remix.mp3", opts, style=style,
-                        progress=timer)
-        finally:
-            timer.close()
+            try:
+                res = remix(src_path, out_dir / "remix.mp3", opts, style=style,
+                            progress=timer)
+            finally:
+                timer.close()
+            return self._finish_remix(rid, out_dir, src_meta, opts, payload, res,
+                                      waveform_of)
+        except BaseException:
+            # meta.json is written last and the library lists nothing without
+            # it, so a render that fails part-way -- after the mp3, before the
+            # plan -- would otherwise leave a full-length file nobody can see
+            shutil.rmtree(out_dir, ignore_errors=True)
+            raise
 
+    def _finish_remix(self, rid: str, out_dir: Path, src_meta: dict, opts,
+                      payload: dict, res, waveform_of) -> dict:
         wave = waveform_of(res.audio, 1400)
         (out_dir / "wave.json").write_text(json.dumps(wave), encoding="utf8")
         meta = self.lib.save_remix_meta(rid, {
@@ -474,6 +555,54 @@ class Handler(BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
         return host in ("localhost", "127.0.0.1", "::1", "")
 
+    def _cross_site(self) -> str:
+        """Why a state-changing request did not come from this page, or ``""``.
+
+        A browser labels where a request came from, and a page elsewhere cannot
+        forge either label: ``Sec-Fetch-Site`` says it outright, and ``Origin``
+        must be this very scheme, host and port -- the address the ``Host``
+        header says the browser used. A client that sends neither (curl, the
+        tests, an old browser on a top-level navigation) is not a cross-site
+        page and is let through.
+        """
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site and site not in ("same-origin", "none"):
+            return "fourfloor serve only takes changes from its own page"
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return ""
+        try:
+            parts = urlsplit(origin.strip())
+            host = (parts.hostname or "").lower()
+        except ValueError:
+            return "fourfloor serve only takes changes from its own page"
+        ours = (self.headers.get("Host") or "").strip().lower()
+        if (parts.scheme != "http" or host not in ("localhost", "127.0.0.1", "::1")
+                or parts.netloc.lower() != ours):
+            return "fourfloor serve only takes changes from its own page"
+        return ""
+
+    def send_response(self, code, message=None) -> None:  # noqa: D102
+        self._started = True
+        super().send_response(code, message)
+
+    def _fail(self, status: int, message: str) -> None:
+        """Answer with an error -- unless an answer has already begun.
+
+        Once a status line is in the buffer a second one cannot follow it: the
+        browser would take the first status and headers and read the JSON
+        error as the body -- a 103-byte "mp3". Drop what was buffered and
+        close the connection instead, which every client reports as a failure.
+        """
+        if getattr(self, "_started", False):
+            self._headers_buffer = []
+            self.close_connection = True
+            return
+        if self.command not in ("GET", "HEAD"):
+            # an unread request body would be parsed as the next request
+            self.close_connection = True
+        self._error(status, message)
+
     def _send(self, status: int, body: bytes = b"", ctype: str = "application/json",
               extra: dict | None = None) -> None:
         self.send_response(status)
@@ -509,9 +638,15 @@ class Handler(BaseHTTPRequestHandler):
         self._route("DELETE")
 
     def _route(self, method: str) -> None:
+        self._started = False
         if not self._host_is_local():
-            self._error(403, "fourfloor serve only answers to localhost")
+            self._fail(403, "fourfloor serve only answers to localhost")
             return
+        if method != "GET":
+            problem = self._cross_site()
+            if problem:
+                self._fail(403, problem)
+                return
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         query = parse_qs(parsed.query)
@@ -521,15 +656,15 @@ class Handler(BaseHTTPRequestHandler):
             elif method == "GET":
                 self._static(path)
             else:
-                self._error(405, f"{method} is not allowed here")
+                self._fail(405, f"{method} is not allowed here")
         except HttpError as exc:
-            self._error(exc.status, exc.message)
+            self._fail(exc.status, exc.message)
         except store.NotFound as exc:
-            self._error(404, str(exc))
-        except BrokenPipeError:
-            pass                                       # the browser hung up
+            self._fail(404, str(exc))
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True               # the browser hung up
         except Exception as exc:                       # noqa: BLE001
-            self._error(500, f"{exc.__class__.__name__}: {exc}")
+            self._fail(500, f"{exc.__class__.__name__}: {exc}")
 
     def _api(self, method: str, path: str, query: dict) -> None:
         parts = [p for p in path.split("/") if p][1:]   # drop "api"
@@ -581,11 +716,30 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- endpoints --------------------------------------------------------
 
+    def _content_length(self) -> int | None:
+        """``Content-Length`` as a byte count, ``None`` if absent, else a 400.
+
+        ``int()`` alone takes ``-1``, and ``rfile.read(-1)`` reads until the
+        client closes -- past every size limit this server has.
+        """
+        raw = self.headers.get("Content-Length")
+        if raw is None or not raw.strip():
+            return None
+        if not re.fullmatch(r"[0-9]{1,15}", raw.strip()):
+            raise HttpError(400, "Content-Length is not a byte count")
+        return int(raw.strip())
+
     def _body_json(self) -> dict:
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > 1024 * 1024:
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            # a cross-site form or no-cors fetch can only send text/plain,
+            # form-urlencoded or multipart; insisting on JSON makes the
+            # browser ask first, and this server never says yes
+            raise HttpError(415, "send this as Content-Type: application/json")
+        length = self._content_length() or 0
+        if length > MAX_JSON_BYTES:
             raise HttpError(413, "that request body is far too large")
-        raw = self.rfile.read(length) if length else b"{}"
+        raw = self.rfile.read(length) if length > 0 else b"{}"
         try:
             data = json.loads(raw.decode("utf8") or "{}")
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -598,10 +752,11 @@ class Handler(BaseHTTPRequestHandler):
         from . import multipart
 
         ctype = self.headers.get("Content-Type") or ""
-        length = self.headers.get("Content-Length")
+        length = self._content_length()
+        self.app.lib.sweep_uploads()
         try:
             parts = multipart.parse(
-                self.rfile, ctype, int(length) if length else None,
+                self.rfile, ctype, length,
                 self.app.lib.uploads, MAX_UPLOAD_BYTES)
         except multipart.PayloadTooLarge as exc:
             raise HttpError(413, str(exc)) from None
@@ -665,8 +820,7 @@ class Handler(BaseHTTPRequestHandler):
         suffix = name.split("remix", 1)[1] or ".mp3"
         extra = {"Accept-Ranges": "bytes", "Cache-Control": "no-cache"}
         if as_download:
-            extra["Content-Disposition"] = (
-                f'attachment; filename="{stem} (fourfloor){suffix}"')
+            extra["Content-Disposition"] = content_disposition(stem, suffix)
         self._send_file(path, ctype, extra)
 
     def _source_audio(self, sid: str) -> None:

@@ -117,9 +117,18 @@ def _read_json(path: Path) -> dict:
 
 
 def _write_json(path: Path, data: dict) -> Path:
+    """Replace ``path`` whole: a reader sees the old file or the new, never half.
+
+    The temporary is flushed to disk before the rename; without that a power
+    cut just after the rename can leave an empty ``meta.json``, which hides a
+    finished remix from the library.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf8")
+    with open(tmp, "w", encoding="utf8") as fh:
+        fh.write(json.dumps(data, indent=2) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
     tmp.replace(path)
     return path
 
@@ -151,6 +160,10 @@ class Library:
         d = self.sources / sid
         d.mkdir(parents=True, exist_ok=True)
         return sid, d / f"source{ext}"
+
+    def discard_source(self, sid: str) -> None:
+        """Remove a source that never became one (its upload would not read)."""
+        shutil.rmtree(self.sources / safe_id(sid), ignore_errors=True)
 
     def save_source_meta(self, sid: str, meta: dict) -> dict:
         _write_json(self.source_dir(sid) / "meta.json", meta)
@@ -262,14 +275,62 @@ class Library:
     # -- housekeeping -----------------------------------------------------
 
     def sweep_uploads(self, older_than: float = 3600.0) -> int:
-        """Delete abandoned upload temporaries; returns how many went."""
+        """Delete abandoned upload temporaries; returns how many went.
+
+        That is half-streamed ``*.part`` files and the ``link-*`` folders a
+        link fetch downloads into, which a crash mid-fetch leaves behind. A
+        live one is never this old: an upload in progress keeps touching its
+        file, and a fetch gives up well inside the hour.
+        """
         now = time.time()
         gone = 0
-        for f in self.uploads.glob("*.part"):
+        for f in list(self.uploads.glob("*.part")) + list(self.uploads.glob("link-*")):
             try:
-                if now - f.stat().st_mtime > older_than:
+                if now - _newest_mtime(f) <= older_than:
+                    continue
+                if f.is_dir():
+                    shutil.rmtree(f, ignore_errors=True)
+                else:
                     f.unlink()
-                    gone += 1
+                gone += 1
             except OSError:
                 pass
         return gone
+
+    def sweep_orphans(self, older_than: float = 6 * 3600.0) -> int:
+        """Delete source and remix folders that never got their ``meta.json``.
+
+        Nothing lists a folder without one, so a failed analysis, a render cut
+        off by a crash or a queue lost to a restart would otherwise keep its
+        audio on disk for good. Only folders untouched for ``older_than`` go:
+        another server on the same library may still be writing into a young
+        one, and no render takes six hours.
+        """
+        now = time.time()
+        gone = 0
+        for root in (self.sources, self.remixes):
+            for d in root.iterdir():
+                if not d.is_dir() or not ID_RE.match(d.name):
+                    continue
+                if (d / "meta.json").exists():
+                    continue
+                try:
+                    if now - _newest_mtime(d) <= older_than:
+                        continue
+                except OSError:
+                    continue
+                shutil.rmtree(d, ignore_errors=True)
+                gone += 1
+        return gone
+
+
+def _newest_mtime(path: Path) -> float:
+    """The latest modification time of ``path`` or anything directly in it."""
+    newest = path.stat().st_mtime
+    if path.is_dir():
+        for child in path.iterdir():
+            try:
+                newest = max(newest, child.stat().st_mtime)
+            except OSError:
+                pass
+    return newest
