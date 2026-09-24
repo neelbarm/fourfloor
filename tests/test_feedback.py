@@ -209,6 +209,62 @@ def test_a_broken_feedback_file_does_not_take_the_app_down(remix) -> None:
     assert feedback.read(d, rid)["markers"] == []
     feedback.add_marker(d, 1.0, "good", "", rid)   # and writing repairs it
     assert len(feedback.read(d, rid)["markers"]) == 1
+    # ...without throwing away what was there: it is set aside, whole
+    aside = list(d.glob("feedback.json.unreadable-*"))
+    assert len(aside) == 1 and aside[0].read_text(encoding="utf8") == "{not json"
+
+
+def test_a_file_caught_mid_write_is_waited_for_not_written_over(remix) -> None:
+    """The critic rewrites feedback.json in place; a note taken while it is
+    half-written used to start from an empty document and erase every earlier
+    marker, rating and vote."""
+    import threading
+
+    _, rid, d = remix
+    feedback.add_marker(d, 1.0, "good", "first", rid)
+    feedback.add_rating(d, stars=4, rid=rid)
+    whole = (d / "feedback.json").read_text(encoding="utf8")
+    (d / "feedback.json").write_text(whole[: len(whole) // 2], encoding="utf8")
+    t = threading.Timer(0.15, lambda: (d / "feedback.json").write_text(
+        whole, encoding="utf8"))
+    t.start()
+    try:
+        feedback.add_marker(d, 2.0, "clash", "second", rid)
+    finally:
+        t.join()
+    data = feedback.read(d, rid)
+    assert [m["note"] for m in data["markers"]] == ["first", "second"]
+    assert feedback.latest_rating(data)["stars"] == 4
+    assert not list(d.glob("feedback.json.unreadable-*"))
+
+
+def test_each_write_keeps_the_document_it_replaced(remix) -> None:
+    _, rid, d = remix
+    feedback.add_marker(d, 1.0, "good", "one", rid)
+    feedback.add_marker(d, 2.0, "good", "two", rid)
+    backup = json.loads((d / feedback.BACKUP_FILE).read_text(encoding="utf8"))
+    assert [m["note"] for m in backup["markers"]] == ["one"]
+
+
+def test_another_process_holding_the_file_is_waited_for(remix) -> None:
+    """The lock is a file lock, so the critic in another process can take it."""
+    import subprocess
+    import sys
+
+    _, rid, d = remix
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys, time; from fourfloor import feedback\n"
+         "with feedback.locked(sys.argv[1]):\n"
+         "    print('held', flush=True); time.sleep(0.8)\n", str(d)],
+        stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        start = time.time()
+        feedback.add_marker(d, 1.0, "good", "", rid)
+        assert time.time() - start > 0.4
+    finally:
+        holder.wait(10)
 
 
 # ---------------------------------------------------------------------------

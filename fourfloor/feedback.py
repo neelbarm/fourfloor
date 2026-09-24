@@ -31,11 +31,20 @@ That is the block an engineer agent reads before touching the arranger.
 from __future__ import annotations
 
 import calendar
+import contextlib
 import json
+import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
+from typing import Iterator
+
+try:                                                    # POSIX; not on Windows
+    import fcntl
+except ImportError:                                     # pragma: no cover
+    fcntl = None
 
 SCHEMA = 1
 
@@ -74,6 +83,16 @@ MAX_MARKERS = 500
 
 _LOCK = threading.Lock()
 
+#: Beside ``feedback.json``: the lock two processes take before they rewrite
+#: it, and the copy of the last good document kept before each rewrite.
+LOCK_FILE = ".feedback.lock"
+BACKUP_FILE = "feedback.json.bak"
+
+#: How long an append waits for a half-written file to become whole again
+#: before it gives up rather than write over it.
+READ_RETRIES = 10
+READ_RETRY_WAIT = 0.05
+
 
 class FeedbackError(ValueError):
     """The browser sent something this module will not store."""
@@ -84,11 +103,53 @@ class FeedbackError(ValueError):
 # ---------------------------------------------------------------------------
 
 def _write_json(path: Path, data: dict) -> Path:
+    """Replace ``path`` whole, flushed to disk first, so no reader sees half."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf8")
+    with open(tmp, "w", encoding="utf8") as fh:
+        fh.write(json.dumps(data, indent=2) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
     tmp.replace(path)
     return path
+
+
+@contextlib.contextmanager
+def locked(remix_dir: str | Path) -> Iterator[None]:
+    """Hold the feedback file for one read-modify-write.
+
+    ``_LOCK`` only covers this process; the critic runs in another one. So an
+    exclusive ``flock`` on a sidecar file is taken as well, and any writer
+    that takes it -- this module, the critic -- cannot lose a note to the
+    other's older copy.
+    """
+    remix_dir = Path(remix_dir)
+    with _LOCK:
+        if fcntl is None:                               # pragma: no cover
+            yield
+            return
+        remix_dir.mkdir(parents=True, exist_ok=True)
+        with open(remix_dir / LOCK_FILE, "a+") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def write_raw(remix_dir: str | Path, data: dict) -> Path:
+    """Put the whole document back, keeping the one it replaces as a backup.
+
+    Call it inside :func:`locked`, with a document read by
+    ``read_raw(..., strict=True)``.
+    """
+    path = Path(remix_dir) / FEEDBACK_FILE
+    if path.is_file():
+        try:
+            shutil.copyfile(path, path.with_name(BACKUP_FILE))
+        except OSError:
+            pass
+    return _write_json(path, data)
 
 
 def blank(rid: str = "") -> dict:
@@ -140,20 +201,43 @@ def normalise_marker(marker: dict) -> dict:
     return out
 
 
-def read_raw(remix_dir: str | Path, rid: str = "") -> dict:
+def read_raw(remix_dir: str | Path, rid: str = "", strict: bool = False) -> dict:
     """The file exactly as it is on disk, minus anything that is not a record.
 
     The append path reads through here and writes back what it read, so a
     marker another tool wrote is returned to disk in that tool's own shape.
     Tidying somebody else's record on the way past is how two writers start
     quietly undoing each other.
+
+    ``strict`` is for that append path. Reading a file that will not parse
+    as empty and appending to it would write one note over every note and
+    rating already in it. So a file another writer is halfway through is
+    retried for a moment; one that stays unreadable is moved aside, whole, to
+    ``feedback.json.unreadable-<time>`` -- where a person can still recover it
+    -- and the append starts a fresh file. One that cannot be read at all
+    (permissions) is refused with :class:`FeedbackError`.
     """
     path = Path(remix_dir) / FEEDBACK_FILE
-    try:
-        data = json.loads(path.read_text(encoding="utf8"))
-    except (OSError, json.JSONDecodeError):
-        return blank(rid)
+    data = None
+    for attempt in range(READ_RETRIES if strict else 1):
+        try:
+            data = json.loads(path.read_text(encoding="utf8"))
+            break
+        except FileNotFoundError:
+            return blank(rid)
+        except OSError as exc:
+            if not strict:
+                return blank(rid)
+            raise FeedbackError(f"{FEEDBACK_FILE} for this remix could not be "
+                                f"read ({exc}), so nothing was saved") from None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            if not strict:
+                return blank(rid)
+            if attempt < READ_RETRIES - 1:
+                time.sleep(READ_RETRY_WAIT)
     if not isinstance(data, dict):
+        if strict:
+            _set_aside(path)
         return blank(rid)
     out = blank(rid or str(data.get("remix") or ""))
     for key in ("markers", "ratings", "votes"):
@@ -161,6 +245,18 @@ def read_raw(remix_dir: str | Path, rid: str = "") -> dict:
         if isinstance(rows, list):
             out[key] = [r for r in rows if isinstance(r, dict)]
     return out
+
+
+def _set_aside(path: Path) -> None:
+    """Move an unreadable feedback file out of the way without losing it."""
+    aside = path.with_name(f"{FEEDBACK_FILE}.unreadable-{int(time.time() * 1000)}")
+    try:
+        path.replace(aside)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise FeedbackError(f"{FEEDBACK_FILE} for this remix is damaged and could "
+                            f"not be moved aside ({exc}), so nothing was saved") from None
 
 
 def read(remix_dir: str | Path, rid: str = "") -> dict:
@@ -350,14 +446,14 @@ def add_marker(remix_dir: str | Path, time_sec, category, note: str = "",
         "slot_bars": slot_label(slot),
     })
 
-    with _LOCK:
-        data = read_raw(remix_dir, rid)
+    with locked(remix_dir):
+        data = read_raw(remix_dir, rid, strict=True)
         if len(data["markers"]) >= MAX_MARKERS:
             raise FeedbackError(
                 f"this remix already has {MAX_MARKERS} markers; that is a rewrite, "
                 "not a note")
         data["markers"].append(marker)
-        _write_json(remix_dir / FEEDBACK_FILE, data)
+        write_raw(remix_dir, data)
         sync_session(remix_dir)
     return marker
 
@@ -410,10 +506,10 @@ def add_rating(remix_dir: str | Path, stars=None, verdict=None,
     if not row:
         raise FeedbackError("a rating needs stars or a verdict")
     _stamp(row)
-    with _LOCK:
-        data = read_raw(remix_dir, rid)
+    with locked(remix_dir):
+        data = read_raw(remix_dir, rid, strict=True)
         data["ratings"].append(row)
-        _write_json(Path(remix_dir) / FEEDBACK_FILE, data)
+        write_raw(remix_dir, data)
     return row
 
 
@@ -436,10 +532,10 @@ def add_vote(remix_dir: str | Path, other: str, prefer: str, reason: str = "",
         "label": clean_text(label, MAX_LABEL),
         "other_label": clean_text(other_label, MAX_LABEL),
     })
-    with _LOCK:
-        data = read_raw(remix_dir, rid)
+    with locked(remix_dir):
+        data = read_raw(remix_dir, rid, strict=True)
         data["votes"].append(row)
-        _write_json(Path(remix_dir) / FEEDBACK_FILE, data)
+        write_raw(remix_dir, data)
     return row
 
 
