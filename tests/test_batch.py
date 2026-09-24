@@ -836,6 +836,49 @@ def test_output_naming_keeps_the_original_name(tmp_path) -> None:
     assert got.parent == tmp_path
 
 
+def test_two_sources_with_one_name_get_two_outputs(tmp_path, engine) -> None:
+    """Body.mp3 and Body.m4a must not render onto one Body.house.mp3."""
+    folder = tmp_path / "originals"
+    folder.mkdir()
+    for name in ("Body.m4a", "Body.mp3", "Other.mp3"):
+        (folder / name).write_bytes(b"\xff\xfb\x90\x00" + b"\x00" * 64)
+    state = engine()
+    out = tmp_path / "gig"
+    manifest = batch.run(folder, out, bpm=128.0)
+    outputs = [Path(t["output"]).name for t in manifest["tracks"]]
+    assert outputs == ["Body (m4a).house.mp3", "Body (mp3).house.mp3",
+                       "Other.house.mp3"]
+    assert len(state["calls"]) == 3
+    assert len(_playlist(out)) == 3
+    assert any("Body.m4a" in n and "Body (mp3).house.mp3" in n
+               for n in manifest["notes"])
+
+    state["calls"].clear()                  # and both are found again on resume
+    assert batch.run(folder, out, bpm=128.0, resume=True)["summary"]["skipped"] == 3
+    assert state["calls"] == []
+
+
+def test_names_that_clash_only_in_case_are_told_apart(tmp_path) -> None:
+    got, _ = batch.plan_outputs([Path("/x/song.mp3"), Path("/x/Song.FLAC")], tmp_path)
+    names = sorted(p.name for p in got.values())
+    assert names == ["Song (flac).house.mp3", "song (mp3).house.mp3"]
+
+
+def test_a_renamed_output_never_lands_on_another_tracks_name(tmp_path) -> None:
+    srcs = [Path("/x/Song.mp3"), Path("/x/Song.wav"), Path("/x/Song (mp3).flac")]
+    got, _ = batch.plan_outputs(srcs, tmp_path)
+    names = [p.name.lower() for p in got.values()]
+    assert len(set(names)) == 3
+    assert got[str(srcs[2])].name == "Song (mp3).house.mp3"
+
+
+def test_unique_names_keep_their_plain_output(originals, tmp_path) -> None:
+    srcs = sorted(originals.iterdir())
+    got, notes = batch.plan_outputs(srcs, tmp_path)
+    assert notes == []
+    assert [got[str(p)] for p in srcs] == [batch.output_for(p, tmp_path) for p in srcs]
+
+
 # ---------------------------------------------------------------------------
 # the terminal report
 # ---------------------------------------------------------------------------

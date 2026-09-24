@@ -175,6 +175,42 @@ def output_for(source: Path, out_dir: Path) -> Path:
     return Path(out_dir) / f"{Path(source).stem}.house.mp3"
 
 
+def plan_outputs(sources: list[Path], out_dir: Path) -> tuple[dict[str, Path], list[str]]:
+    """Every source's output path, with no two sources sharing one.
+
+    ``Song.mp3`` and ``Song.m4a`` -- a purchase next to a download -- would
+    both land on ``Song.house.mp3``, the second render overwriting the first
+    (or, with ``--jobs``, two workers writing one file at once). Sources whose
+    names clash carry their format in the output name instead:
+    ``Song (mp3).house.mp3`` and ``Song (m4a).house.mp3``. Names are compared
+    without case, as the Mac's disk compares them.
+    """
+    groups: dict[str, list[Path]] = {}
+    for p in sources:
+        groups.setdefault(output_for(p, out_dir).name.lower(), []).append(Path(p))
+    taken = {name for name, group in groups.items() if len(group) == 1}
+    outputs: dict[str, Path] = {}
+    clashes: list[str] = []
+    for name, group in groups.items():
+        if len(group) == 1:
+            outputs[str(group[0])] = output_for(group[0], out_dir)
+            continue
+        renamed = []
+        for p in group:
+            fmt = p.suffix.lstrip(".").lower() or "audio"
+            label, n = fmt, 2
+            while f"{p.stem} ({label}).house.mp3".lower() in taken:
+                label, n = f"{fmt} {n}", n + 1
+            dest = Path(out_dir) / f"{p.stem} ({label}).house.mp3"
+            taken.add(dest.name.lower())
+            outputs[str(p)] = dest
+            renamed.append(dest.name)
+        clashes.append(f"{', '.join(p.name for p in group)} would all be "
+                       f"{output_for(group[0], out_dir).name}, so they became "
+                       f"{', '.join(renamed)}")
+    return outputs, clashes
+
+
 #: What a render was asked for, as far as ``--resume`` cares: change any of
 #: these and a finished track is no longer the track this batch wants.
 RENDER_KEYS = ("bpm", "key_strategy", "stems", "kit", "bass", "form", "length",
@@ -490,6 +526,9 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
     t0 = time.time()
     on_event("start", {"tracks": len(sources), "bpm": bpm, "set": set_name,
                        "key_strategy": key_strategy, "out": str(out)})
+    outputs, notes = plan_outputs(sources, out)
+    for note in notes:
+        on_event("renamed", {"note": note})
 
     # What every track is asked for; the key is added per track below.
     request = {"bpm": float(bpm), "key_strategy": key_strategy, "stems": stems,
@@ -503,7 +542,7 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
         if not resume:
             pending.append(p)
             continue
-        dest = output_for(p, out)
+        dest = outputs[str(p)]
         keep, why = resume_check(p, out, request, dest=dest)
         if not keep:
             if dest.exists():
@@ -547,7 +586,7 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
         return step.get("key") or None
 
     jobs_list = [
-        {**request, "source": str(p), "output": str(output_for(p, out)),
+        {**request, "source": str(p), "output": str(outputs[str(p)]),
          "key": _target_key(p)}
         for p in pending
     ]
@@ -589,7 +628,6 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
     }
 
     exports: dict[str, str] = {}
-    notes: list[str] = []
     # Export exactly this set -- the tracks this run rendered or kept, in the
     # order of the source folder -- rather than every remix in the output
     # folder: an old render of a song since dropped, or of one that failed
@@ -697,6 +735,8 @@ class Reporter:
             self._key_flow(payload.get("steps", []))
         elif kind in ("track", "skipped"):
             self._track_line(payload)
+        elif kind == "renamed":
+            print(ui.warn(c, str(payload.get("note", ""))))
         elif kind == "resume_stale":
             print("  " + c.grey("redo") + " "
                   + _clip(Path(payload["source"]).name, 40).ljust(42)
