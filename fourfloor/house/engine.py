@@ -403,12 +403,22 @@ class Engine:
                 elif what == "again":
                     seg = first if first is not None else last
                 elif what == "stut":
-                    seg = (last[:n] if last is not None and len(last) >= n
+                    seg = (last if last is not None and len(last) >= n
                            else slice_at(cursor, beats))
                 else:
                     pos += n
                     continue
-                add_at(out, seg[:min(n, want - pos)], pos, 1.0)
+                piece = seg[:min(n, want - pos)]
+                if len(piece) < len(seg):
+                    # Cut short (a stutter of a longer slice, or the last one):
+                    # its own fade-out is on the part that was cut off, so
+                    # give the cut one, or it steps from mid-syllable to
+                    # silence -- a click every four bars.
+                    piece = piece.copy()
+                    k = min(fade_out, len(piece))
+                    ramp = np.linspace(1.0, 0.0, k, dtype=np.float32)
+                    piece[-k:] *= ramp[:, None] if piece.ndim == 2 else ramp
+                add_at(out, piece, pos, 1.0)
                 pos += n
             first = None                 # a new four bars, a new phrase to keep
         return out

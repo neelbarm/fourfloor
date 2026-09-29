@@ -48,3 +48,46 @@ def test_sampled_drum_bed_at_129_bpm_does_not_crash() -> None:
     loop[:: sr // 4] = 1.0
     bed = _loop_to(np.concatenate([loop, loop]), 0, total, period, sr)
     assert bed.shape == (total, 2)
+
+
+@pytest.fixture(scope="module")
+def chop_engine(fixture_analysis):
+    from fourfloor.arrange import plan
+    from fourfloor.house.engine import Engine, Stems
+
+    sr = 44100
+    p = plan(fixture_analysis, 128.0, 2.0, length=60.0)
+    n = int(p.total_bars * p.bar_dur * sr) + sr
+    zero = np.zeros((n, 2), dtype=np.float32)
+    return Engine(sr=sr, plan=p, stems=Stems(harmonic=zero, percussive=zero),
+                  chords=fixture_analysis.chords, beat_multiple=2.0,
+                  vocal_mode="chop")
+
+
+def test_a_cut_short_chop_slice_ends_faded_not_mid_syllable(chop_engine) -> None:
+    """A 'stut' reuses the first beat of a two-beat slice, whose fade-out was at
+    its second beat; the cut used to step from full level to silence -- a click
+    once every four bars through every chopped drop. The last slice, cut to the
+    slot, did the same. Every piece has to end at (near) silence."""
+    eng = chop_engine
+    sr = eng.sr
+    beat_n = max(64, int(round(eng.beat * sr)))
+    want = 16 * beat_n * 2 + beat_n // 2               # two units and a half-beat stub
+    t = np.arange(want + 8 * beat_n) / sr
+    # a sustained voice with a syllable accent every eighth, so there are
+    # onsets to cut at and no natural silence to hide a hard edge in
+    tone = 0.5 * np.sin(2 * np.pi * 220.0 * t) * (0.6 + 0.4 * (np.mod(t, eng.beat / 2) < 0.03))
+    voc = np.stack([tone, tone], axis=1).astype(np.float32)
+    out = eng._chop_vocal(voc, want)
+    assert out.shape[0] == want
+    peak = float(np.abs(out).max())
+    assert peak > 0.1
+    ends, pos = [], 0
+    while pos < want:
+        for _what, beats in eng.CHOP_PATTERN:
+            pos += beats * beat_n
+            ends.append(min(pos, want))
+            if pos >= want:
+                break
+    worst = max(float(np.abs(out[e - 1]).max()) for e in ends)
+    assert worst < 0.02 * peak, f"a piece ends at {worst / peak:.0%} of peak"
