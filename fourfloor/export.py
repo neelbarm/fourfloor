@@ -200,15 +200,67 @@ def title_from_path(path: Path) -> str:
     return _HOUSE_STEM.sub("", path.stem).strip() or path.stem
 
 
+def set_outputs(folder: str | Path) -> list[Path] | None:
+    """The remixes a batch put in ``folder``, in set order, from its ``set.json``.
+
+    ``None`` when the folder holds no readable batch manifest. Paths are taken
+    by file name inside ``folder``, so a set that has been moved (the README
+    says to re-export from the new location) still finds its files.
+    """
+    path = Path(folder) / "set.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf8"))
+    except (OSError, ValueError):
+        return None
+    if not (isinstance(data, dict) and data.get("generator") == GENERATOR
+            and isinstance(data.get("tracks"), list)):
+        return None
+    out: list[Path] = []
+    for row in data["tracks"]:
+        if (isinstance(row, dict) and row.get("status") in ("ok", "skipped")
+                and row.get("output")):
+            p = Path(folder) / Path(str(row["output"])).name
+            if p not in out:
+                out.append(p)
+    return out
+
+
 def collect(target: str | Path, artist: str = GENERATOR,
-            suffix: bool = False) -> list[Track]:
+            suffix: bool = False, notes: list[str] | None = None) -> list[Track]:
     """Gather tracks from one audio file or every remix in a folder.
 
-    A folder is scanned for audio files that have a session file beside them;
-    anything else in the folder is ignored rather than refused, because an
-    output folder also holds ``.wav``, ``.plan.json`` and ``preview.html``.
+    A folder a batch made is exported as that set: the tracks its ``set.json``
+    lists as rendered or kept, in set order -- not an old render of a song
+    since dropped, or of one that failed on the last run. Any other folder is
+    scanned for audio files that have a session file beside them; anything
+    else in it is ignored rather than refused, because an output folder also
+    holds ``.wav``, ``.plan.json`` and ``preview.html``. What was left out, and
+    why, is appended to ``notes`` when it is given.
     """
     target = Path(target)
+    listed = set_outputs(target) if target.is_dir() else None
+    if listed:
+        tracks, bad = load_tracks([p for p in listed if p.is_file()],
+                                  artist=artist, suffix=suffix)
+        missing = [p.name for p in listed if not p.is_file()]
+        if tracks:
+            if notes is not None:
+                notes.extend(bad)
+                if missing:
+                    notes.append("set.json lists files that are not in the folder: "
+                                 + ", ".join(missing))
+                keep = {p.name for p in listed}
+                extra = sorted(
+                    p.name for p in target.iterdir()
+                    if p.is_file() and p.suffix.lower() == ".mp3"
+                    and p.name not in keep and session_path_for(p).is_file()
+                )
+                if extra:
+                    notes.append("left out remixes that are not part of this set "
+                                 "(set.json): " + ", ".join(extra))
+            return tracks
     if target.is_dir():
         candidates = sorted(
             p for p in target.iterdir()
@@ -857,10 +909,11 @@ def export(target: str | Path, set_name: str, formats=None,
     ``serato`` formats always write into the mp3 itself, wherever it lives.
     """
     wanted = normalise_formats(formats)
-    tracks = collect(target, artist=artist, suffix=suffix)
+    notes: list[str] = []
+    tracks = collect(target, artist=artist, suffix=suffix, notes=notes)
     base = Path(target)
     out = Path(out_dir) if out_dir else (base if base.is_dir() else base.parent)
-    res = ExportResult(set_name=set_name, tracks=tracks)
+    res = ExportResult(set_name=set_name, tracks=tracks, notes=notes)
 
     if "rekordbox" in wanted:
         res.files["rekordbox"] = write_rekordbox(tracks, out, set_name)

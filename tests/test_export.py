@@ -106,6 +106,65 @@ def test_collect_prefers_the_mp3_over_the_wav_of_the_same_remix(tmp_path) -> Non
     assert [t.path for t in tracks] == [mp3]
 
 
+def _write_set_json(folder: Path, rows: list[tuple[str, str]], moved_from=None) -> None:
+    """A batch manifest listing ``(output name, status)`` rows in set order."""
+    import json
+    base = Path(moved_from) if moved_from else folder
+    (folder / "set.json").write_text(json.dumps({
+        "schema": 1, "generator": "fourfloor", "set": "Friday",
+        "tracks": [{"source": f"/src/{name}", "output": str(base / name),
+                    "status": status} for name, status in rows],
+    }), encoding="utf8")
+
+
+def test_a_batch_folder_exports_its_set_not_every_remix_in_it(tmp_path) -> None:
+    """Re-exporting a batch folder (the README's advice after moving it) must
+    not bring back last week's render of a dropped song, or of one that failed,
+    and must keep the set's order rather than the filenames'."""
+    folder = tmp_path / "friday"
+    place(folder, "b song.house.mp3")
+    place(folder, "a song.house.mp3")
+    place(folder, "dropped.house.mp3")
+    place(folder, "failed tonight.house.mp3")
+    _write_set_json(folder, [("b song.house.mp3", "ok"),
+                             ("a song.house.mp3", "skipped"),
+                             ("failed tonight.house.mp3", "failed")],
+                    moved_from=tmp_path / "old place")
+    notes: list[str] = []
+    tracks = export.collect(folder, notes=notes)
+    assert [t.path.name for t in tracks] == ["b song.house.mp3", "a song.house.mp3"]
+    assert any("dropped.house.mp3" in n and "failed tonight.house.mp3" in n
+               for n in notes)
+
+    res = export.export(folder, "Friday", formats=["rekordbox"])
+    root = ET.parse(res.files["rekordbox"]).getroot()
+    names = [unquote(t.get("Location")).rsplit("/", 1)[-1]
+             for t in root.iterfind("COLLECTION/TRACK")]
+    assert names == ["b song.house.mp3", "a song.house.mp3"]
+    assert res.notes
+
+
+def test_one_unreadable_session_in_a_batch_folder_drops_only_that_track(tmp_path) -> None:
+    folder = tmp_path / "friday"
+    place(folder, "good.house.mp3")
+    bad = place(folder, "bad.house.mp3")
+    export.session_path_for(bad).write_text("{ cut off", encoding="utf8")
+    _write_set_json(folder, [("bad.house.mp3", "ok"), ("good.house.mp3", "ok")])
+    notes: list[str] = []
+    tracks = export.collect(folder, notes=notes)
+    assert [t.path.name for t in tracks] == ["good.house.mp3"]
+    assert any("bad.house.mp3" in n for n in notes)
+
+
+def test_a_folder_without_a_readable_set_json_is_scanned_as_before(tmp_path) -> None:
+    folder = tmp_path / "plain"
+    place(folder, "b.house.mp3")
+    place(folder, "a.house.mp3")
+    (folder / "set.json").write_text("not json", encoding="utf8")
+    assert [t.path.name for t in export.collect(folder)] == ["a.house.mp3",
+                                                              "b.house.mp3"]
+
+
 def test_title_drops_the_house_marker_and_the_suffix_is_opt_in(tmp_path) -> None:
     place(tmp_path / "s", "Midnight Drive.house.mp3")
     assert export.collect(tmp_path / "s")[0].title == "Midnight Drive"
