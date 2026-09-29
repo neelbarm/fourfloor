@@ -26,6 +26,10 @@ BUSY_PER_BAR = 10.0
 BUSY_OFF_EIGHTH = 0.55
 
 
+#: A separated bass stem quieter than this (RMS, dB) has no bass in it.
+SILENT_DB = -45.0
+
+
 def choose_bass(bass, sr: int, bpm: float) -> tuple[str, dict, str]:
     """Play the record's bass, or replace it with a sub that follows its pitch.
 
@@ -37,9 +41,12 @@ def choose_bass(bass, sr: int, bpm: float) -> tuple[str, dict, str]:
     from ..analysis.alignment import bass_collision
 
     m = bass_collision(bass, sr, bpm)
-    if m["rms_db"] < -45.0:
-        return "sub", m, ("the separated bass is almost silent, so the sub is "
-                          "synthesised from what pitch there is")
+    if m["rms_db"] < SILENT_DB:
+        # What is left in a stem this quiet is bleed from the other parts, and
+        # a sub made from it would be a bass line nobody played at full level.
+        return "none", m, ("the separated bass is almost silent -- the record "
+                           "has no bass line to play -- so the kick carries "
+                           "the low end")
     if m["per_bar"] >= RHYTHMIC_PER_BAR and m["on_beat"] >= COLLISION_LIMIT:
         return "sub", m, (
             f"{m['on_beat']:.0%} of the source bass hits exactly where the kick "

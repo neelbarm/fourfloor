@@ -90,11 +90,45 @@ def test_a_sustained_on_grid_bass_is_kept() -> None:
     assert mode == "source", (m, why)
 
 
-def test_a_stem_with_nothing_in_it_is_replaced(sr: int) -> None:
+def test_a_stem_with_nothing_in_it_leaves_the_low_end_to_the_kick(sr: int) -> None:
+    """An empty stem used to be routed to the sub, which normalised whatever
+    bleed was in it to full level: a bass line nobody played."""
     from fourfloor.house.bass import choose_bass
 
-    mode, _m, _why = choose_bass(np.zeros(sr * 20, dtype=np.float32), sr, 128.0)
-    assert mode == "sub"
+    mode, _m, why = choose_bass(np.zeros(sr * 20, dtype=np.float32), sr, 128.0)
+    assert mode == "none", why
+    t = np.arange(sr * 20) / sr
+    bleed = (10 ** (-70 / 20) * np.sqrt(2) * np.sin(2 * np.pi * 55.0 * t)).astype(np.float32)
+    mode, m, why = choose_bass(bleed, sr, 128.0)
+    assert m["rms_db"] < -60.0 and mode == "none", (m, why)
+
+
+@pytest.fixture(scope="module")
+def sub_engine(fixture_analysis):
+    from fourfloor.arrange import plan
+    from fourfloor.house.engine import Engine, Stems
+
+    p = plan(fixture_analysis, 128.0, 2.0, length=60.0)
+    n = int(p.total_bars * p.bar_dur * 44100) + 44100
+    zero = np.zeros((n, 2), dtype=np.float32)
+    return Engine(sr=44100, plan=p, stems=Stems(harmonic=zero, percussive=zero),
+                  chords=fixture_analysis.chords, beat_multiple=2.0, bass_mode="sub")
+
+
+@pytest.mark.parametrize("level_db", [-12.0, -70.0])
+def test_the_sub_keeps_the_level_of_the_stem_it_follows(sub_engine, level_db) -> None:
+    """``--bass sub`` on a stem of faint bleed made a full-level sub (+69 dB)."""
+    eng = sub_engine
+    t = np.arange(eng.n) / eng.sr
+    note = 10 ** (level_db / 20) * np.sqrt(2) * np.sin(2 * np.pi * 55.0 * t)
+    eng.source_bass_bed = np.stack([note, note], axis=1).astype(np.float32)
+    out = eng._render_house_sub()
+    peak = float(np.abs(out).max())
+    assert peak > 0.0, "the sub followed the stem's pitch"
+    if level_db > -20:
+        assert peak == pytest.approx(0.85, rel=1e-3), "a real bass is brought to level"
+    else:
+        assert 20 * np.log10(peak) < level_db + 30.0, f"bleed came back at {peak:.2f}"
 
 
 def test_the_sub_plays_the_pitches_the_record_plays(trap_clip, tmp_path) -> None:

@@ -141,6 +141,11 @@ OTHER_SECTION: dict[str, tuple[float, float | None]] = {
 #: removed exactly the part that was right.
 LOOP_TRIM_DB = -1.75
 
+#: The most the pitch-tracked sub is brought up over the level of the stem it
+#: follows (x10 is +20 dB). A real 808 or bass stem needs a few dB at most; a
+#: stem of faint bleed used to be normalised to full level whatever its level.
+SUB_MAX_GAIN = 10.0
+
 #: How loud the synthesised kick sits under the loop's own kicks, per section.
 #: A sampled loop from a 2015 record often has less sub than a 2024 system
 #: expects; this puts it back without replacing the loop's character.
@@ -689,9 +694,12 @@ class Engine:
                 phase = float((phase + 2.0 * np.pi * f0 * beat_n / self.sr)
                               % (2.0 * np.pi))
                 last_f0 = f0
+        # Bring it up to a bass's level -- but only so far: the notes are
+        # already scaled by the stem's own level beat by beat, and a stem of
+        # faint bleed must not come back as a full-level sub nobody played.
         peak = float(np.max(np.abs(out)))
         if peak > 0:
-            out = out / peak * 0.85
+            out = out * min(0.85 / peak, SUB_MAX_GAIN)
         return to_stereo(out)
 
     def _sub_note(self, f0: float, n: int, phase: float = 0.0) -> np.ndarray:
