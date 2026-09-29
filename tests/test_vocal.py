@@ -201,6 +201,50 @@ def test_real_stem_calibration_is_what_the_thresholds_split() -> None:
         assert not (share >= V.TRIPLET_SHARE and windows >= V.TRIPLET_WINDOWS), name
 
 
+#: The same stems separated again at other set tempos (demucs --shifts 0,
+#: warped by the real pipeline, analysis only): (triplet_share, windows).
+SWEEP = {
+    "CAN'T SAY": {124: (0.444, 0.346), 126: (0.473, 0.385), 130: (0.492, 0.538),
+                  132: (0.450, 0.192)},
+    "Body": {124: (0.536, 0.545), 126: (0.545, 0.524), 130: (0.565, 0.545),
+             132: (0.530, 0.591)},
+    "Never Be Like You": {124: (0.541, 0.615), 126: (0.497, 0.519),
+                          130: (0.506, 0.462), 132: (0.515, 0.444)},
+    "Cold Shoulder": {124: (0.457, 0.483), 126: (0.465, 0.400), 130: (0.471, 0.414),
+                      132: (0.486, 0.533)},
+    "E85": {124: (0.405, 0.211), 126: (0.427, 0.278), 130: (0.370, 0.389),
+            132: (0.392, 0.222)},
+    "The Sweet Escape": {124: (0.383, 0.357), 126: (0.373, 0.214),
+                         130: (0.353, 0.214), 132: (0.383, 0.250)},
+}
+
+
+def test_cant_say_flows_at_every_set_tempo() -> None:
+    """The loved recipe's vocal is played as sung whatever tempo the set is at,
+    with room to spare on the share (luck alone reaches 0.60)."""
+    from fourfloor.house import vocal as V
+
+    for bpm, (share, windows) in SWEEP["CAN'T SAY"].items():
+        assert share < V.TRIPLET_SHARE - 0.1, bpm
+        assert not (share >= V.TRIPLET_SHARE and windows >= V.TRIPLET_WINDOWS), bpm
+
+
+def test_body_is_not_separable_from_sung_pop_on_this_evidence() -> None:
+    """Why --vocal auto does not chop *Body*: at 124 BPM Flume's sung vocal
+    (which its remixer played continuously) reads as triplet as Body does at
+    128, so any threshold that chopped Body would chop it too. Body is chopped
+    on request (--vocal chop); auto plays it as sung."""
+    from fourfloor.house import vocal as V
+
+    body = SWEEP["Body"]
+    flume = SWEEP["Never Be Like You"][124]
+    assert min(s for s, _w in body.values()) <= flume[0] + 0.01
+    assert min(w for _s, w in body.values()) <= flume[1]
+    for name, by_tempo in SWEEP.items():
+        for bpm, (share, windows) in by_tempo.items():
+            assert not (share >= V.TRIPLET_SHARE and windows >= V.TRIPLET_WINDOWS), (name, bpm)
+
+
 # ---------------------------------------------------------------------------
 # the chopping
 # ---------------------------------------------------------------------------
