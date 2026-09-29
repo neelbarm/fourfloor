@@ -32,7 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +44,59 @@ CLAP_SR = 48000
 HOME = Path(os.environ.get("FOURFLOOR_HOME", Path.home() / ".fourfloor")) / "critic"
 SIDECAR = HOME / "clap-venv" / "bin" / "python"
 _WORKER = Path(__file__).with_name("_clap_worker.py")
+
+#: Written into the sidecar by the installer once ``import laion_clap``
+#: works there. The interpreter alone proves nothing: the venv is created
+#: first and torch and laion-clap are installed into it afterwards, so an
+#: install that died on the 580 MB torch download leaves a python that
+#: cannot run the worker.
+READY_NAME = ".fourfloor-ok"
+
+#: Seconds one worker run may take. Generous, because the first run after
+#: a ``--no-weights`` install downloads a 1.8 GB checkpoint; bounded,
+#: because a hung download should cost a critique its CLAP score, not the
+#: critique.
+WORKER_TIMEOUT = 1800
+
+
+class BackendError(RuntimeError):
+    """The embedding backend itself failed, as opposed to the audio."""
+
+
+def ready_file() -> Path:
+    return SIDECAR.parent.parent / READY_NAME
+
+
+def mark_ready() -> None:
+    ready_file().write_text("laion_clap imports\n")
+
+
+def clap_ready(verify: bool = True) -> bool:
+    """Is the CLAP sidecar complete enough to run the worker?
+
+    A sidecar installed before the marker existed is checked once, with the
+    same import the installer ends on, and marked if it passes -- so an
+    install that already works keeps working without a reinstall.
+    """
+    if not (SIDECAR.exists() and _WORKER.exists()):
+        return False
+    if ready_file().exists():
+        return True
+    if not verify:
+        return False
+    try:
+        proc = subprocess.run([str(SIDECAR), "-c", "import laion_clap"],
+                              capture_output=True, text=True, check=False,
+                              timeout=600)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        mark_ready()
+    except OSError:
+        pass
+    return True
 
 
 def cache_dir() -> Path:
@@ -134,11 +187,18 @@ class Clap:
         with tempfile.TemporaryDirectory() as tmp:
             src, dst = Path(tmp) / "in.npy", Path(tmp) / "out.npy"
             np.save(src, block)
-            proc = subprocess.run([str(self.python), str(_WORKER), str(src), str(dst)],
-                                  capture_output=True, text=True, check=False)
+            try:
+                proc = subprocess.run(
+                    [str(self.python), str(_WORKER), str(src), str(dst)],
+                    capture_output=True, text=True, check=False, timeout=WORKER_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                raise BackendError(
+                    f"clap worker gave no answer in {WORKER_TIMEOUT} s") from None
+            except OSError as exc:
+                raise BackendError(f"clap worker could not start: {exc}") from None
             if proc.returncode != 0 or not dst.exists():
                 tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-                raise RuntimeError(f"clap worker failed: {tail[-1] if tail else '?'}")
+                raise BackendError(f"clap worker failed: {tail[-1] if tail else '?'}")
             return np.load(dst)
 
 
@@ -155,7 +215,7 @@ def _fit(x: np.ndarray, n: int) -> np.ndarray:
 
 def available_backends() -> list[str]:
     out = []
-    if SIDECAR.exists() and _WORKER.exists():
+    if clap_ready(verify=False):
         out.append("clap")
     out.append("mfcc")
     return out
@@ -163,13 +223,16 @@ def available_backends() -> list[str]:
 
 def load_backend(prefer: str = "auto"):
     """Return the best available backend, honouring an explicit request."""
-    if prefer in ("clap", "auto") and SIDECAR.exists() and _WORKER.exists():
+    if prefer == "mfcc":
+        return MfccRhythm()
+    if clap_ready():
         return Clap(SIDECAR)
     if prefer == "clap":
-        raise RuntimeError(
-            "the CLAP backend is not installed. Run "
-            "`python -m fourfloor.critic.install_clap` or drop --embed clap."
-        )
+        how = ("is only partly installed. Run "
+               "`python -m fourfloor.critic.install_clap` again to finish it"
+               if SIDECAR.exists() else
+               "is not installed. Run `python -m fourfloor.critic.install_clap`")
+        raise RuntimeError(f"the CLAP backend {how}, or drop --embed clap.")
     return MfccRhythm()
 
 
@@ -222,6 +285,7 @@ class RefBank:
     vectors: np.ndarray            # (n_windows, dim)
     files: list[str]               # display names, one per window
     backend: str
+    skipped: list[str] = field(default_factory=list)   # "name: why", unreadable files
 
     def __len__(self) -> int:
         return len(self.vectors)
@@ -257,12 +321,21 @@ def reference_bank(folder: Path, backend, limit: int = 4,
     if not files:
         raise RuntimeError(f"no audio files in {folder}")
     cached: dict[Path, np.ndarray] = {}
+    keys: dict[Path, str] = {}
     pending: list[Path] = []
+    skipped: list[str] = []
     for path in files:
-        key = cache_dir() / f"{backend.name}-{_file_key(path)}-{limit}.npy"
-        if key.exists():
+        try:
+            keys[path] = f"{backend.name}-{_file_key(path)}-{limit}.npy"
+        except OSError as exc:             # a dangling link, a vanished file
+            skipped.append(f"{path.name}: {exc.strerror or exc}")
+            continue
+        key = cache_dir() / keys[path]
+        try:
             cached[path] = np.load(key)
-        else:
+        except FileNotFoundError:
+            pending.append(path)
+        except (OSError, ValueError):     # a torn cache entry: embed it again
             pending.append(path)
 
     if pending:
@@ -271,23 +344,36 @@ def reference_bank(folder: Path, backend, limit: int = 4,
         batch: list[np.ndarray] = []
         spans: list[tuple[Path, int]] = []
         for path in pending:
-            wins = file_windows(path, backend, limit=limit)
+            # One bad file -- a zero-byte failed download named .mp3, a DRM
+            # track -- costs that file, not the critique.
+            try:
+                wins = file_windows(path, backend, limit=limit)
+            except (RuntimeError, OSError) as exc:
+                skipped.append(f"{path.name}: {str(exc).splitlines()[-1] if str(exc) else exc}")
+                continue
             spans.append((path, len(wins)))
             batch.extend(wins)
-        out = backend.embed(batch)
-        at = 0
-        for path, n in spans:
-            v = out[at: at + n]
-            at += n
-            cached[path] = v
-            np.save(cache_dir() / f"{backend.name}-{_file_key(path)}-{limit}.npy", v)
+        if batch:
+            out = backend.embed(batch)
+            at = 0
+            for path, n in spans:
+                v = out[at: at + n]
+                at += n
+                cached[path] = v
+                np.save(cache_dir() / keys[path], v)
 
     vecs, names = [], []
     for path in files:
+        if path not in cached:
+            continue
         v = cached[path]
         vecs.append(v)
         names.extend([path.stem] * len(v))
-    return RefBank(vectors=np.concatenate(vecs), files=names, backend=backend.name)
+    if not vecs:
+        raise RuntimeError(f"no reference in {folder} could be decoded: "
+                           + "; ".join(skipped))
+    return RefBank(vectors=np.concatenate(vecs), files=names, backend=backend.name,
+                   skipped=skipped)
 
 
 def cosine_to_bank(vectors: np.ndarray, bank: RefBank) -> tuple[float, list[float]]:

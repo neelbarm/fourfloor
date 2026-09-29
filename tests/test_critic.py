@@ -366,3 +366,133 @@ def test_similarity_runs_when_references_are_available():
     sim = crit.sub("similarity")
     assert sim is not None and 0.0 <= sim.score <= 100.0
     assert crit.backend in ("laion-clap", "mfcc-rhythm")
+
+
+# ---------------------------------------------------------------------------
+# the CLAP sidecar: half-installed, broken, or slow
+# ---------------------------------------------------------------------------
+
+def _fake_sidecar(monkeypatch, tmp_path: Path, script: str, ready: bool) -> Path:
+    """A clap-venv whose python is a shell script, under a scratch home."""
+    from fourfloor.critic import embed as E
+
+    home = tmp_path / "critic"
+    py = home / "clap-venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text("#!/bin/sh\n" + script + "\n")
+    py.chmod(0o755)
+    if ready:
+        (home / "clap-venv" / E.READY_NAME).write_text("ok\n")
+    monkeypatch.setattr(E, "HOME", home)
+    monkeypatch.setattr(E, "SIDECAR", py)
+    return py
+
+
+NO_CLAP = "echo \"ModuleNotFoundError: No module named 'laion_clap'\" >&2; exit 1"
+
+
+def test_a_half_installed_sidecar_is_not_picked(monkeypatch, tmp_path):
+    """The venv exists, torch never finished: auto must use mfcc."""
+    from fourfloor.critic import embed as E
+
+    _fake_sidecar(monkeypatch, tmp_path, NO_CLAP, ready=False)
+    assert isinstance(E.load_backend("auto"), E.MfccRhythm)
+    assert E.available_backends() == ["mfcc"]
+    with pytest.raises(RuntimeError, match="partly installed"):
+        E.load_backend("clap")
+
+
+def test_a_sidecar_from_before_the_marker_is_verified_once(monkeypatch, tmp_path):
+    from fourfloor.critic import embed as E
+
+    py = _fake_sidecar(monkeypatch, tmp_path, "exit 0", ready=False)
+    assert isinstance(E.load_backend("auto"), E.Clap)
+    assert (py.parent.parent / E.READY_NAME).exists()
+
+
+def test_rerunning_the_installer_finishes_a_half_install(monkeypatch, tmp_path):
+    from fourfloor.critic import embed as E
+    from fourfloor.critic import install_clap as I
+
+    py = _fake_sidecar(monkeypatch, tmp_path, NO_CLAP, ready=False)
+    monkeypatch.setattr(I, "HOME", E.HOME)
+    monkeypatch.setattr(I, "SIDECAR", py)
+    ran: list[list[str]] = []
+
+    class Builder:
+        def __init__(self, **kw):
+            self.kw = kw
+
+        def create(self, target):
+            ran.append(["venv", str(target), str(self.kw.get("clear"))])
+
+    monkeypatch.setattr(I.venv, "EnvBuilder", Builder)
+    import subprocess
+
+    def run(cmd, **_k):
+        ran.append(list(cmd))
+        # laion_clap imports only once the installer has installed it
+        ok = any("laion-clap" in c for c in ran)
+        return subprocess.CompletedProcess(cmd, 0 if ok or "-c" not in cmd else 1)
+
+    monkeypatch.setattr(I.subprocess, "run", run)
+    I.install(weights=False)
+    assert any("laion-clap" in c for c in ran), "the installer returned without installing"
+    assert ["venv", str(py.parent.parent), "False"] in ran, "a half install is kept, not wiped"
+    assert (py.parent.parent / E.READY_NAME).exists()
+
+
+def test_a_broken_sidecar_falls_back_to_mfcc_in_auto(monkeypatch, tmp_path):
+    from fourfloor.audio import write_wav
+    from fourfloor.critic import embed as E
+
+    _fake_sidecar(monkeypatch, tmp_path, NO_CLAP, ready=True)
+    refs = tmp_path / "refs"
+    write_wav(refs / "a.wav", click_track(seconds=12.0))
+    render = write_wav(tmp_path / "render.wav", click_track(seconds=12.0, seed=3))
+
+    crit = S.critique(render, refs=refs, embed="auto")
+    assert crit.backend == "mfcc-rhythm"
+    assert any("CLAP failed" in n and "laion_clap" in n for n in crit.notes)
+    with pytest.raises(E.BackendError):
+        S.critique(render, refs=refs, embed="clap")
+
+
+def test_a_hung_worker_is_stopped(monkeypatch, tmp_path):
+    from fourfloor.critic import embed as E
+
+    py = _fake_sidecar(monkeypatch, tmp_path, "sleep 10", ready=True)
+    monkeypatch.setattr(E, "WORKER_TIMEOUT", 0.5)
+    with pytest.raises(E.BackendError, match="no answer"):
+        E.Clap(py).embed([np.zeros(1000)])
+
+
+# ---------------------------------------------------------------------------
+# a reference folder with a bad file in it
+# ---------------------------------------------------------------------------
+
+def test_an_undecodable_reference_is_skipped_with_a_note(monkeypatch, tmp_path):
+    from fourfloor.audio import write_wav
+    from fourfloor.critic import embed as E
+
+    monkeypatch.setattr(E, "HOME", tmp_path / "critic")
+    refs = tmp_path / "refs"
+    write_wav(refs / "good.wav", click_track(seconds=12.0))
+    (refs / "failed-download.mp3").write_bytes(b"")
+    render = write_wav(tmp_path / "render.wav", click_track(seconds=12.0, seed=3))
+
+    crit = S.critique(render, refs=refs, embed="mfcc")
+    assert crit.sub("similarity") is not None
+    assert set(E.reference_bank(refs, E.MfccRhythm()).files) == {"good"}
+    assert any("failed-download.mp3" in n for n in crit.notes)
+
+
+def test_a_folder_of_only_bad_references_still_says_so(monkeypatch, tmp_path):
+    from fourfloor.critic import embed as E
+
+    monkeypatch.setattr(E, "HOME", tmp_path / "critic")
+    refs = tmp_path / "refs"
+    refs.mkdir()
+    (refs / "a.mp3").write_bytes(b"")
+    with pytest.raises(RuntimeError, match="could be decoded"):
+        E.reference_bank(refs, E.MfccRhythm())

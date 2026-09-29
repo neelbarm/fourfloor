@@ -401,6 +401,22 @@ def _demucs_vocals(path: Path) -> np.ndarray | None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _similarity(E, backend, refs: Path, mono: np.ndarray, sr: int,
+                session: dict | None, windows: int, on_step):
+    """The similarity sub-score against ``refs`` with one backend."""
+    if on_step:
+        on_step(f"embedding ({backend.name})")
+    bank = E.reference_bank(refs, backend, limit=windows,
+                            on_file=lambda n: on_step and on_step(f"reference {n}"))
+    drops = _cue_times(session, "drop")
+    wins = [w for _, w in E.drop_windows(
+        F.resample_to(mono, sr, backend.sr), backend.sr, drops, windows)]
+    vecs = backend.embed(wins)
+    raw, per_window = E.cosine_to_bank(vecs, bank)
+    return score_similarity(raw, backend.anchors, backend.name, per_window, len(bank),
+                            getattr(backend, "weight_factor", 1.0)), bank
+
+
 def critique(path: str | Path, refs: str | Path | None = None, embed: str = "auto",
              demucs: bool = False, windows: int = 4, on_step=None) -> Critique:
     """Score one render. ``refs`` is a folder of real house remixes."""
@@ -422,18 +438,22 @@ def critique(path: str | Path, refs: str | Path | None = None, embed: str = "aut
         from . import embed as E
 
         backend = E.load_backend(embed)
-        if on_step:
-            on_step(f"embedding ({backend.name})")
-        bank = E.reference_bank(Path(refs), backend, limit=windows,
-                                on_file=lambda n: on_step and on_step(f"reference {n}"))
-        drops = _cue_times(session, "drop")
-        wins = [w for _, w in E.drop_windows(
-            F.resample_to(mono, sr, backend.sr), backend.sr, drops, windows)]
-        vecs = backend.embed(wins)
-        raw, per_window = E.cosine_to_bank(vecs, bank)
-        subs.insert(0, score_similarity(raw, backend.anchors, backend.name,
-                                        per_window, len(bank),
-                                        getattr(backend, "weight_factor", 1.0)))
+        try:
+            sim, bank = _similarity(E, backend, Path(refs), mono, sr, session,
+                                    windows, on_step)
+        except E.BackendError as exc:
+            # "auto" promised the best backend that works, not a crash: a
+            # CLAP sidecar that cannot run costs the CLAP score only.
+            if embed != "auto":
+                raise
+            notes.append(f"CLAP failed ({exc}); the mfcc embedding was used instead. "
+                         "Repair it with `python -m fourfloor.critic.install_clap --force`.")
+            backend = E.MfccRhythm()
+            sim, bank = _similarity(E, backend, Path(refs), mono, sr, session,
+                                    windows, on_step)
+        subs.insert(0, sim)
+        for why in bank.skipped:
+            notes.append(f"reference skipped, it could not be read: {why}")
         backend_name = backend.name
         if getattr(backend, "caveat", ""):
             notes.append(backend.caveat)

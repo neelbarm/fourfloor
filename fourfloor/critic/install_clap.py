@@ -43,6 +43,7 @@ import sys
 import venv
 from pathlib import Path
 
+from . import embed as _embed
 from .embed import HOME, SIDECAR
 
 #: Imported unconditionally by laion-clap but missing from its metadata.
@@ -127,12 +128,29 @@ def fetch_weights() -> None:
 
 
 def install(force: bool = False, weights: bool = True) -> Path:
-    """Create the sidecar and install CLAP into it. Returns the interpreter."""
-    if SIDECAR.exists() and not force:
+    """Create the sidecar and install CLAP into it. Returns the interpreter.
+
+    An existing sidecar counts as installed only when it can import
+    ``laion_clap`` (see :func:`fourfloor.critic.embed.clap_ready`). One an
+    earlier run left half-built -- the venv made, torch never finished --
+    is completed in place rather than skipped, so running the installer
+    again is how a failed install is repaired.
+    """
+    if not force and _embed.clap_ready():
+        print(f"already installed: {SIDECAR} (--force rebuilds it)")
         return SIDECAR
     HOME.mkdir(parents=True, exist_ok=True)
     target = HOME / "clap-venv"
-    print(f"creating {target}")
+    try:
+        _embed.ready_file().unlink()
+    except FileNotFoundError:
+        pass
+    if SIDECAR.exists() and not force:
+        print(f"finishing the incomplete install in {target}")
+    else:
+        print(f"creating {target}")
+    # On an existing venv (clear=False) this only makes sure pip is there,
+    # which an install cut off during ensurepip would not have.
     venv.EnvBuilder(with_pip=True, clear=force).create(target)
     pip = [str(target / "bin" / "pip"), "install", "--upgrade", "--no-cache-dir"]
     subprocess.run(pip + ["pip"], check=True)
@@ -141,6 +159,7 @@ def install(force: bool = False, weights: bool = True) -> Path:
     print("installing laion-clap")
     _pip_install(pip, ["laion-clap"])
     subprocess.run([str(SIDECAR), "-c", "import laion_clap"], check=True)
+    _embed.mark_ready()
     if weights:
         fetch_weights()
         print(f"ready: {SIDECAR}")
