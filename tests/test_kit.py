@@ -199,3 +199,71 @@ def test_a_sampled_loop_sits_below_its_own_reinforcement(built_kit, trap_clip,
                              kit="testkit", bass="none", keep_layers=True))
     bus = rms_db(res.layers["kit"])
     assert -30.0 < bus < -5.0, bus
+
+
+# ---------------------------------------------------------------------------
+# names, the pin and the store (no audio rendered)
+# ---------------------------------------------------------------------------
+
+def _stored(home, name: str, source: str = "a record.mp3", seconds=None) -> None:
+    sr = 44100
+    n = int(round(8 * 4 * 60.0 / K.CANONICAL_BPM * sr)) if seconds is None else int(seconds * sr)
+    loop = np.zeros((n, 2), dtype=np.float32)
+    loop[:: sr // 2] = 0.5
+    K.save(K.Kit(name=name, loop=loop, sr=sr, bars=8, source=source), home)
+
+
+def test_a_pin_is_one_the_default_honours(tmp_path) -> None:
+    """``kit default Murph`` printed 'default kit Murph' while pinned() threw
+    the name away and every remix got the newest refs-built kit."""
+    _stored(tmp_path, "murph")
+    _stored(tmp_path, "the-sweet-escape-bosep")        # newer
+    assert K.pin("Murph", tmp_path) == "murph"
+    assert K.pinned(tmp_path) == "murph"
+    assert K.default_name(tmp_path) == "murph"
+    assert K.resolve("MURPH", tmp_path).name == "murph"
+
+
+@pytest.mark.parametrize("bad", ["./murph", "../kits/murph", "../../x", "default", "none-/x"])
+def test_names_that_are_not_kit_names_are_refused_everywhere(tmp_path, bad) -> None:
+    _stored(tmp_path, "murph")
+    with pytest.raises(ValueError):
+        K.load(bad, tmp_path)
+    with pytest.raises(ValueError):
+        K.pin(bad, tmp_path)
+    assert K.pinned(tmp_path) is None
+
+
+def test_a_kit_called_default_cannot_break_the_pin(tmp_path) -> None:
+    with pytest.raises(ValueError):
+        _stored(tmp_path, "default")
+    _stored(tmp_path, "murph")
+    assert K.pin("murph", tmp_path) == "murph"
+
+
+def test_saving_over_a_kit_replaces_it_whole(tmp_path) -> None:
+    _stored(tmp_path, "murph", source="first.mp3")
+    _stored(tmp_path, "murph", source="second.mp3")
+    assert K.load("murph", tmp_path).source == "second.mp3"
+    assert sorted(p.name for p in K.kits_home(tmp_path).iterdir()) == ["murph"]
+
+
+def test_a_broken_kit_says_so_instead_of_a_json_traceback(tmp_path) -> None:
+    _stored(tmp_path, "broken")
+    (K.kits_home(tmp_path) / "broken" / "meta.json").write_text('{"name": "bro')
+    with pytest.raises(ValueError, match="meta.json"):
+        K.load("broken", tmp_path)
+
+
+def test_a_refs_kit_never_overwrites_a_hand_built_or_pinned_kit(tmp_path) -> None:
+    from fourfloor.refs import pipeline as P
+
+    opts = P.Options(home=tmp_path / "refs", kit_home=tmp_path)
+    remix_file = tmp_path / "babybaby.mp3"
+    _stored(tmp_path, "babybaby", source="my own edit.wav")      # hand-built
+    assert P._kit_name_for("babybaby", remix_file, opts) == "babybaby-2"
+    _stored(tmp_path, "song", source="babybaby.mp3")              # this remix's own
+    assert P._kit_name_for("song", remix_file, opts) == "song"
+    K.pin("song", tmp_path)
+    assert P._kit_name_for("song", remix_file, opts) == "song-2"
+    assert P._kit_name_for("default", remix_file, opts) == "default-kit"

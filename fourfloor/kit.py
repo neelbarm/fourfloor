@@ -44,6 +44,27 @@ KIT_BARS = 8
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
+#: Names that mean something else where a kit name is read: the pin file
+#: (``default``) lives in the same folder, and ``none`` / ``newest`` / ``auto``
+#: are what callers pass instead of a name.
+RESERVED = frozenset({"default", "none", "newest", "auto"})
+
+
+def check_name(name: str) -> str:
+    """The canonical (lower-case) kit name, or ValueError.
+
+    Every path that turns a name into a folder goes through this: ``load``
+    used to accept ``Murph``, ``./murph`` and ``../../x``, which ``pin`` then
+    wrote to the pin file and ``pinned`` silently ignored.
+    """
+    canon = str(name or "").strip().lower()
+    if not NAME_RE.match(canon) or canon in RESERVED:
+        raise ValueError(f"{name!r} is not a kit name; use letters, digits, "
+                         "dashes and underscores"
+                         + (" (and not one of " + ", ".join(sorted(RESERVED)) + ")"
+                            if canon in RESERVED else ""))
+    return canon
+
 
 def kits_home(home: str | Path | None = None) -> Path:
     """Where kits live: ``~/.fourfloor/kits`` unless told otherwise."""
@@ -272,7 +293,7 @@ def build(path: str | Path, name: str | None = None, home: str | Path | None = N
     kit = Kit(name=(name or slugify(path.stem)), loop=loop, sr=a.sr, bars=bars,
               source=path.name, source_bpm=a.grid.bpm, score=score,
               kick_beats=[k * scale for k in kicks])
-    if not NAME_RE.match(kit.name):
+    if not NAME_RE.match(kit.name) or kit.name in RESERVED:
         raise ValueError(f"{kit.name!r} is not a usable kit name; use letters, "
                          "digits, dashes and underscores")
     step("write", str(save(kit, home)))
@@ -280,19 +301,43 @@ def build(path: str | Path, name: str | None = None, home: str | Path | None = N
 
 
 def save(kit: Kit, home: str | Path | None = None) -> Path:
-    """Write a kit to ``~/.fourfloor/kits/<name>/`` and return the folder."""
-    folder = kits_home(home) / kit.name
-    folder.mkdir(parents=True, exist_ok=True)
-    write_wav(folder / "loop.wav", kit.loop, kit.sr)
-    meta = kit.to_dict()
-    meta["built"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    (folder / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf8")
+    """Write a kit to ``~/.fourfloor/kits/<name>/`` and return the folder.
+
+    Written into a hidden sibling and swapped into place, so an interrupt
+    never leaves a truncated loop (silent holes every eight bars) or half a
+    meta.json (every remix with the kit failing) under the real name.
+    """
+    import shutil
+    import tempfile
+
+    check_name(kit.name)
+    root = kits_home(home)
+    root.mkdir(parents=True, exist_ok=True)
+    folder = root / kit.name
+    tmp = Path(tempfile.mkdtemp(prefix=f".{kit.name}.", dir=str(root)))
+    try:
+        write_wav(tmp / "loop.wav", kit.loop, kit.sr)
+        meta = kit.to_dict()
+        meta["built"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        (tmp / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf8")
+        old = None
+        if folder.exists():
+            old = Path(tempfile.mkdtemp(prefix=f".{kit.name}.old.", dir=str(root)))
+            os.rmdir(old)
+            os.replace(folder, old)
+        os.replace(tmp, folder)
+        if old is not None:
+            shutil.rmtree(old, ignore_errors=True)
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
     kit.path = folder
     return folder
 
 
 def load(name: str, home: str | Path | None = None) -> Kit:
     """Read one kit by name."""
+    name = check_name(name)
     folder = kits_home(home) / name
     meta_path, wav = folder / "meta.json", folder / "loop.wav"
     if not (meta_path.is_file() and wav.is_file()):
@@ -300,7 +345,13 @@ def load(name: str, home: str | Path | None = None) -> Kit:
             f"no kit called {name!r} in {kits_home(home)}. "
             "Build one with `fourfloor kit build <a house remix.mp3>`."
         )
-    meta = json.loads(meta_path.read_text(encoding="utf8"))
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"the {name!r} kit's meta.json is unreadable ({exc}); "
+                         "rebuild it with `fourfloor kit build`") from exc
+    if not isinstance(meta, dict):
+        raise ValueError(f"the {name!r} kit's meta.json is not a kit description")
     clip = decode(wav)
     return Kit(name=meta.get("name", name), loop=clip.samples, sr=clip.sr,
                bars=int(meta.get("bars", KIT_BARS)), source=meta.get("source", ""),
@@ -355,12 +406,14 @@ def pin(name: str | None, home: str | Path | None = None) -> str | None:
     """Pin ``name`` as the default kit; ``None`` or ``"newest"`` clears the pin."""
     root = kits_home(home)
     target = root / PIN_FILE
-    if name is None or name.lower() in ("newest", "auto", ""):
+    if name is None or name.strip().lower() in ("newest", "auto", ""):
         target.unlink(missing_ok=True)
         return None
-    load(name, home)                       # raises if it is not a real kit
+    name = load(name, home).path.name      # canonical; raises if not a real kit
     root.mkdir(parents=True, exist_ok=True)
     target.write_text(name + "\n", encoding="utf8")
+    if pinned(home) != name:               # the pin has to be one pinned() honours
+        raise ValueError(f"{name!r} could not be pinned")
     return name
 
 
@@ -380,9 +433,9 @@ def resolve(name: str | None, home: str | Path | None = None) -> Kit | None:
     ones exist"; anything else is a name; ``None`` means the pinned default
     (see :func:`pin`), or the most recently built when nothing is pinned.
     """
-    if name and name.lower() == "none":
+    if name and name.strip().lower() == "none":
         return None
     if name:
-        return load(name, home)
+        return load(name, home)            # load() checks the name
     chosen = default_name(home)
     return load(chosen, home) if chosen else None

@@ -471,11 +471,43 @@ def _unfile_pair(entry: Entry, opts: Options, note) -> None:
         note("step", f"moved {', '.join(moved)} to rejected/")
 
 
+def _kit_name_for(slug: str, remix: Path, opts: Options) -> str:
+    """A kit name that overwrites nothing it should not.
+
+    Refs kits share the folder with hand-built ones, and ``save`` replaces a
+    kit of the same name: ``refs add ~/Downloads/babybaby.mp3`` rebuilt the
+    hand-built ``babybaby`` kit, and ``--force`` on the link the pinned kit
+    came from changed the drums under every remix. A name is reused only for
+    a kit this same remix built, and never for the pinned kit.
+    """
+    from .. import kit as kit_mod
+
+    base = slug if kit_mod.NAME_RE.match(slug) else kit_mod.slugify(slug)
+    if base in kit_mod.RESERVED:
+        base = f"{base}-kit"
+    root = kit_mod.kits_home(opts.kit_home)
+    pin = kit_mod.pinned(opts.kit_home)
+    name, i = base, 1
+    while True:
+        folder = root / name
+        if not folder.exists():
+            return name
+        try:
+            meta = json.loads((folder / "meta.json").read_text(encoding="utf8"))
+        except (OSError, ValueError):
+            meta = {}
+        if (name != pin and isinstance(meta, dict)
+                and meta.get("source") == Path(remix).name):
+            return name
+        i += 1
+        name = f"{base[:60]}-{i}"
+
+
 def _build_kit(remix: Path, slug: str, opts: Options, note) -> str:
     """Sample a kit out of the remix, or say why there is none."""
     from .. import kit as kit_mod
 
-    name = slug if kit_mod.NAME_RE.match(slug) else kit_mod.slugify(slug)
+    name = _kit_name_for(slug, remix, opts)
     try:
         note("step", f"building a kit from {remix.name}")
         built = kit_mod.build(remix, name=name, home=opts.kit_home)
