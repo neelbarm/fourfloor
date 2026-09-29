@@ -349,15 +349,18 @@ def measure_groove(sp: Spectral, bpm_hint: float | None, m: Measured) -> None:
     # split peak: a competing peak 5-14 % away from the beat lag. An
     # off-beat mix (two layers at slightly different tempi, or a stretch
     # that slipped) shows two shoulders instead of one spike.
+    # Every range is clipped to the autocorrelation, which on a clip shorter
+    # than one fallback beat (about 0.35 s) ends before the lag does.
     n = len(ac)
     lo, hi = int(lag * 1.05), min(n - 1, int(lag * 1.30))
-    lo2, hi2 = max(2, int(lag * 0.70)), int(lag * 0.95)
+    lo2, hi2 = max(2, int(lag * 0.70)), min(n - 1, int(lag * 0.95))
     side = []
     if hi > lo:
         side.append(float(ac[lo: hi + 1].max()))
     if hi2 > lo2:
         side.append(float(ac[lo2: hi2 + 1].max()))
-    peak = float(ac[max(2, int(lag * 0.965)): min(n - 1, int(lag * 1.035)) + 1].max()) if n > 3 else 0.0
+    around = ac[max(2, int(lag * 0.965)): min(n - 1, int(lag * 1.035)) + 1]
+    peak = float(around.max()) if around.size else 0.0
     rival = max(side) if side else 0.0
     m.split_peak = clamp01(rival / max(peak, 1e-6)) if peak > 0 else 1.0
 

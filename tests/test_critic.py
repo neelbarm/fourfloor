@@ -496,3 +496,12 @@ def test_a_folder_of_only_bad_references_still_says_so(monkeypatch, tmp_path):
     (refs / "a.mp3").write_bytes(b"")
     with pytest.raises(RuntimeError, match="could be decoded"):
         E.reference_bank(refs, E.MfccRhythm())
+
+
+@pytest.mark.parametrize("seconds", [0.05, 0.2, 0.34])
+def test_a_clip_shorter_than_one_beat_measures_instead_of_crashing(seconds):
+    """A one-shot or a truncated export: a low groove score, not a traceback."""
+    x = np.random.default_rng(1).standard_normal(int(seconds * SR)) * 0.1
+    m = _measure(x, bpm=None)
+    assert m.split_peak == 1.0
+    assert 0.0 <= S.score_groove(m).score <= 100.0
