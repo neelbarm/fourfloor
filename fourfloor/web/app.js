@@ -51,6 +51,12 @@ const state = {
   job: null, es: null, key: 'keep', keyMode: 'keep', swingDirty: false,
   raf: 0, playerRaf: 0, revealT0: 0, reveal: 1,
   feedback: null, pending: null,
+  /* A drop or a link is a "take"; only the newest one may land. `take` counts
+   * them, `xhr` is the upload in flight so a newer drop can cancel it. The
+   * match track has its own counter and a pending flag the Remix button
+   * checks. `controlsFor` is the source id the controls were built for. */
+  take: 0, xhr: null, matchTake: 0, matchPending: false, controlsFor: null,
+  lastStems: null, styleFill: null, configLoading: null,
   ab: { a: null, b: null, side: 'a', raf: 0, fixedAt: 0, drift: 0, voted: '',
         ctx: null, gain: null, noCtx: false, drawnW: 0 },
 };
@@ -106,6 +112,34 @@ function showAlert(el, message) {
   if (!message) { el.hidden = true; el.textContent = ''; return; }
   el.hidden = false;
   el.textContent = message;
+}
+
+/* A word from a job that finished while you were somewhere else. It never
+ * moves you: a remix that finishes while you are writing a note about another
+ * one says so here, and you open it when you are ready. */
+function toast(message, action, onAction) {
+  const el = $('#toast');
+  $('#toastText').textContent = message;
+  const btn = $('#toastGo');
+  btn.hidden = !action;
+  btn.textContent = action || '';
+  btn.onclick = () => { el.hidden = true; if (onAction) onAction(); };
+  el.hidden = false;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.hidden = true; }, action ? 12000 : 8000);
+}
+
+/* The page cannot do anything without /api/config. If it failed at load --
+ * the server was restarting -- ask again when it is next needed rather than
+ * throwing inside a drop handler for the rest of the tab's life. */
+async function ensureConfig() {
+  if (state.config) return state.config;
+  if (!state.configLoading) {
+    state.configLoading = api('/api/config')
+      .then(cfg => { state.config = cfg; applyConfig(); return cfg; })
+      .finally(() => { state.configLoading = null; });
+  }
+  return state.configLoading;
 }
 
 /* ── screens ─────────────────────────────────────────────────────────────── */
@@ -475,11 +509,13 @@ function checkFile(file) {
   return null;
 }
 
-function upload(file, onProgress) {
+function upload(file, onProgress, onXhr) {
   return new Promise((resolve, reject) => {
     const body = new FormData();
     body.append('file', file, file.name);
     const xhr = new XMLHttpRequest();
+    if (onXhr) onXhr(xhr);
+    xhr.addEventListener('abort', () => reject(new Error('the upload was replaced')));
     xhr.open('POST', '/api/upload');
     xhr.upload.addEventListener('progress', e => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
@@ -495,34 +531,65 @@ function upload(file, onProgress) {
   });
 }
 
+/* Start a new take: the one before it, if any, is cancelled or ignored. */
+function newTake() {
+  state.take += 1;
+  if (state.xhr) { const x = state.xhr; state.xhr = null; x.abort(); }
+  $('#linkGo').disabled = !!(state.config && state.config.fetch === false);
+  $('#fetchProgress').hidden = true;
+  return state.take;
+}
+
+/* A take that finished after a newer one started lands nowhere. */
+async function landSource(meta) {
+  state.source = meta;
+  state.match = null;
+  state.matchTake += 1;               // a match still loading was for the last track
+  state.matchPending = false;
+  state.keyMode = 'keep';
+  state.key = 'keep';
+  renderSource(meta);
+  prepareControls(meta);
+  await go('controls');
+}
+
 async function takeFile(file) {
+  try {
+    await ensureConfig();
+  } catch (err) {
+    showAlert($('#dropErr'), 'the fourfloor server is not answering — is it still running?');
+    return;
+  }
   const problem = checkFile(file);
   if (problem) { showAlert($('#dropErr'), problem); return; }
+  const mine = newTake();
   showAlert($('#dropErr'), '');
   state.source = null;
   renderSourcePlaceholder(file.name);
   await go('analysing');
+  if (mine !== state.take) return;
   startScanning();
   const lede = $('#s-analysing .lede');
   try {
     const meta = await upload(file, p => {
+      if (mine !== state.take) return;
       lede.textContent = p < 1
         ? `Reading the file — ${Math.round(p * 100)}%`
         : 'Beat grid, key, chords and structure — a few seconds.';
-    });
-    state.source = meta;
-    state.match = null;
-    state.keyMode = 'keep';
-    state.key = 'keep';
-    renderSource(meta);
-    prepareControls(meta);
-    await go('controls');
+    }, xhr => { state.xhr = xhr; });
+    if (mine !== state.take) return;
+    state.xhr = null;
+    await landSource(meta);
   } catch (err) {
+    if (mine !== state.take) return;
+    state.xhr = null;
     showAlert($('#dropErr'), err.message);
     state.source = null;
     await go('drop');
   } finally {
-    lede.textContent = 'Beat grid, key, chords and structure — a few seconds.';
+    if (mine === state.take) {
+      lede.textContent = 'Beat grid, key, chords and structure — a few seconds.';
+    }
   }
 }
 
@@ -549,21 +616,48 @@ function followJob(jobId, onEvent) {
       if (ev.type === 'done') finish(resolve, ev.result);
       else if (ev.type === 'error') finish(reject, new Error(ev.message));
     };
-    es.addEventListener('end', () =>
-      finish(reject, new Error('the fetch stopped before it finished')));
+    // the stream only ends once the job has; if its last word was missed (a
+    // reconnect at the wrong moment), ask for it rather than call it a failure
+    es.addEventListener('end', () => {
+      if (settled) return;
+      es.close();
+      jobStatus(jobId).then(j => {
+        if (j && j.state === 'done') {
+          const done = (j.events || []).find(e => e.type === 'done');
+          if (done) { finish(resolve, done.result); return; }
+        }
+        if (j && j.lost) { finish(reject, new Error(LOST)); return; }
+        finish(reject, new Error((j && j.error) || 'the fetch stopped before it finished'));
+      });
+    });
     es.onerror = () => {
       // EventSource reconnects on its own; ask the job whether it is over.
       if (settled) return;
-      fetch(`/api/jobs/${jobId}`).then(r => r.json()).then(j => {
-        if (!j || !j.state) return;
-        if (j.state === 'failed') finish(reject, new Error(j.error || 'the fetch failed'));
+      jobStatus(jobId).then(j => {
+        if (!j) return;                                  // server away; keep waiting
+        if (j.lost) finish(reject, new Error(LOST));
+        else if (j.state === 'failed') finish(reject, new Error(j.error || 'the fetch failed'));
         else if (j.state === 'done') {
           const done = (j.events || []).find(e => e.type === 'done');
           if (done) finish(resolve, done.result);
         }
-      }).catch(() => {});
+      });
     };
   });
+}
+
+const LOST = 'the fourfloor server restarted and this job was lost — start it again';
+
+/* What the server says about a job: its record, `{lost: true}` when the server
+ * no longer knows it (jobs live in memory, so a restart forgets them), or
+ * null when the server did not answer at all and may yet come back. */
+function jobStatus(jobId) {
+  return fetch(`/api/jobs/${jobId}`).then(async r => {
+    let j = null;
+    try { j = await r.json(); } catch (e) { j = null; }
+    if (r.status === 404 || !j || !j.state) return { lost: true };
+    return j;
+  }).catch(() => null);
 }
 
 function checkLink(url) {
@@ -603,6 +697,13 @@ function setFetchBar(pct, note) {
 async function takeLink(url) {
   const problem = checkLink(url);
   if (problem) { showAlert($('#dropErr'), problem); return; }
+  try {
+    await ensureConfig();
+  } catch (err) {
+    showAlert($('#dropErr'), 'the fourfloor server is not answering — is it still running?');
+    return;
+  }
+  const mine = newTake();
   const btn = $('#linkGo');
   showAlert($('#dropErr'), '');
   btn.disabled = true;
@@ -610,51 +711,61 @@ async function takeLink(url) {
   renderSourcePlaceholder(hostOf(url));
   $('#srcSub').textContent = 'fetching…';
   await go('analysing');
+  if (mine !== state.take) return;
   startScanning();
   const lede = $('#s-analysing .lede');
   lede.textContent = 'Downloading the audio, then reading it.';
   setFetchBar(0, 'reading the link');
   try {
     const meta = await fetchLink(url, (pct, note) => {
+      if (mine !== state.take) return;
       setFetchBar(pct, note);
       if (note) $('#srcName').textContent = note.length > 48 ? note.slice(0, 47) + '…' : note;
     });
-    state.source = meta;
-    state.match = null;
-    state.keyMode = 'keep';
-    state.key = 'keep';
+    if (mine !== state.take) return;
     $('#linkInput').value = '';
-    renderSource(meta);
-    prepareControls(meta);
-    await go('controls');
+    await landSource(meta);
   } catch (err) {
+    if (mine !== state.take) return;
     showAlert($('#dropErr'), err.message);
     state.source = null;
     await go('drop');
   } finally {
-    btn.disabled = false;
-    $('#fetchProgress').hidden = true;
-    $('#fetchBar').style.width = '0%';
-    lede.textContent = 'Beat grid, key, chords and structure — a few seconds.';
+    if (mine === state.take) {
+      btn.disabled = false;
+      $('#fetchProgress').hidden = true;
+      $('#fetchBar').style.width = '0%';
+      lede.textContent = 'Beat grid, key, chords and structure — a few seconds.';
+    }
   }
 }
 
 /* ── controls ────────────────────────────────────────────────────────────── */
 
-function prepareControls(src) {
+const DEFAULT_LENGTH = '4:30';
+const DEFAULT_FORM = 'club';
+
+/* Build the controls for `src`. `opts` is a finished remix's `meta.options`
+ * when "Remix again" rebuilds them for a library remix, so they open on the
+ * settings that remix was made with. */
+function prepareControls(src, opts) {
   const cfg = state.config;
   const suggested = src.suggested_bpm;
+  opts = opts || {};
+  state.controlsFor = src.id;
+  state.styleFill = null;
 
+  const bpm0 = opts.bpm && isFinite(parseFloat(opts.bpm)) ? parseFloat(opts.bpm) : suggested;
   segment($('#bpmSeg'), cfg.bpm_presets.map(v => ({ value: v, label: String(v) })),
-    suggested, v => { tweenInput($('#bpmInput'), v); countUp($('#bpmOut'), v, 1, ''); syncBpmOut(v); });
-  $('#bpmInput').value = String(suggested);
-  syncBpmOut(suggested);
+    bpm0, v => { tweenInput($('#bpmInput'), v); countUp($('#bpmOut'), v, 1, ''); syncBpmOut(v); });
+  $('#bpmInput').value = String(bpm0);
+  syncBpmOut(bpm0);
 
   segment($('#keyModeSeg'), [
     { value: 'keep', label: 'Keep the key' },
     { value: 'pick', label: 'Pick a key' },
     { value: 'match', label: 'Match a track' },
-  ], 'keep', mode => {
+  ], state.keyMode === 'match' ? 'keep' : state.keyMode, mode => {
     state.keyMode = mode;
     $('#keyWheelBody').hidden = mode !== 'pick';
     $('#keyMatchBody').hidden = mode !== 'match';
@@ -665,7 +776,18 @@ function prepareControls(src) {
     updateKeyOut();
     refreshSegments();
   });
+  if (state.keyMode === 'match') state.keyMode = 'keep';
+  $('#keyWheelBody').hidden = state.keyMode !== 'pick';
+  $('#keyMatchBody').hidden = true;
+  // a match belongs to the track it was chosen for
+  $('#matchLabel').textContent = 'Choose a track to mix with…';
+  $('#matchMeta').textContent = 'its key is read the same way';
 
+  /* The render Neel signed off on used Demucs, so when it is installed it is
+   * the default -- and whichever one was picked last carries to the next
+   * track rather than silently snapping back. */
+  let stems = opts.stems || state.lastStems || (cfg.demucs ? 'demucs' : 'hpss');
+  if (stems === 'demucs' && !cfg.demucs) stems = 'hpss';
   segment($('#stemsSeg'), [
     { value: 'hpss', label: 'HPSS' },
     {
@@ -673,16 +795,24 @@ function prepareControls(src) {
       title: cfg.demucs ? 'four-way neural separation'
         : "demucs is not installed — pip install 'fourfloor[stems]'",
     },
-  ], 'hpss', () => {});
+  ], stems, v => { state.lastStems = v; });
 
   segment($('#formSeg'), cfg.forms.map(f => ({
     value: f, label: f[0].toUpperCase() + f.slice(1),
-  })), 'club', () => {});
+  })), cfg.forms.includes(opts.form) ? opts.form : DEFAULT_FORM, () => {});
 
+  const len0 = opts.length || DEFAULT_LENGTH;
   segment($('#lenSeg'), [
     { value: '3:00', label: '3:00' }, { value: '4:30', label: '4:30' },
     { value: '6:00', label: '6:00' },
-  ], '4:30', v => { $('#lengthInput').value = v; $('#lenOut').textContent = v; });
+  ], len0, v => { $('#lengthInput').value = v; $('#lenOut').textContent = v; });
+  $('#lengthInput').value = len0;
+  $('#lenOut').textContent = len0;
+
+  // swing starts from the default for every track; a nudge on the last one
+  // is not a setting for this one
+  state.swingDirty = false;
+  setSwing(opts.swing != null ? Number(opts.swing) : DEFAULT_SWING, opts.swing != null);
 
   const sel = $('#styleSelect');
   sel.innerHTML = '<option value="">fourfloor default</option>';
@@ -692,6 +822,14 @@ function prepareControls(src) {
     o.textContent = `${s.label}${s.bpm ? ` — ${Number(s.bpm).toFixed(0)} BPM` : ''}`;
     sel.appendChild(o);
   });
+  sel.value = opts.style && cfg.styles.some(s => s.name === opts.style) ? opts.style : '';
+  if (sel.value) {
+    applyStyle(sel.value);
+    // anything that remix set by hand wins over the style, as it did then
+    if (opts.bpm) { $('#bpmInput').value = String(bpm0); syncBpmOut(bpm0); setSegment($('#bpmSeg'), bpm0); }
+    if (opts.length) { $('#lengthInput').value = len0; $('#lenOut').textContent = len0; setSegment($('#lenSeg'), len0); }
+    if (opts.swing != null) setSwing(Number(opts.swing), true);
+  }
 
   buildWheel();
   paintWheel();
@@ -706,17 +844,88 @@ function syncBpmOut(v) {
   $('#bpmOut').innerHTML = `${Number(v).toFixed(1)}<i>BPM</i>`;
 }
 
+const DEFAULT_SWING = Number(($('#swing') && $('#swing').defaultValue) || 0.08);
+
+/* Show a swing on the slider. `dirty` says whether it will be sent: a value
+ * the page merely displays (the default, a style's) is left for the server to
+ * choose, exactly as `fourfloor remix` would. */
+function setSwing(v, dirty) {
+  const slider = $('#swing');
+  slider.value = String(Math.max(Number(slider.min), Math.min(Number(slider.max), v)));
+  state.swingDirty = !!dirty;
+  $('#swingOut').textContent = 'swing ' + Number(v).toFixed(2);
+}
+
+const fmtLength = sec => {
+  const s = Math.round(Number(sec));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+};
+
+/* Picking a style puts its tempo, length and swing on the controls. They are
+ * sent only if you then change them: left alone, the server takes the style's
+ * own numbers, the same as `fourfloor remix --style` with no --bpm or
+ * --length. Picking "fourfloor default" puts the track's own back. */
+function applyStyle(name) {
+  const style = (state.config.styles || []).find(s => s.name === name);
+  const bpm = $('#bpmInput'), len = $('#lengthInput');
+  const fill = state.styleFill;
+  const untouched = !fill || (bpm.value.trim() === fill.bpm && len.value.trim() === fill.length);
+  if (!style) {
+    state.styleFill = null;
+    if (fill && untouched && state.source) {
+      const v = state.source.suggested_bpm;
+      bpm.value = String(v); syncBpmOut(v); setSegment($('#bpmSeg'), v);
+      len.value = DEFAULT_LENGTH; $('#lenOut').textContent = DEFAULT_LENGTH;
+      setSegment($('#lenSeg'), DEFAULT_LENGTH);
+    }
+    if (!state.swingDirty) setSwing(DEFAULT_SWING, false);
+    return;
+  }
+  const next = { bpm: bpm.value.trim(), length: len.value.trim() };
+  if (style.bpm) {
+    next.bpm = String(Number(style.bpm));
+    bpm.value = next.bpm; syncBpmOut(style.bpm); setSegment($('#bpmSeg'), next.bpm);
+  }
+  if (style.length) {
+    next.length = typeof style.length === 'number' ? fmtLength(style.length) : String(style.length);
+    len.value = next.length; $('#lenOut').textContent = next.length;
+    setSegment($('#lenSeg'), next.length);
+  }
+  state.styleFill = next;
+  if (style.swing != null && !state.swingDirty) setSwing(Number(style.swing), false);
+}
+
+function pressed(sel) {
+  const b = $(`${sel} button[aria-pressed="true"]`);
+  return b ? b.dataset.value : null;
+}
+
 function readOptions() {
+  const stems = pressed('#stemsSeg'), form = pressed('#formSeg');
+  if (!state.source || !stems || !form || state.controlsFor !== state.source.id) {
+    throw new Error('the controls are not set up for this track — drop it again');
+  }
   const payload = {
     source: state.source.id,
     bpm: $('#bpmInput').value.trim(),
-    stems: $('#stemsSeg button[aria-pressed="true"]').dataset.value,
-    form: $('#formSeg button[aria-pressed="true"]').dataset.value,
+    stems,
+    form,
     length: $('#lengthInput').value.trim(),
     style: $('#styleSelect').value || null,
   };
+  // a style's own tempo and length go to the server untouched, not rounded
+  // through the inputs that display them
+  const fill = state.styleFill;
+  if (payload.style && fill) {
+    if (payload.bpm === fill.bpm) payload.bpm = null;
+    if (payload.length === fill.length) payload.length = null;
+  }
   if (state.keyMode === 'pick' && state.key && state.key !== 'keep') payload.key = state.key;
-  if (state.keyMode === 'match' && state.match) payload.compatible_with = state.match.id;
+  if (state.keyMode === 'match') {
+    if (state.matchPending) throw new Error('the track to match is still loading — wait for its key');
+    if (!state.match) throw new Error('choose the track to match first, or keep the key');
+    payload.compatible_with = state.match.id;
+  }
   if (state.swingDirty) payload.swing = $('#swing').value;
   return payload;
 }
@@ -746,7 +955,21 @@ function renderPhases() {
   document.documentElement.style.setProperty('--hue', '0deg');
 }
 
-function onJobEvent(ev) {
+/* Whether the page is showing this job's progress right now. A job's last word
+ * only takes over the screen then; anywhere else it is a toast. */
+const watching = jobId => state.screen === 'remixing' && state.job === jobId;
+
+function onJobEvent(ev, jobId) {
+  if (jobId !== undefined && !watching(jobId)) {
+    if (ev.type === 'done') {
+      loadLibrary();
+      toast(`${(ev.result && ev.result.title) || 'Your remix'} is ready.`, 'Open it',
+            () => openRemix(ev.result.id, ev.elapsed));
+    } else if (ev.type === 'error') {
+      toast(`The remix failed: ${ev.message}`);
+    }
+    return;
+  }
   const phases = state.config.phases;
   if (ev.type === 'queued') {
     $('#jobState').textContent = ev.position > 0
@@ -770,13 +993,11 @@ function onJobEvent(ev) {
     $('#bar').style.width = Math.round(done / phases.length * 100) + '%';
     document.documentElement.style.setProperty('--hue', (done * 12) + 'deg');
   } else if (ev.type === 'error') {
-    closeStream();
     $('#jobState').textContent = 'failed';
     showAlert($('#jobErr'), ev.message);
     $('#backFromJob').hidden = false;
     document.querySelectorAll('.phase.active').forEach(li => li.classList.remove('active'));
   } else if (ev.type === 'done') {
-    closeStream();
     $('#bar').style.width = '100%';
     $('#jobState').textContent = 'done';
     openRemix(ev.result.id, ev.elapsed);
@@ -792,10 +1013,11 @@ async function startRemix() {
   btn.disabled = true;
   showAlert($('#controlsErr'), '');
   try {
+    const body = readOptions();
     const res = await api('/api/remix', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(readOptions()),
+      body: JSON.stringify(body),
     });
     state.job = res.job;
     $('#remixTitle').textContent = `Building ${res.title}.`;
@@ -815,27 +1037,73 @@ function follow(jobId) {
   closeStream();
   const es = new EventSource(`/api/jobs/${jobId}/events`);
   state.es = es;
+  let last = false;                 // the done or error event has been handled
+  const stop = () => { es.close(); if (state.es === es) state.es = null; };
+  const handle = ev => {
+    if (ev.type === 'done' || ev.type === 'error') {
+      if (last) return;
+      last = true;
+      stop();
+    }
+    onJobEvent(ev, jobId);
+  };
   es.onmessage = e => {
-    try { onJobEvent(JSON.parse(e.data)); } catch (err) { /* keep-alive */ }
+    let ev = null;
+    try { ev = JSON.parse(e.data); } catch (err) { return; }   /* keep-alive */
+    handle(ev);
   };
-  es.addEventListener('end', () => closeStream());
+  es.addEventListener('end', () => {
+    // the stream only ends after the job does; if its last word was missed
+    // (a reconnect at the wrong moment), fetch it rather than sit on 'building'
+    stop();
+    if (!last) settleFrom(jobId, handle);
+  });
   es.onerror = () => {
-    // EventSource retries on its own; only give up once the job is finished.
-    if (!state.es) return;
-    fetch(`/api/jobs/${jobId}`).then(r => r.json()).then(j => {
-      if (j && (j.state === 'done' || j.state === 'failed')) closeStream();
-    }).catch(() => {});
+    // EventSource retries on its own; give up once the job is over or gone.
+    if (state.es !== es || last) return;
+    settleFrom(jobId, handle);
   };
+}
+
+/* Ask the server how a job ended and replay that as the event it would have
+ * sent. A job the server no longer knows (it restarted; jobs live in memory)
+ * is reported as failed, so the page offers a way back instead of spinning. */
+function settleFrom(jobId, handle) {
+  jobStatus(jobId).then(j => {
+    if (!j) return;                                      // server away; keep waiting
+    if (j.lost) {
+      handle({ type: 'error', message: LOST });
+    } else if (j.state === 'done') {
+      const done = (j.events || []).find(e => e.type === 'done');
+      if (done) handle(done);
+    } else if (j.state === 'failed') {
+      const err = (j.events || []).find(e => e.type === 'error');
+      handle(err || { type: 'error', message: j.error || 'the remix failed' });
+    }
+  });
 }
 
 /* ── result ──────────────────────────────────────────────────────────────── */
 
+let opening = 0;
+
 async function openRemix(id, elapsed) {
-  const detail = await api(`/api/remixes/${id}`);
+  const mine = ++opening;
+  let detail;
+  try {
+    detail = await api(`/api/remixes/${id}`);
+  } catch (err) {
+    toast(`Could not open that remix: ${err.message}`);
+    return;
+  }
+  if (mine !== opening) return;                  // a later click won
   state.detail = detail;
   if (detail.source && detail.source.analysis) {
     state.source = detail.source;
     renderSource(detail.source);
+  } else {
+    // its source is gone; "Remix again" must not pick up whatever was open
+    state.source = null;
   }
   renderResult(detail, elapsed);
   await go('result');
@@ -1028,7 +1296,8 @@ async function postFeedback(body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  state.feedback = data;
+  // saved either way; only shown if that remix is still the one open
+  if (state.detail && state.detail.meta.id === id) state.feedback = data;
   return data;
 }
 
@@ -1478,11 +1747,19 @@ function abFlip(which) {
   setSegment($('#abSeg'), which);
 }
 
+/* A take that has run out: calling play() on it would restart it from 0. */
+const abSpent = el => el.ended ||
+  (isFinite(el.duration) && el.duration > 0 && el.currentTime >= el.duration - 0.05);
+
 function abPlay() {
   const A = $('#audioA'), B = $('#audioB');
   abArm();
+  // both over: start the pair again from the top. One over (the shorter
+  // take): play on with the other, rather than restarting the finished one
+  if (abSpent(A) && abSpent(B)) abSeek(0);
   document.body.classList.add('ab-playing');
   [A, B].forEach(el => {
+    if (abSpent(el)) return;
     const p = el.play();
     if (p && p.catch) p.catch(() => document.body.classList.remove('ab-playing'));
   });
@@ -1494,16 +1771,29 @@ function abPause() {
   document.body.classList.remove('ab-playing');
 }
 
+/* Playing is "either take is playing", not "A is": A pauses itself when it
+ * ends, and B may be the one you are listening to past it. */
 function abToggle() {
-  if ($('#audioA').paused) abPlay(); else abPause();
+  if (!$('#audioA').paused || !$('#audioB').paused) abPause(); else abPlay();
 }
 
 function abSeek(t) {
+  const playing = document.body.classList.contains('ab-playing');
   [$('#audioA'), $('#audioB')].forEach(el => {
     const d = isFinite(el.duration) ? el.duration : t;
     el.currentTime = Math.max(0, Math.min(d, t));
     el.playbackRate = 1;
   });
+  // a seek back inside a take that had run out brings it back in, so the
+  // pair plays on together rather than one of them staying silent
+  if (playing) {
+    [$('#audioA'), $('#audioB')].forEach(el => {
+      if (el.paused && !abSpent(el)) {
+        const p = el.play();
+        if (p && p.catch) p.catch(() => {});
+      }
+    });
+  }
   state.ab.fixedAt = performance.now();
   state.ab.drift = 0;
 }
@@ -1519,8 +1809,12 @@ function abFrame(now) {
   const drift = state.ab.drift + (raw - state.ab.drift) * DRIFT_SMOOTH;
   state.ab.drift = drift;
 
-  if (!lead.paused && now - state.ab.fixedAt > FIX_EVERY &&
-      isFinite(follow.duration)) {
+  // only while both are really playing inside both takes: past the end of
+  // the shorter one there is no clock to chase, and pulling B back to where
+  // A stopped is exactly the jump the ear hears
+  if (!lead.paused && !follow.paused && !abSpent(lead) && !abSpent(follow) &&
+      now - state.ab.fixedAt > FIX_EVERY && isFinite(follow.duration) &&
+      lead.currentTime < follow.duration) {
     state.ab.fixedAt = now;
     if (Math.abs(drift) > DRIFT_SEEK) {
       follow.currentTime = Math.min(lead.currentTime, follow.duration);
@@ -1536,9 +1830,10 @@ function abFrame(now) {
 
   const ms = Math.abs(raw) * 1000;
   const el = $('#abDrift');
-  const text = ms < 8 ? 'in sync' : `${ms.toFixed(0)} ms apart`;
+  const text = abSpent(lead) || abSpent(follow) ? 'one take has ended'
+    : ms < 8 ? 'in sync' : `${ms.toFixed(0)} ms apart`;
   if (el.textContent !== text) el.textContent = text;
-  el.classList.toggle('off', ms > 50);
+  el.classList.toggle('off', ms > 50 && text !== 'one take has ended');
 
   // the lanes are first drawn inside a view transition, where the canvas may
   // not have a width yet; redraw once it does, and whenever it changes
@@ -1554,7 +1849,7 @@ function abFrame(now) {
     const p = total ? (audio.currentTime || 0) / total : 0;
     head.style.transform = `translate3d(${p * cv.clientWidth}px,0,0)`;
   });
-  $('#abNow').textContent = fmt(lead.currentTime || 0);
+  $('#abNow').textContent = fmt(abEl(state.ab.side).currentTime || 0);
   state.ab.raf = requestAnimationFrame(abFrame);
 }
 
@@ -1575,12 +1870,15 @@ async function openCompare(partner) {
   if (!state.detail) return;
   const a = selfSide();
   let b;
+  showAlert($('#abErr'), '');
   try {
     b = await resolveSide(partner);
   } catch (err) {
-    showAlert($('#controlsErr'), err.message);
+    // said where the Compare button is, not on the hidden controls screen
+    showAlert($('#abErr'), `Could not open that one: ${err.message}`);
     return;
   }
+  if (!state.detail) return;
   $('#audio').pause();
   state.ab.a = a;
   state.ab.b = b;
@@ -1624,6 +1922,9 @@ async function openCompare(partner) {
   state.ab.drift = 0;
   abFlip('a');
   await go('compare');
+  // the button that opened this is on a hidden screen now; without this the
+  // focus falls to <body> and a keyboard user starts from nowhere
+  $('#abPlay').focus({ preventScroll: true });
   abPlay();
 }
 
@@ -1716,8 +2017,14 @@ async function loadLibrary() {
       try { await api(`/api/remixes/${r.id}`, { method: 'DELETE' }); } catch (e) { /* gone */ }
       setTimeout(loadLibrary, 340);
       if (state.detail && state.detail.meta.id === r.id) {
+        // what was on screen is gone: leave the result (and any A/B of it)
+        // rather than keep live buttons that point at nothing
         state.detail = null;
         $('#audio').pause();
+        $('#audio').removeAttribute('src');
+        if (state.screen === 'result' || state.screen === 'compare') {
+          go(state.source && state.controlsFor === state.source.id ? 'controls' : 'drop');
+        }
       }
     });
     li.appendChild(item);
@@ -1793,6 +2100,37 @@ function wireControls() {
     state.swingDirty = true;
     $('#swingOut').textContent = 'swing ' + Number($('#swing').value).toFixed(2);
   });
+  $('#styleSelect').addEventListener('change', () => applyStyle($('#styleSelect').value));
+
+  /* The match track loads while you look at the other controls. Until it has
+   * landed, Remix waits for it -- a remix started now would come out in the
+   * source key and clash, with nothing on screen saying so. */
+  const matchStart = label => {
+    state.matchTake += 1;
+    state.match = null;
+    state.matchPending = true;
+    $('#matchLabel').textContent = label;
+    updateKeyOut();
+    return state.matchTake;
+  };
+  const matchLanded = (mine, meta) => {
+    if (mine !== state.matchTake) return;
+    state.matchPending = false;
+    state.match = meta;
+    $('#matchLabel').textContent = meta.name;
+    $('#matchMeta').textContent =
+      `${meta.analysis.key.key} ${meta.analysis.key.camelot} · ` +
+      `${meta.analysis.tempo.bpm.toFixed(1)} BPM — the remix is shifted to mix with it`;
+    updateKeyOut();
+  };
+  const matchFailed = (mine, err) => {
+    if (mine !== state.matchTake) return;
+    state.matchPending = false;
+    showAlert($('#controlsErr'), err.message);
+    $('#matchLabel').textContent = 'Choose a track to mix with…';
+    $('#matchMeta').textContent = 'its key is read the same way';
+    updateKeyOut();
+  };
 
   const matchInput = $('#matchFile');
   $('#matchPick').addEventListener('click', () => matchInput.click());
@@ -1802,18 +2140,13 @@ function wireControls() {
     if (!file) return;
     const problem = checkFile(file);
     if (problem) { showAlert($('#controlsErr'), problem); return; }
-    $('#matchLabel').textContent = 'reading ' + file.name + '…';
+    showAlert($('#controlsErr'), '');
+    const mine = matchStart('reading ' + file.name + '…');
+    $('#matchMeta').textContent = 'reading its key';
     try {
-      const meta = await upload(file);
-      state.match = meta;
-      $('#matchLabel').textContent = meta.name;
-      $('#matchMeta').textContent =
-        `${meta.analysis.key.key} ${meta.analysis.key.camelot} · ` +
-        `${meta.analysis.tempo.bpm.toFixed(1)} BPM — the remix is shifted to mix with it`;
-      updateKeyOut();
+      matchLanded(mine, await upload(file));
     } catch (err) {
-      showAlert($('#controlsErr'), err.message);
-      $('#matchLabel').textContent = 'Choose a track to mix with…';
+      matchFailed(mine, err);
     }
   });
 
@@ -1824,23 +2157,17 @@ function wireControls() {
     if (problem) { showAlert($('#controlsErr'), problem); return; }
     showAlert($('#controlsErr'), '');
     matchGo.disabled = true;
-    $('#matchLabel').textContent = 'fetching ' + hostOf(url) + '…';
+    const mine = matchStart('fetching ' + hostOf(url) + '…');
     try {
       const meta = await fetchLink(url, (pct, note) => {
+        if (mine !== state.matchTake) return;
         $('#matchMeta').textContent = pct > 0 && pct < 100
           ? `${Math.round(pct)}% — ${note}` : (note || 'reading it');
       });
-      state.match = meta;
-      matchLink.value = '';
-      $('#matchLabel').textContent = meta.name;
-      $('#matchMeta').textContent =
-        `${meta.analysis.key.key} ${meta.analysis.key.camelot} · ` +
-        `${meta.analysis.tempo.bpm.toFixed(1)} BPM — the remix is shifted to mix with it`;
-      updateKeyOut();
+      if (mine === state.matchTake) matchLink.value = '';
+      matchLanded(mine, meta);
     } catch (err) {
-      showAlert($('#controlsErr'), err.message);
-      $('#matchLabel').textContent = 'Choose a track to mix with…';
-      $('#matchMeta').textContent = 'its key is read the same way';
+      matchFailed(mine, err);
     } finally {
       matchGo.disabled = false;
     }
@@ -1854,7 +2181,18 @@ function wireControls() {
   $('#backFromJob').addEventListener('click', () => { closeStream(); go('controls'); });
   $('#againBtn').addEventListener('click', () => {
     $('#audio').pause();
-    if (!state.source) return go('drop');
+    if (!state.source || !state.config) return go('drop');
+    // a remix opened from the library brings its own source; the controls on
+    // screen may have been built for another track, or never built at all
+    if (state.controlsFor !== state.source.id) {
+      const opts = (state.detail && state.detail.meta.options) || {};
+      state.match = null;
+      state.matchPending = false;
+      state.matchTake += 1;
+      state.keyMode = opts.key && String(opts.key).toLowerCase() !== 'keep' ? 'pick' : 'keep';
+      state.key = state.keyMode === 'pick' ? String(opts.key) : 'keep';
+      prepareControls(state.source, opts);
+    }
     go('controls');
   });
   $('#newTrackBtn').addEventListener('click', () => {
@@ -1929,6 +2267,7 @@ function wireFeedback() {
   });
 
   $('#abGo').addEventListener('click', () => {
+    if (!state.detail) return;
     abArm();
     const value = $('#abPick').value;
     const partner = (state.detail.partners || [])
@@ -1955,21 +2294,25 @@ function wireCompare() {
 
   ['#audioA', '#audioB'].forEach(sel => {
     $(sel).addEventListener('ended', () => {
-      if (abEl(state.ab.side) === $(sel)) abPause();
+      // the one you hear ran out: stop. The other ran out: carry on, and stop
+      // once nothing is left playing
+      const other = sel === '#audioA' ? $('#audioB') : $('#audioA');
+      if (abEl(state.ab.side) === $(sel) || other.paused) abPause();
     });
   });
 
+  /* F flips (so does an arrow key when nothing focused wants it); Space plays
+   * and pauses. Tab is left alone: it moves focus, as it does everywhere
+   * else, or the panel's own buttons could never be reached from a keyboard. */
   window.addEventListener('keydown', e => {
     if (state.screen !== 'compare' || e.metaKey || e.ctrlKey || e.altKey) return;
     if (TYPING(e.target)) return;
-    if (e.key === 'Tab') {
-      // Tab is the flip, but only from outside the controls: once you have
-      // tabbed onto a button, Tab has to keep moving focus or the panel is a trap
-      const tag = ((e.target && e.target.tagName) || '').toLowerCase();
-      if (tag === 'button' || tag === 'a') return;
+    const onControl = /^(button|a)$/i.test((e.target && e.target.tagName) || '');
+    if (e.key === 'f' || e.key === 'F' ||
+        (!onControl && (e.key === 'ArrowLeft' || e.key === 'ArrowRight'))) {
       e.preventDefault();
       abFlip(state.ab.side === 'a' ? 'b' : 'a');
-    } else if (e.code === 'Space') {
+    } else if (e.code === 'Space' && !onControl) {
       e.preventDefault();
       abToggle();
     }
@@ -1997,12 +2340,20 @@ async function init() {
   wireCompare();
   wireLibrary();
   applyScreen('drop');
-  try {
-    state.config = await api('/api/config');
-  } catch (err) {
-    showAlert($('#dropErr'), 'the fourfloor server is not answering — is it still running?');
-    return;
+  // the server may be mid-restart: keep asking, and let the next drop ask too
+  for (let wait = 1000; !state.config; wait = Math.min(wait * 2, 15000)) {
+    try {
+      await ensureConfig();
+    } catch (err) {
+      showAlert($('#dropErr'), 'the fourfloor server is not answering — is it still running?');
+      await new Promise(r => setTimeout(r, wait));
+    }
   }
+  if (/not answering/.test($('#dropErr').textContent)) showAlert($('#dropErr'), '');
+}
+
+/* Everything on the page that follows from /api/config, once it is known. */
+function applyConfig() {
   $('#maxMb').textContent = String(state.config.max_upload_mb);
   $('#libHome').textContent = state.config.home;
   if (state.config.fetch === false) {

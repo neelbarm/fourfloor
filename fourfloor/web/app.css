@@ -262,6 +262,27 @@ body.dragging .orb-face { border-color: rgba(255, 77, 157, 0.55);
                           background: radial-gradient(circle at 50% 30%,
                             rgba(255, 77, 157, 0.16), rgba(8, 8, 11, 0.86) 70%); }
 
+/* ── toast: a job that finished while you were elsewhere ──────────────── */
+
+.toast {
+  position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom));
+  z-index: 50; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 14px;
+  width: max-content; max-width: calc(100vw - 32px);
+  padding: 12px 12px 12px 18px; border-radius: 16px;
+  font-size: 13.5px; line-height: 1.45; color: var(--ink);
+  background: rgba(20, 20, 24, 0.92); border: 1px solid var(--line-2);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  animation: rise 360ms var(--ease) both;
+}
+.toast-go {
+  flex: none; font: inherit; font-weight: 600; color: var(--bg);
+  background: var(--teal); border: 0; border-radius: 10px; padding: 7px 12px;
+  cursor: pointer;
+}
+.toast-go:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
 .drop-veil {
   position: fixed; inset: 0; z-index: 40; display: grid; place-items: center;
   pointer-events: none; opacity: 0; transition: opacity 260ms var(--ease);

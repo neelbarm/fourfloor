@@ -241,6 +241,7 @@
         <div class="select-wrap"><select id="abPick"></select></div>
         <button class="ghost" id="abGo" type="button">Compare A / B</button>
       </div>
+      <div class="alert" id="abErr" role="alert" hidden></div>
       <audio id="audio" preload="metadata"></audio>
     </div>
 
@@ -330,7 +331,7 @@
         </button>
         <div class="time"><b id="abNow">0:00</b><span id="abTotal">0:00</span></div>
         <p class="note ab-hint">
-          <kbd>Tab</kbd> flips which one you hear · <kbd>Space</kbd> plays and pauses both
+          <kbd>F</kbd> flips which one you hear · <kbd>Space</kbd> plays and pauses both
         </p>
       </div>
 
@@ -381,6 +382,11 @@
   </div>
   <div class="source-canvas"><canvas id="srcWave" aria-label="Source structure"></canvas></div>
   <div class="source-legend" id="srcLegend"></div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden>
+  <span id="toastText"></span>
+  <button class="toast-go" id="toastGo" type="button" hidden></button>
 </div>
 
 <div class="drop-veil" id="veil" aria-hidden="true"><div class="veil-inner">Drop it anywhere</div></div>
