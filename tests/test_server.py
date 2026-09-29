@@ -374,6 +374,9 @@ def test_config_describes_what_the_cli_allows(app) -> None:
     assert cfg["bpm_range"] == [60.0, 200.0]
     assert cfg["max_upload_mb"] == 200
     assert isinstance(cfg["demucs"], bool)
+    # the separation a remix gets when the page sends none: the CLI's rule
+    from fourfloor.cli import default_stems
+    assert cfg["default_stems"] == default_stems()
 
 
 def test_an_upload_that_is_not_audio_is_refused_kindly(app) -> None:
@@ -425,6 +428,9 @@ def test_upload_returns_an_id_and_the_analysis(uploaded) -> None:
     ({"length": "0"}, "greater than zero"),
     ({"style": "no-such-style"}, "no style profile"),
     ({"swing": "9"}, "out of range"),
+    ({"vocal": "karaoke"}, "invalid choice"),
+    ({"drums_db": "40"}, "out of range"),
+    ({"drums_db": "loud"}, "invalid float"),
 ])
 def test_the_web_app_cannot_ask_for_what_the_cli_would_refuse(app, uploaded, payload,
                                                               needle) -> None:
@@ -443,7 +449,7 @@ def test_remix_end_to_end_over_http(app, uploaded, tmp_path) -> None:
     """Upload → remix → SSE → download, exactly as the browser does it."""
     status, started = app.json("/api/remix", "POST", {
         "source": uploaded["id"], "bpm": str(TARGET_BPM), "length": "2:00",
-        "form": "radio", "stems": "hpss",
+        "form": "radio", "stems": "hpss", "vocal": "flow",
     })
     assert status == 200, started
     rid = started["job"]
@@ -486,6 +492,10 @@ def test_remix_end_to_end_over_http(app, uploaded, tmp_path) -> None:
     assert detail["source"]["id"] == uploaded["id"]
     assert detail["meta"]["files"] == ["remix.mp3", "remix.plan.json",
                                        "remix.session.json", "remix.wav"]
+    # the vocal control is a setting "Remix again" opens on
+    assert detail["meta"]["options"]["vocal"] == "flow"
+    assert detail["meta"]["options"]["drums_db"] == 0.0
+    assert detail["meta"]["vocal"] == "flow"
 
     status, listing = app.json("/api/remixes")
     assert rid in [r["id"] for r in listing["remixes"]]

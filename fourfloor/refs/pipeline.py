@@ -510,7 +510,9 @@ def _build_kit(remix: Path, slug: str, opts: Options, note) -> str:
     name = _kit_name_for(slug, remix, opts)
     try:
         note("step", f"building a kit from {remix.name}")
-        built = kit_mod.build(remix, name=name, home=opts.kit_home)
+        # _kit_name_for only hands back an existing name when that kit was
+        # sampled from this same remix, and never the pinned one
+        built = kit_mod.build(remix, name=name, home=opts.kit_home, force=True)
     except KeyboardInterrupt:
         raise
     except (RuntimeError, ValueError, OSError) as exc:

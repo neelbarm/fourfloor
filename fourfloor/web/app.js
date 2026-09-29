@@ -56,7 +56,7 @@ const state = {
    * match track has its own counter and a pending flag the Remix button
    * checks. `controlsFor` is the source id the controls were built for. */
   take: 0, xhr: null, matchTake: 0, matchPending: false, controlsFor: null,
-  lastStems: null, styleFill: null, configLoading: null,
+  lastStems: null, lastVocal: null, styleFill: null, configLoading: null,
   ab: { a: null, b: null, side: 'a', raf: 0, fixedAt: 0, drift: 0, voted: '',
         ctx: null, gain: null, noCtx: false, drawnW: 0 },
 };
@@ -786,8 +786,12 @@ function prepareControls(src, opts) {
   /* The render Neel signed off on used Demucs, so when it is installed it is
    * the default -- and whichever one was picked last carries to the next
    * track rather than silently snapping back. */
-  let stems = opts.stems || state.lastStems || (cfg.demucs ? 'demucs' : 'hpss');
+  const stems0 = cfg.default_stems || (cfg.demucs ? 'demucs' : 'hpss');
+  let stems = opts.stems || state.lastStems || stems0;
   if (stems === 'demucs' && !cfg.demucs) stems = 'hpss';
+  $('#stemsOut').innerHTML = cfg.demucs
+    ? `<i>default</i> ${stems0 === 'demucs' ? 'Demucs' : 'HPSS'}`
+    : '<i>Demucs not installed</i>';
   segment($('#stemsSeg'), [
     { value: 'hpss', label: 'HPSS' },
     {
@@ -796,6 +800,18 @@ function prepareControls(src, opts) {
         : "demucs is not installed — pip install 'fourfloor[stems]'",
     },
   ], stems, v => { state.lastStems = v; });
+
+  /* The vocal and the drum level travel with the settings like the rest:
+   * "Remix again" opens on what that remix used. */
+  const vocal0 = ['auto', 'flow', 'chop'].includes(opts.vocal) ? opts.vocal
+    : (state.lastVocal || 'auto');
+  segment($('#vocalSeg'), [
+    { value: 'auto', label: 'Auto', title: 'measure whether the voice locks to a straight grid' },
+    { value: 'flow', label: 'Flow', title: 'play the vocal as it was sung' },
+    { value: 'chop', label: 'Chop', title: 'cut it into slices that start on syllables and land on beats' },
+  ], vocal0, v => { state.lastVocal = v; syncVocalOut(v); });
+  syncVocalOut(vocal0);
+  setDrums(opts.drums_db != null && isFinite(Number(opts.drums_db)) ? Number(opts.drums_db) : 0);
 
   segment($('#formSeg'), cfg.forms.map(f => ({
     value: f, label: f[0].toUpperCase() + f.slice(1),
@@ -838,6 +854,24 @@ function prepareControls(src, opts) {
     `${src.analysis.tempo.bpm.toFixed(2)} BPM → ${suggested.toFixed(0)} · ` +
     `${src.analysis.key.key} ${src.analysis.key.camelot} · takes about a minute`;
   showAlert($('#controlsErr'), '');
+}
+
+const VOCAL_NOTE = { auto: 'measured per song', flow: 'as sung', chop: 'sliced onto beats' };
+
+function syncVocalOut(v) {
+  $('#vocalOut').textContent = VOCAL_NOTE[v] || '';
+}
+
+/* The drum bus trim, in dB; 0 is the level the engine mixes at. */
+function setDrums(v) {
+  const slider = $('#drumsDb');
+  slider.value = String(Math.max(Number(slider.min), Math.min(Number(slider.max), v)));
+  syncDrumsOut(slider.value);
+}
+
+function syncDrumsOut(v) {
+  const n = Number(v);
+  $('#drumsOut').innerHTML = `${n > 0 ? '+' : ''}${n.toFixed(1)}<i>dB</i>`;
 }
 
 function syncBpmOut(v) {
@@ -902,6 +936,7 @@ function pressed(sel) {
 
 function readOptions() {
   const stems = pressed('#stemsSeg'), form = pressed('#formSeg');
+  const vocal = pressed('#vocalSeg') || 'auto';
   if (!state.source || !stems || !form || state.controlsFor !== state.source.id) {
     throw new Error('the controls are not set up for this track — drop it again');
   }
@@ -909,6 +944,7 @@ function readOptions() {
     source: state.source.id,
     bpm: $('#bpmInput').value.trim(),
     stems,
+    vocal,
     form,
     length: $('#lengthInput').value.trim(),
     style: $('#styleSelect').value || null,
@@ -927,6 +963,8 @@ function readOptions() {
     payload.compatible_with = state.match.id;
   }
   if (state.swingDirty) payload.swing = $('#swing').value;
+  const drums = Number($('#drumsDb').value);
+  if (drums) payload.drums_db = String(drums);
   return payload;
 }
 
@@ -1137,7 +1175,8 @@ function renderResult(detail, elapsed) {
   });
 
   $('#playerMeta').innerHTML =
-    `${esc(meta.form)} form · ${esc(meta.stems)} separation<br>` +
+    `${esc(meta.form)} form · ${esc(meta.stems)} separation` +
+    (meta.vocal ? ` · ${esc(meta.vocal)} vocal` : '') + '<br>' +
     `from ${esc(meta.source_name || '')}` +
     (meta.semitone_shift ? ` · ${meta.semitone_shift > 0 ? '+' : ''}${meta.semitone_shift} st` : '');
 
@@ -2100,6 +2139,7 @@ function wireControls() {
     state.swingDirty = true;
     $('#swingOut').textContent = 'swing ' + Number($('#swing').value).toFixed(2);
   });
+  $('#drumsDb').addEventListener('input', () => syncDrumsOut($('#drumsDb').value));
   $('#styleSelect').addEventListener('change', () => applyStyle($('#styleSelect').value));
 
   /* The match track loads while you look at the other controls. Until it has

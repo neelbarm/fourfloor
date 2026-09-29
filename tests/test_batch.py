@@ -887,7 +887,10 @@ def test_resume_keeps_an_older_render_that_matches(originals, tmp_path,
         _finished_by_hand(batch.output_for(p, out), bpm=128.0,
                           separation="demucs", drums="synth")
     state = engine()
-    manifest = batch.run(originals, out, bpm=128.0, stems="demucs", resume=True)
+    # kit="none": the sessions say "synth", and another test module may have
+    # left a kit in the shared FOURFLOOR_HOME that would otherwise be the default
+    manifest = batch.run(originals, out, bpm=128.0, stems="demucs", kit="none",
+                         resume=True)
     assert state["calls"] == [] and manifest["summary"]["skipped"] == 3
 
 
@@ -1047,3 +1050,55 @@ def test_the_reporter_draws_a_line_per_track(originals, tmp_path, engine,
     assert "batch: Friday" in out
     assert "1/3" in out and "3/3" in out
     assert "126.00 BPM" in out
+
+
+def test_set_json_records_the_gate_and_what_auto_decided(originals, tmp_path,
+                                                         monkeypatch) -> None:
+    """Each track runs the layered alignment gate, and set.json says how its
+    vocal and bass were played and why -- the first thing to read when one
+    track in a set sounds wrong."""
+    seen = {}
+    plain = stub_remix(opts_seen=seen)
+
+    def _remix(path, out, opts=None, style=None, progress=None):
+        res = plain(path, out, opts, style, progress)
+        res.metrics = {"alignment_ok": True, "alignment_median_ms": 4.2}
+        res.vocal_mode, res.bass_source = "chop", "demucs bass"
+        res.warnings = ["vocal: the vocal is a triplet flow", "bass: kept the song's own",
+                        "something else"]
+        return res
+
+    monkeypatch.setattr("fourfloor.remix.remix", _remix)
+    manifest = batch.run(originals, tmp_path / "gig", bpm=128.0)
+    assert all(o.gate for o in seen.values())
+    track = manifest["tracks"][0]
+    assert track["alignment"] == {"alignment_ok": True, "alignment_median_ms": 4.2}
+    assert (track["vocal"], track["vocal_why"]) == ("chop", "the vocal is a triplet flow")
+    assert (track["bass"], track["bass_why"]) == ("demucs bass", "kept the song's own")
+
+
+def test_a_style_profile_reaches_every_track_and_the_resume_check(originals, tmp_path,
+                                                                 monkeypatch) -> None:
+    from fourfloor.style import Style
+
+    styles = []
+    plain = stub_remix()
+
+    def _remix(path, out, opts=None, style=None, progress=None):
+        styles.append(style)
+        return plain(path, out, opts, style, progress)
+
+    monkeypatch.setattr("fourfloor.remix.remix", _remix)
+    profile = tmp_path / "mine.json"
+    profile.write_text(json.dumps({"swing": 0.12, "length": 300.0}))
+    out = tmp_path / "gig"
+    manifest = batch.run(originals, out, bpm=128.0, style=profile)
+    assert len(styles) == 3 and all(isinstance(s, Style) and s.swing == 0.12
+                                    for s in styles)
+    assert manifest["style"] == str(profile.resolve())
+    # a finished set asked for again without the style is not the same set
+    keep, why = batch.resume_check(sorted(originals.iterdir())[0], out,
+                                   {"bpm": 128.0})
+    assert not keep and "style" in why
+    with pytest.raises(BatchError, match="style profile"):
+        batch.run(originals, tmp_path / "gig2", bpm=128.0, style=tmp_path / "nope.json")

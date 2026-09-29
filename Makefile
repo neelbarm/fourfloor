@@ -6,7 +6,7 @@ VENV    := .venv
 BIN     := $(VENV)/bin
 FIXTURE := fixtures/lofi-7.mp3
 DEMO    := examples/lofi-7.house.mp3
-REFS    ?= $(HOME)/Music/house-refs
+REFS    ?= $(HOME)/Music/house-refs/remixes
 PORT    ?= 4444
 
 .PHONY: help setup test serve demo kit learn clean lint
@@ -14,11 +14,12 @@ PORT    ?= 4444
 help:
 	@echo "fourfloor"
 	@echo "  make setup   create .venv and install fourfloor + dev deps"
-	@echo "  make test    run the test suite (799 tests, ~7 min)"
+	@echo "  make test    run the test suite (1044 tests, ~9 min)"
 	@echo "  make serve   run the web app at http://127.0.0.1:4444"
 	@echo "  make demo    remix fixtures/lofi-7.mp3 into examples/"
 	@echo "  make kit     sample a drum kit: KIT=<a house remix.mp3>"
 	@echo "  make learn   derive a style profile from REFS=<folder of house remixes>"
+	@echo "              (default ~/Music/house-refs/remixes; learn does not look in subfolders)"
 	@echo "  make clean   remove build artefacts and generated audio"
 
 setup:
@@ -36,14 +37,15 @@ serve:
 	$(BIN)/python -m fourfloor serve --port $(PORT) --open
 
 
-# --kit none on purpose: the committed example has to be the same file on any
-# machine, and the engine otherwise plays whichever drum kit that machine
-# happens to have sampled.
+# --kit none and --stems hpss on purpose: the committed example has to be the
+# same file on any machine, and the engine otherwise plays whichever drum kit
+# that machine happens to have sampled, and separates with demucs where it is
+# installed.
 demo:
 	@mkdir -p examples
 	$(BIN)/python -m fourfloor remix $(FIXTURE) -o $(DEMO) --bpm 124 --length 4:30 \
-		--kit none --preview --no-wav
-	@echo "wrote $(DEMO) + session, plan and preview.html"
+		--kit none --stems hpss --preview --no-wav
+	@echo "wrote $(DEMO) + session, plan and lofi-7.house.preview.html"
 
 kit:
 	@test -n "$(KIT)" || { echo "usage: make kit KIT=path/to/a-house-remix.mp3"; exit 1; }

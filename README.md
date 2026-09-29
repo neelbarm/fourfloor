@@ -44,8 +44,12 @@ away: detected tempo, key and Camelot code, and the structure it found, drawn
 across the file. Pick a target tempo from the presets or type one, keep the key
 or pick a new one off a Camelot wheel that lights up the keys which still mix
 with the original — or hand it a second track and let it shift into something
-compatible with *that*. Then choose the separation engine, the form, the length
-and a style profile, and press Remix.
+compatible with *that*. Then choose the separation engine (Demucs is selected
+when it is installed, the same default as the CLI; the control says which
+default is in effect), the form, how the vocal is played (**Auto**, **Flow** or
+**Chop**, as `--vocal`), the drum level (as `--drums-db`), the length and a
+style profile, and press Remix. The drum kit and the bass policy are CLI-only
+(`--kit`, `--bass`): the app uses the default kit and `--bass auto`.
 
 The pipeline streams its phases back as they happen (analyse, warp, separate,
 arrange, render, write, each with its own timing), and the finished remix
@@ -98,8 +102,8 @@ the drop is filed against the drop.
 **A/B two takes.** Pick anything in **Hear it against** — another render of the
 same song, any other remix in the library, the track you dropped in, or a real
 human remix of it if one is sitting in `~/Music/house-refs/pairs/` — and both
-play at once with one shared transport. <kbd>Tab</kbd>, or the toggle, flips
-which one you hear. Then vote, with a reason.
+play at once with one shared transport. <kbd>F</kbd> (or ← / →), or the toggle,
+flips which one you hear. Then vote, with a reason.
 
 The flip is instant because nothing restarts: both `<audio>` elements feed one
 `AudioContext` and the flip is a four-millisecond gain crossfade. That routing
@@ -248,7 +252,7 @@ make serve                        # the app at http://127.0.0.1:4444
 
 ```bash
 make demo                         # remix the bundled fixture (~15s)
-open examples/preview.html        # see what it did, and hear it
+open examples/lofi-7.house.preview.html   # see what it did, and hear it
 ```
 
 Needs **Python 3.11 or newer** and ffmpeg on `PATH`. `make setup` picks the first
@@ -353,7 +357,8 @@ DAFx 2010): horizontal median → harmonic, vertical median → percussive, spli
 with soft Wiener masks. The mask is computed once on the mid channel and applied
 to both so the stereo image survives. The kit *replaces* the original drums; the
 percussive part is kept only as low-level texture where the arrangement asks for
-it. `--stems demucs` swaps in a real four-way neural split (see below).
+it. Demucs, the default wherever it is installed, swaps in a real four-way
+neural split (see below); HPSS is what runs without it, or with `--stems hpss`.
 
 The bass stem is kept and played. See **The low end** below.
 
@@ -416,18 +421,29 @@ fourfloor remix SONG [-o OUT.mp3]
     --key 8A|Am|auto           target key; auto keeps the original
     --compatible-with T.mp3    shift into a key that mixes with track T (within ±3 semitones)
     --style style.json         apply a profile from `fourfloor learn`
-    --stems hpss|demucs        separation engine (default hpss)
+    --stems hpss|demucs        separation engine (default: demucs when it is
+                               installed, else hpss; --help says which)
     --length 4:30              target length (default 4:30); rounds to 8-bar phrases
     --form club|radio|tool     arrangement preset (tool = extended DJ intro/outro)
     --swing 0.08               hat swing, 0 to 0.66
-    --kit NAME|none            drum kit from `fourfloor kit build`
-                               (default: the most recent one; none = synth kit)
-    --bass source|synth        the song's own bass (default) or a synthesised one
+    --kit NAME|none            drum kit from `fourfloor kit build` (default: the
+                               pinned kit, `fourfloor kit default`, else the most
+                               recently built; none = synth kit)
+    --bass auto|source|sub|none|synth
+                               auto (default) keeps the song's own bass unless it
+                               is an 808 doubling the kick, which becomes a sub
+                               following its pitch; source always keeps it; sub
+                               always replaces it; none leaves the low end to the
+                               kick; synth is the chord-guessing bass line
+    --vocal auto|flow|chop     auto (default) measures whether the voice is a
+                               triplet flow; flow plays it as sung; chop cuts it
+                               into slices that start on syllables, land on beats
+    --drums-db -1.5            trim (or boost) the drum bus, -24 to +12 dB (default 0)
     --no-kick-reinforce        no synth kick under a sampled loop's kicks
     --seed 0                   randomisation seed
     --no-wav                   write only the mp3
     --producer                 let Claude plan the arrangement (optional, see below)
-    --preview                  also write preview.html
+    --preview                  also write OUT.preview.html
     --json                     print the session JSON instead of a report
     -q, --quiet                no progress or report
     --url LINK                 fetch the source from a link instead of naming a file
@@ -439,12 +455,17 @@ fourfloor batch FOLDER -o OUT --bpm 126    remix a whole folder into one set
     --set "Friday"             name the set and the Rekordbox playlist
     --length 4:30              target length per track
     --form club|radio|tool     arrangement preset, same as remix
-    --stems hpss|demucs        separation engine
+    --stems hpss|demucs        separation engine (same default as remix)
     --kit NAME|none            one drum kit for the whole set
     --bass auto|source|sub|none|synth
                                one low-end policy for the whole set
+    --vocal auto|flow|chop     one vocal treatment for the whole set
+    --drums-db -1.5            one drum-bus trim for the whole set
+    --no-kick-reinforce        as remix
+    --style style.json         a profile's swing and length for every track
+    --seed 0 / --swing 0.08    as remix
     --jobs 2                   render this many tracks at once
-    --resume                   skip tracks that already have an mp3 and a session
+    --resume                   keep tracks already rendered with these settings
     --wav                      also write a wav per track
     --artist NAME              the Artist tag to write (default: fourfloor)
     --json / -q                print set.json / say nothing
@@ -466,9 +487,13 @@ fourfloor fetch URL                  download a track with yt-dlp (needs yt-dlp 
     --json / -q                print what landed as JSON / say nothing
 
 fourfloor kit build REMIX.mp3        sample a drum kit from a house record
-    --name NAME                what to call it (default: from the filename)
+    --name NAME                what to call it (default: from the filename;
+                               lower-case letters, digits, - and _)
     --bars 8                   loop length in bars
+    --force                    replace a kit that already has this name
 fourfloor kit list [--json]          the kits you have built
+fourfloor kit default [NAME|newest]  pin the kit a remix gets without --kit
+                                     (no NAME: show it; newest: unpin)
 
 fourfloor inspect SONG [--json]      tempo, key, structure timeline, house target
     --url LINK                 analyse a link instead of a file
@@ -491,7 +516,7 @@ fourfloor refs accept SLUG [--url L] keep a reviewed pair (or a link you pick)
 fourfloor refs reject SLUG           drop its candidate; keep the remix alone
 fourfloor refs learn                 re-learn the profile from pairs + remixes
     --repo styles/pairs.json   where the anonymised aggregate goes ('none' to skip)
-fourfloor preview OUT.mp3            write preview.html next to a finished remix
+fourfloor preview OUT.mp3            write OUT.preview.html next to a finished remix
 
 fourfloor serve                      run the local web app (see "The app" above)
     --port 4444                start on a different port
@@ -507,7 +532,12 @@ than 56 bars — 1:48 at 124 BPM — exists. Ask for less and fourfloor tells yo
 what it did instead.
 
 Outputs per remix: the mp3 (320k) and wav, `*.session.json`, `*.plan.json`, and
-optionally `preview.html`.
+optionally `*.preview.html`. fourfloor refuses an `-o` that would write any of
+them over the source (`-o song.mp3` beside `song.wav` writes `song.wav` too),
+and checks the output folder is writable before it starts.
+
+Exit codes: 0 done, 1 an error (the message says which), 2 a command line it
+could not parse, 3 from `batch` when the set rendered with tracks missing.
 
 ## Prepare a gig set
 
@@ -533,11 +563,16 @@ fourfloor batch ~/Music/gig-sources -o ~/Music/friday --bpm 126 --set "Friday" \
 fourfloor export ~/Music/friday --set "Friday" --format tags,serato
 ```
 
-`--kit` and `--bass` are set-wide on purpose: one drum kit and one low-end
-policy across the night is what makes eight remixes sound like one record rather
-than eight. They mean exactly what they mean on `fourfloor remix` — see
-**Real drums** and **The low end** below. Everything else per track is decided
-from the track.
+`--kit`, `--bass`, `--vocal` and `--drums-db` are set-wide on purpose: one drum
+kit, one low-end policy and one drum level across the night is what makes eight
+remixes sound like one record rather than eight. They mean exactly what they
+mean on `fourfloor remix`, with the same defaults — see **Real drums** and
+**The low end** below — and `set.json` records each of them. Everything else
+per track is decided from the track, and `set.json` says what was decided: each
+row carries the vocal treatment and the bass it got and, when `auto` chose, why,
+plus the layered alignment gate's verdict (`alignment_ok`, the median and p90
+offsets). A track `auto` gets wrong is re-rendered on its own with
+`fourfloor remix --vocal chop` (or `flow`).
 
 The output folder then holds, per track, the mp3 + wav + `*.session.json` +
 `*.plan.json` you get from `fourfloor remix`, and for the set as a whole:
@@ -550,9 +585,12 @@ The output folder then holds, per track, the mp3 + wav + `*.session.json` +
 
 `batch` never aborts on one bad track. A file the engine refuses is recorded in
 `set.json` with its error and the rest of the set still renders and still
-exports. `--resume` considers a track done only when both its mp3 and its
-session file are on disk, so an interrupted render is redone rather than
-shipped half-written.
+exports; the command then exits 3, so `fourfloor batch … && fourfloor export …`
+does not mistake a set with a hole in it for a whole one. `--resume` keeps a
+track only when its mp3, session and plan are all on disk, the mp3 is whole,
+and it was rendered with the same tempo, stems, kit, bass, vocal, drum level,
+form, length, style and seed; anything else is rendered again, and the terminal
+says why.
 
 ### Importing into Rekordbox
 
@@ -574,6 +612,8 @@ build 1, drop 1, breakdown, build 2, drop 2 and outro, coloured by section.
 `Location` is a percent-encoded `file://localhost/…` URL, so move the folder and
 the tracks will import red. Export after the files are where they are going to
 live, or re-run `fourfloor export <folder> --set "…"` from the new location.
+Re-exporting a batch folder exports the tracks its `set.json` lists, in set
+order.
 
 ### Serato, and tags for everything else
 
@@ -635,7 +675,12 @@ sampled off a 2015 record often has less sub than a 2024 system expects;
 `--no-kick-reinforce` turns that off.
 
 With no kits built, or with `--kit none`, you get the synthesised kit. With
-several, `--kit NAME` picks one and the default is the most recent.
+several, `--kit NAME` picks one; without it you get the pinned kit
+(`fourfloor kit default murph`), else the most recently built. Pin the one you
+play: `fourfloor refs add` builds a kit from every link, so "the most recent"
+changes as references come in. `kit build` will not replace a kit that already
+has the name you give it unless you pass `--force`, and a `--kit` that names no
+kit is refused before any audio is read.
 
 ## The low end
 
@@ -761,21 +806,26 @@ the ranking reproduces the verdicts:
 
 | file | total | simil | groove | clarity | clicks | vocal | loud |
 |---|---|---|---|---|---|---|---|
-| reference: Stay Fly (Bittersweet) | **91.0** | 94.1 | 85.1 | 88.1 | 100.0 | 93.6 | 95.9 |
-| reference: Sweet Escape (BOSEP) | **87.0** | 85.9 | 99.7 | 95.9 | 17.1 | 92.8 | 99.4 |
-| reference: E85 (Kosuk) | **86.6** | 86.2 | 85.9 | 75.4 | 85.2 | 98.3 | 99.3 |
-| reference: babybabyyy | **79.6** | 89.0 | 60.4 | 73.6 | 100.0 | 87.0 | 100.0 |
-| reference: Never Be Like You | **77.6** | 93.0 | 61.4 | 56.0 | 100.0 | 92.1 | 94.2 |
-| reference: body.remix | **68.5** | 91.0 | 46.0 | 68.7 | 58.6 | 89.8 | 75.0 |
+| reference remix 1 | **91.4** | 94.1 | 85.1 | 88.1 | 100.0 | 97.0 | 95.9 |
+| reference remix 2 | **86.9** | 85.9 | 99.7 | 95.9 | 17.1 | 91.5 | 99.4 |
+| reference remix 3 | **86.2** | 86.2 | 85.9 | 75.4 | 85.2 | 94.9 | 99.3 |
+| reference remix 4 | **79.0** | 89.0 | 60.4 | 73.6 | 100.0 | 80.5 | 100.0 |
+| reference remix 5 | **78.1** | 93.0 | 61.4 | 56.0 | 100.0 | 97.3 | 94.2 |
+| reference remix 6 (the Body pair's remix) | **68.8** | 91.0 | 46.0 | 68.7 | 58.6 | 93.0 | 75.0 |
 | render: final-cantsay | **82.3** | 98.2 | 65.3 | 64.1 | 100.0 | 98.7 | 97.4 |
 | render: final-stayfly | **75.1** | 82.4 | 71.3 | 78.4 | 28.1 | 100.0 | 86.3 |
 | render: final-body (808 swapped for a sub) | **73.3** | 73.8 | 66.9 | 65.2 | 53.1 | 100.0 | 99.9 |
 | render: final-body | **73.1** | 74.8 | 65.3 | 64.1 | 57.8 | 100.0 | 97.6 |
 | render: body.classic — *"better, some of it is off beat"* | **71.9** | 56.2 | 63.6 | 68.9 | 100.0 | 95.7 | 84.3 |
 | render: body.fourfloor — *"off beat, everything overlapping"* | **41.0** | 4.3 | 29.4 | 27.5 | 67.3 | 95.3 | 100.0 |
-| original (not house): body.original | 58.3 | 0.0 | 79.8 | 68.7 | 85.3 | 60.0 | 75.0 |
-| original (not house): CAN'T SAY | 54.6 | 0.0 | 55.2 | 64.8 | 100.0 | 69.8 | 94.2 |
-| source (not house): lofi-7 | 42.7 | 0.0 | 41.6 | 30.2 | 100.0 | 47.9 | 100.0 |
+| original (not house): Body | 62.3 | 0.0 | 79.8 | 68.7 | 85.3 | 100.0 | 75.0 |
+| original (not house): CAN'T SAY | 57.3 | 0.0 | 55.2 | 64.8 | 100.0 | 96.3 | 94.2 |
+| source (not house): lofi-7 | 45.3 | 0.0 | 41.6 | 30.2 | 100.0 | 73.5 | 100.0 |
+
+The `vocal` column measures the 300–3400 Hz mel bands, with syllabic energy
+averaged over the whole track; before 2026-09-28 it read 165–1009 Hz over the
+first 4 s only. The rows above were re-measured with the new reading except
+the six renders, which are not on disk any more; their `vocal` is the old one.
 
 References average **81.7** and none falls below the best render. The two rated
 renders land in the order the human put them, 30.9 points apart. Non-house
@@ -783,8 +833,8 @@ material scores 0 on similarity, which is the anchor doing its job: the
 embedding is calibrated so a reference reaches 90 and the best non-house
 original reaches 0.
 
-Re-fit with the scripts under `scratchpad/critic/`; the numbers live in
-`WEIGHTS` and `BANDS` in `fourfloor/critic/score.py`, one table, no magic
+To re-fit, score the calibration set with `fourfloor critic --json` and adjust
+`WEIGHTS` and `BANDS` in `fourfloor/critic/score.py`: one table, no magic
 constants buried in the code.
 
 ### Two things that had to be rebuilt
@@ -822,6 +872,10 @@ the boundary as a `.npy` of 10-second windows and nothing else does. Reference
 embeddings are cached in `~/.fourfloor/critic/cache`, never in the repo, and
 never the audio itself.
 
+If the install is interrupted, run `python -m fourfloor.critic.install_clap`
+again: it finishes the install in place. Until it has, `--embed auto` uses the
+mfcc embedding and says so.
+
 Without it the critic falls back to a hand-built MFCC-plus-rhythm embedding,
 **at half weight, with a warning printed** — because on the calibration set that
 fallback gets the important pair backwards. `body.fourfloor`, the render rated
@@ -843,8 +897,8 @@ block.
 
 ```bash
 fourfloor critic render.mp3 --refs ~/Music/house-refs/remixes --ear gemini \
-    --ref  ~/Music/house-refs/pairs/body.remix.mp3 \
-    --source ~/Music/house-refs/pairs/body.original.mp3
+    --ref  ~/Music/house-refs/pairs/<name>.remix.mp3 \
+    --source ~/Music/house-refs/pairs/<name>.original.mp3
 ```
 
 The key comes from `GEMINI_API_KEY`, or from `~/.fourfloor/gemini.key` (one
@@ -1019,9 +1073,15 @@ locks in, breakdown presence and length, spectral tilt and brightness, loudness,
 kick density and typical length.
 
 ```bash
-fourfloor learn ~/Desktop/house-refs -o styles/mine.json
-fourfloor remix song.mp3 --style styles/mine.json
+fourfloor learn ~/Music/house-refs/remixes -o ~/.fourfloor/mine.json
+fourfloor remix song.mp3 --style ~/.fourfloor/mine.json
 ```
+
+Without `--anonymous` a profile keeps one row per reference, filename
+included, so keep it out of the repository (as above); `styles/*.json` other
+than the committed aggregates is git-ignored for the same reason. `learn` reads
+the audio files directly inside the folder, not its subfolders, which is why
+`make learn` defaults to `REFS=~/Music/house-refs/remixes`.
 
 `styles/klickaud-refs.json` is a profile learned from five commercial DJ edits —
 aggregate numbers only, no filenames and no audio.
@@ -1053,15 +1113,24 @@ filenames, no titles, no links.
 
 ```bash
 pip install 'fourfloor[stems]'      # pulls torch, ~900 MB
-fourfloor remix song.mp3 --stems demucs
+fourfloor remix song.mp3            # demucs is now the default
+fourfloor remix song.mp3 --stems hpss   # the built-in separation, on request
 ```
 
 Runs Hybrid Transformer Demucs (Rouard et al., ICASSP 2023) for a real four-way
-split, which gives a true *vocal house* remix: isolated vocals over a synthesised
-kit and bass, rather than HPSS's harmonic bed. On an M-series Mac it runs around
-8× realtime on CPU. The `bass` stem is deliberately thrown away — replacing the
-low end is the point. Weights download on first run; everything else in fourfloor
-is offline.
+split, which gives a true *vocal house* remix: isolated vocals (played as sung,
+or chopped onto the grid, see `--vocal`) over the drum kit and the song's own
+bass stem (see **The low end**), rather than HPSS's harmonic bed. On an M-series
+Mac it runs around 8× realtime on CPU. Weights download on first run;
+everything else in fourfloor is offline.
+
+Once installed it is the default for `remix`, `batch` and the app, because the
+render this was tuned by ear on used it; `--help` (and the app's Separation
+control) says which default is in effect, and `FOURFLOOR_STEMS=hpss` sets the
+default back for a shell. Separation is deterministic: demucs runs with
+`--shifts 0`, so the same song with the same options is the same file every
+time, and the test suite checks both a byte-identical render and identical
+stems.
 
 ## Optional: Claude as the producer
 
@@ -1129,9 +1198,18 @@ with no key and no network.
 - **Structural labels are heuristics.** "Hook" means most-repeated-and-loud, which
   is usually the chorus and sometimes isn't. Read `*.plan.json`; if it picked the
   wrong section you'll see exactly which one it picked.
+- **`--vocal auto` only chops a voice that is clearly a triplet flow.** It
+  compares how many off-grid syllables sit on triplet positions with how many
+  sit on sixteenth ones, where luck gives half. CAN'T SAY (47%) flows, as the
+  loved render did. *Body* reads 55% in 64% of its phrases at 128 BPM, which a
+  voice with syllables placed at random also reaches, so auto plays it as sung
+  too: a threshold low enough to chop it chopped 13 of 36 rhythmless test voices
+  and Flume's sung vocal at 124 BPM. Chop a track like that on request,
+  `fourfloor remix --vocal chop`.
 - **HPSS is not stem separation.** It splits sustained from transient, so a
   sustained synth stays with the vocal and a plucked guitar partly leaks into the
-  "drums". Use `--stems demucs` when you want real vocals — and real bass: with
+  "drums". Install demucs (it is then the default) when you want real vocals —
+  and real bass: with
   HPSS the "bass" is simply everything under 180 Hz of the harmonic half, which
   carries mud demucs would have given to another stem, so it comes in quieter.
 - **The gate measures against a straight lattice.** Swung sixteenths do not live
@@ -1176,7 +1254,7 @@ with no key and no network.
 ## Tests
 
 ```bash
-make test     # 799 tests, ~7 min
+make test     # 1044 tests, ~9 min
 ```
 
 The longest-running of them are full remixes: the alignment gate, the kit and the
@@ -1199,7 +1277,11 @@ a source is already nothing but drums, so the separation is stubbed and
 everything after it is the real path. The bass tests check that the remix plays
 notes the song actually plays, and that a record with its own sub is left alone.
 The suite runs with `FOURFLOOR_HOME` pointed at a temp folder, so a remix
-rendered on a machine with kits on it is the same remix as on a clean one.
+rendered on a machine with kits on it is the same remix as on a clean one, and
+with `FOURFLOOR_STEMS=hpss`, so a remix that names no separation uses the fast
+built-in one whether or not demucs is installed. Two renders of the fixture
+have to come out byte-identical, and (where demucs is installed) two
+separations of the same audio identical to the sample.
 
 It also covers the beat tracker against synthesised click tracks at 90/124/140 BPM and
 the real fixture, key detection on synthesised progressions in five keys, downbeat

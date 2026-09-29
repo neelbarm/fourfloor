@@ -132,6 +132,13 @@ class TrackRow:
     source_camelot: str | None = None
     cues: list = field(default_factory=list)
     alignment: dict | None = None
+    vocal: str | None = None
+    """How the voice was played (``flow`` or ``chop``), and why when ``auto``
+    decided it."""
+    vocal_why: str | None = None
+    bass: str | None = None
+    """What the low end is, and why when ``auto`` decided it."""
+    bass_why: str | None = None
     seconds: float = 0.0
 
     @property
@@ -215,7 +222,7 @@ def plan_outputs(sources: list[Path], out_dir: Path) -> tuple[dict[str, Path], l
 #: What a render was asked for, as far as ``--resume`` cares: change any of
 #: these and a finished track is no longer the track this batch wants.
 RENDER_KEYS = ("bpm", "key_strategy", "stems", "kit", "bass", "form", "length",
-               "swing", "seed", "vocal", "drums_db", "kick_reinforce")
+               "swing", "seed", "vocal", "drums_db", "kick_reinforce", "style")
 
 #: Every fourfloor mp3 is 320 kbit/s constant bitrate: 40 000 bytes a second.
 MP3_BYTES_PER_SEC = 320_000 / 8
@@ -237,7 +244,7 @@ def render_params(job: dict) -> dict:
     defaults = {"key_strategy": "lock", "stems": "hpss", "kit": None,
                 "bass": "auto", "form": "club", "length": None, "swing": None,
                 "seed": 0, "vocal": "auto", "drums_db": 0.0,
-                "kick_reinforce": True}
+                "kick_reinforce": True, "style": None}
     params = {k: job.get(k, defaults.get(k)) for k in RENDER_KEYS}
     params["bpm"] = float(params["bpm"])
     params["drums_db"] = float(params["drums_db"])
@@ -304,6 +311,8 @@ def _legacy_mismatch(sess: dict, want: dict) -> str | None:
             return f"bass {label}, not {want['bass']}"
     if want["drums_db"] != 0.0 or not want["kick_reinforce"]:
         return "no record of the drum settings it was rendered with"
+    if want.get("style"):
+        return "no record of the style profile it was rendered with"
     return None
 
 
@@ -381,6 +390,7 @@ def _row_from_session(source: Path, out: Path, sess: dict, status: str,
         source_camelot=src.get("camelot"),
         cues=[{"name": c.get("name"), "time": c.get("time"), "bar": c.get("bar"),
                "kind": c.get("kind")} for c in sess.get("cues", [])],
+        vocal=src.get("vocal"), bass=src.get("bass"),
         seconds=round(seconds, 2),
     )
 
@@ -394,6 +404,7 @@ def _remix_one(job: dict) -> dict:
     t0 = time.time()
     try:
         from .remix import RemixOptions, remix
+        from .style import Style
 
         # Until this render finishes, whatever is at ``out`` is not a render of
         # this job: an interrupted encode must not pass for a finished one.
@@ -407,8 +418,10 @@ def _remix_one(job: dict) -> dict:
             bass=job.get("bass", "auto"), vocal=job.get("vocal", "auto"),
             drums_db=float(job.get("drums_db", 0.0)),
             kick_reinforce=bool(job.get("kick_reinforce", True)),
+            gate=True,              # the layered alignment verdict, per track
         )
-        res = remix(source, out, opts)
+        style = Style.load(job["style"]) if job.get("style") else None
+        res = remix(source, out, opts, style=style)
         mp3 = Path(res.paths.get("mp3", out))
         try:
             _write_stamp(mp3, job)
@@ -416,6 +429,15 @@ def _remix_one(job: dict) -> dict:
             pass                    # still a good render; resume judges it by its session
         row = _row_from_session(source, mp3, res.session, STATUS_OK, time.time() - t0)
         row.alignment = _alignment_of(getattr(res, "metrics", None))
+        # what auto decided, and why: the first thing to read when a track in
+        # the set sounds wrong
+        row.vocal = getattr(res, "vocal_mode", row.vocal)
+        row.bass = getattr(res, "bass_source", row.bass)
+        for w in getattr(res, "warnings", []) or []:
+            if w.startswith("vocal: "):
+                row.vocal_why = w[len("vocal: "):]
+            elif w.startswith("bass: "):
+                row.bass_why = w[len("bass: "):]
         return asdict(row)
     except Exception as exc:                          # noqa: BLE001 - isolation is the point
         row = TrackRow(source=str(source), output=None, status=STATUS_FAILED,
@@ -498,7 +520,7 @@ def _source_keys(sources: list[Path], on_event) -> list[str]:
 
 
 def _check_options(out: Path, *, bpm, stems, kit, bass, length, form, swing, seed,
-                   wav, vocal, drums_db, kick_reinforce) -> str:
+                   wav, vocal, drums_db, kick_reinforce, style=None) -> str:
     """Refuse a bad flag before any track is analysed, and name the one kit.
 
     Without this a typo reached every track separately: a misspelt ``--kit``
@@ -519,6 +541,12 @@ def _check_options(out: Path, *, bpm, stems, kit, bass, length, form, swing, see
         validate_options(opts, out / "check.house.mp3")
     except ValueError as exc:
         raise BatchError(str(exc)) from exc
+    if style:
+        from .style import Style
+        try:
+            Style.load(style)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise BatchError(f"the style profile {style} could not be read: {exc}") from exc
     name = kit or kit_mod.default_name() or "none"
     if name.lower() != "none":
         try:
@@ -536,13 +564,16 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
         length: str | None = None, form: str = "club", swing: float | None = None,
         seed: int = 0, wav: bool = False, set_name: str | None = None,
         artist: str = "fourfloor", vocal: str = "auto", drums_db: float = 0.0,
-        kick_reinforce: bool = True, on_event=None) -> dict:
+        kick_reinforce: bool = True, style: str | Path | None = None,
+        on_event=None) -> dict:
     """Remix every track in ``folder`` at ``bpm`` and export the set.
 
     ``kit``, ``bass``, ``vocal``, ``drums_db`` and ``kick_reinforce`` are
     handed to every track unchanged: a set wants one drum kit and one low-end
     policy across it, not a different decision per file. Their meanings are
-    :class:`~fourfloor.remix.RemixOptions`'s. With no ``kit`` the default kit
+    :class:`~fourfloor.remix.RemixOptions`'s; ``style`` is a style profile
+    (``fourfloor learn``) whose swing and length every track takes where
+    ``swing`` and ``length`` are not given. With no ``kit`` the default kit
     is looked up once, here, so a kit built while the batch runs cannot change
     the drums halfway through the set.
 
@@ -557,10 +588,11 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
         raise NotADirectoryError(str(src_dir))
     if key_strategy not in ("lock", "auto"):
         raise BatchError(f"key strategy must be 'lock' or 'auto', not {key_strategy!r}")
+    style = str(Path(style).expanduser().resolve()) if style else None
     kit = _check_options(out, bpm=bpm, stems=stems, kit=kit, bass=bass,
                          length=length, form=form, swing=swing, seed=seed, wav=wav,
                          vocal=vocal, drums_db=drums_db,
-                         kick_reinforce=kick_reinforce)
+                         kick_reinforce=kick_reinforce, style=style)
     jobs = max(1, int(jobs))
     set_name = set_name or src_dir.name
 
@@ -583,7 +615,8 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
     request = {"bpm": float(bpm), "key_strategy": key_strategy, "stems": stems,
                "form": form, "length": length, "swing": swing, "seed": seed,
                "wav": wav, "kit": kit, "bass": bass, "vocal": vocal,
-               "drums_db": float(drums_db), "kick_reinforce": bool(kick_reinforce)}
+               "drums_db": float(drums_db), "kick_reinforce": bool(kick_reinforce),
+               "style": style}
 
     rows: dict[str, TrackRow] = {}
     pending: list[Path] = []
@@ -723,6 +756,7 @@ def run(folder: str | Path, out_dir: str | Path, *, bpm: float,
         "vocal": vocal,
         "drums_db": float(drums_db),
         "kick_reinforce": bool(kick_reinforce),
+        "style": style,
         "form": form,
         "length": length,
         "jobs": jobs,

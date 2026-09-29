@@ -236,7 +236,7 @@ def collect(target: str | Path, artist: str = GENERATOR,
     since dropped, or of one that failed on the last run. Any other folder is
     scanned for audio files that have a session file beside them; anything
     else in it is ignored rather than refused, because an output folder also
-    holds ``.wav``, ``.plan.json`` and ``preview.html``. What was left out, and
+    holds ``.wav``, ``.plan.json`` and ``.preview.html``. What was left out, and
     why, is appended to ``notes`` when it is given.
     """
     target = Path(target)

@@ -191,6 +191,8 @@ class App:
             "styles": [{k: v for k, v in s.items() if k != "path"}
                        for s in list_styles(self.lib)],
             "demucs": demucs_available(),
+            # what a remix gets when the page sends no --stems: the CLI's rule
+            "default_stems": cli.default_stems(),
             "fetch": fetch_mod.available(),
             "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
             "upload_exts": sorted(store.UPLOAD_EXTS),
@@ -344,6 +346,10 @@ class App:
         elif key and str(key).lower() != "keep":
             flag("--key", key)
         flag("--stems", payload.get("stems"))
+        flag("--vocal", payload.get("vocal"))
+        drums = payload.get("drums_db")
+        if drums not in (None, "", False):
+            argv.append(f"--drums-db={drums}")    # '=' so a negative trim is not a flag
         flag("--form", payload.get("form"))
         flag("--length", payload.get("length"))
         flag("--swing", payload.get("swing"))
@@ -430,8 +436,9 @@ class App:
                 "compatible_with": payload.get("compatible_with"),
                 "stems": opts.stems, "form": opts.form, "length": opts.length,
                 "swing": opts.swing, "style": payload.get("style"),
-                "seed": opts.seed,
+                "seed": opts.seed, "vocal": opts.vocal, "drums_db": opts.drums_db,
             },
+            "vocal": res.vocal_mode,
             "files": sorted(n for n in store.REMIX_FILES if (out_dir / n).is_file()),
         })
         return meta
@@ -957,9 +964,9 @@ def serve(port: int = 4444, open_browser: bool = False,
     try:
         srv = make_server(port, home, verbose=bool(os.environ.get("FOURFLOOR_DEBUG")))
     except OSError as exc:
-        print(ui.error(c, f"could not listen on port {port}: {exc}"))
+        print(ui.error(c, f"could not listen on port {port}: {exc}"), file=sys.stderr)
         print(f"  something else is probably using it; try "
-              f"`fourfloor serve --port {port + 1}`")
+              f"`fourfloor serve --port {port + 1}`", file=sys.stderr)
         return 1
 
     url = f"http://127.0.0.1:{srv.server_address[1]}"

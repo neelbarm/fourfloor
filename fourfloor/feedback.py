@@ -17,8 +17,10 @@ bar 41 is worth nothing if it stays behind.
 
 The ears are not the only thing writing here. :mod:`fourfloor.critic` appends
 what Gemini heard into the same file with ``author: "gemini"``, which makes two
-writers on one document, so: the append path reads it **raw** and puts back
-exactly what it read, and every marker's bar is recomputed from its *time*
+writers on one document, so both take the same lock (:func:`locked`) and write
+through :func:`write_raw` (atomic, with a ``.bak``); the critic refuses rather
+than overwrite a file it cannot read. The append path reads it **raw** and puts
+back exactly what it read, and every marker's bar is recomputed from its *time*
 against the session grid on the way out -- the critic counts bars from zero
 where this module counts from one, and a time in seconds is the one thing two
 tools cannot disagree about.
@@ -470,8 +472,9 @@ def sync_session(remix_dir: str | Path) -> Path | None:
     A reader that does not know the field ignores it.
 
     It rewrites that array rather than appending to it, and that is what makes
-    the critic's markers turn up here too -- the critic writes straight into
-    ``feedback.json`` and knows nothing about the session file, and the notes
+    the critic's markers turn up here too -- the critic adds its markers to
+    ``feedback.json`` (under :func:`locked`, through :func:`write_raw`) and
+    knows nothing about the session file, and the notes
     worth carrying to another machine are all of them, not only the ones that
     were typed into the browser.
     """

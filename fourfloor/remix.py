@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -161,13 +162,38 @@ def _neighbours(camelot: str) -> list[str]:
 PHASES = ("analyse", "warp", "separate", "arrange", "render", "write")
 
 
-def validate_options(opts: RemixOptions, out: str | Path) -> None:
+def output_paths(out: str | Path, wav: bool) -> list[Path]:
+    """Every file :func:`remix` writes for ``out``: mp3, wav, session, plan."""
+    out = Path(out)
+    is_wav = out.suffix.lower() == ".wav"
+    paths = [out.with_suffix(".mp3") if is_wav else out]
+    if is_wav or wav:
+        paths.append(out.with_suffix(".wav"))
+    stem_base = out.with_suffix("")
+    paths += [Path(f"{stem_base}.session.json"), Path(f"{stem_base}.plan.json")]
+    return paths
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """True when ``a`` and ``b`` name one file (case-insensitive disks included)."""
+    try:
+        return a.exists() and b.exists() and os.path.samefile(a, b)
+    except OSError:
+        return a.resolve() == b.resolve()
+
+
+def validate_options(opts: RemixOptions, out: str | Path,
+                     source: str | Path | None = None) -> None:
     """Reject an impossible request before any work happens.
 
     Every check here is cheap and needs no audio, so both the CLI and the web
     app can run it up front: a bad flag used to surface either as a numpy error
     deep in the render or as a session-schema failure after a full minute of
     work, with a half-written mp3 left behind.
+
+    With ``source``, also refuse an output that would write over it: an
+    ``-o song.mp3`` beside ``song.wav`` writes ``song.wav`` too (the WAV copy),
+    and the original was replaced by the remix with no warning.
     """
     out = Path(out)
     if opts.target_bpm is not None and not (MIN_TARGET_BPM <= opts.target_bpm <= MAX_TARGET_BPM):
@@ -200,6 +226,21 @@ def validate_options(opts: RemixOptions, out: str | Path) -> None:
         arrange.parse_length(opts.length)          # raises with its own message
     if opts.key and opts.key.lower() != "auto":
         parse_key(opts.key)                        # ditto
+    if opts.kit and opts.kit.strip().lower() != "none":
+        # a misspelt kit used to be found only after the analysis, the warp
+        # and (with demucs) minutes of separation
+        name = kits.check_name(opts.kit)
+        folder = kits.kits_home() / name
+        if not ((folder / "meta.json").is_file() and (folder / "loop.wav").is_file()):
+            raise ValueError(f"no kit called {name!r} in {kits.kits_home()}; "
+                             "`fourfloor kit list` shows the ones you have")
+    if source is not None:
+        src = Path(source)
+        for p in output_paths(out, opts.wav):
+            if _same_file(p, src):
+                raise ValueError(
+                    f"writing {p.name} would replace the source {src.name}; "
+                    "choose another -o")
 
 
 def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
@@ -209,7 +250,8 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     out = Path(out)
     step = progress or (lambda *_a, **_k: None)
 
-    validate_options(opts, out)
+    validate_options(opts, out, source=path)
+    drum_kit = kits.resolve(opts.kit)
 
     step("analyse", "decoding and analysing the source")
     clip = decode(path)
@@ -249,8 +291,6 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
             bass_mode, _meas, bass_why = choose_bass(stems.bass, a.sr, target_bpm)
     if bass_why:
         warnings.append(f"bass: {bass_why}")
-
-    drum_kit = kits.resolve(opts.kit)
 
     step("arrange", f"{opts.form} form")
     length = arrange.parse_length(opts.length) if opts.length else (

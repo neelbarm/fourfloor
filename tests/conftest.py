@@ -25,11 +25,19 @@ def isolated_home(tmp_path_factory):
     home = tmp_path_factory.mktemp("fourfloor-home")
     before = os.environ.get("FOURFLOOR_HOME")
     os.environ["FOURFLOOR_HOME"] = str(home)
+    # The CLI and the app default to demucs where it is installed; a test that
+    # remixes without --stems means the fast built-in separation, on any machine.
+    stems_before = os.environ.get("FOURFLOOR_STEMS")
+    os.environ["FOURFLOOR_STEMS"] = "hpss"
     yield home
     if before is None:
         os.environ.pop("FOURFLOOR_HOME", None)
     else:
         os.environ["FOURFLOOR_HOME"] = before
+    if stems_before is None:
+        os.environ.pop("FOURFLOOR_STEMS", None)
+    else:
+        os.environ["FOURFLOOR_STEMS"] = stems_before
 
 
 @pytest.fixture(scope="module")

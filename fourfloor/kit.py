@@ -59,8 +59,8 @@ def check_name(name: str) -> str:
     """
     canon = str(name or "").strip().lower()
     if not NAME_RE.match(canon) or canon in RESERVED:
-        raise ValueError(f"{name!r} is not a kit name; use letters, digits, "
-                         "dashes and underscores"
+        raise ValueError(f"{name!r} is not a kit name; use lower-case letters, "
+                         "digits, dashes and underscores"
                          + (" (and not one of " + ", ".join(sorted(RESERVED)) + ")"
                             if canon in RESERVED else ""))
     return canon
@@ -241,18 +241,27 @@ def find_loop(drums: np.ndarray, sr: int, beats: np.ndarray, downbeat_index: int
 # ---------------------------------------------------------------------------
 
 def build(path: str | Path, name: str | None = None, home: str | Path | None = None,
-          bars: int = KIT_BARS, progress=None) -> Kit:
+          bars: int = KIT_BARS, progress=None, force: bool = False) -> Kit:
     """Separate a house record's drums and keep its best eight bars.
 
     The drums are separated from the *original* file, not from anything warped:
     a kit is a sample library, and it should carry the record's own timing into
     the 128 BPM grid rather than a timing something else already interfered
     with.
+
+    The name is checked before any audio work, and a kit that already exists
+    under it is kept unless ``force``: the pin stores only a name, so
+    rebuilding ``murph`` from another record would change the drums under
+    every default remix while ``kit list`` still said ``murph (pinned)``.
     """
     from .stems import separate_demucs
 
     step = progress or (lambda *_a, **_k: None)
     path = Path(path)
+    kit_name = check_name(name or slugify(path.stem))
+    if not force and (kits_home(home) / kit_name).exists():
+        raise ValueError(f"there is already a kit called {kit_name!r}; pick another "
+                         "--name, or pass --force to replace it")
     step("analyse", f"reading {path.name}")
     a = analyze(path)
     if len(a.grid.beats) < bars * 4 + 1:
@@ -290,12 +299,9 @@ def build(path: str | Path, name: str | None = None, home: str | Path | None = N
         loop = (loop / peak * 0.89).astype(np.float32)
     # kick offsets are measured in source seconds; the loop runs at 128
     scale = (60.0 / CANONICAL_BPM) / max(float(np.median(np.diff(win))), 1e-9)
-    kit = Kit(name=(name or slugify(path.stem)), loop=loop, sr=a.sr, bars=bars,
+    kit = Kit(name=kit_name, loop=loop, sr=a.sr, bars=bars,
               source=path.name, source_bpm=a.grid.bpm, score=score,
               kick_beats=[k * scale for k in kicks])
-    if not NAME_RE.match(kit.name) or kit.name in RESERVED:
-        raise ValueError(f"{kit.name!r} is not a usable kit name; use letters, "
-                         "digits, dashes and underscores")
     step("write", str(save(kit, home)))
     return kit
 

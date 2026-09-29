@@ -388,10 +388,19 @@ def _audio_src(audio_path: Path, out_path: Path) -> str:
     return quote(Path(rel).as_posix())
 
 
-def write_preview(audio_path: str | Path, session: dict, out: str | Path | None = None) -> Path:
-    """Write ``preview.html`` beside ``audio_path`` and return its path."""
+def preview_path_for(audio_path: str | Path) -> Path:
+    """``X.house.mp3`` -> ``X.house.preview.html``, beside it."""
     audio_path = Path(audio_path)
-    out_path = Path(out) if out else audio_path.parent / "preview.html"
+    return audio_path.with_name(f"{audio_path.stem}.preview.html")
+
+
+def write_preview(audio_path: str | Path, session: dict, out: str | Path | None = None) -> Path:
+    """Write ``<name>.preview.html`` beside ``audio_path`` and return its path.
+
+    Named after the remix, so two remixes in one folder keep a preview each.
+    """
+    audio_path = Path(audio_path)
+    out_path = Path(out) if out else preview_path_for(audio_path)
     wave = waveform(audio_path)
 
     title = audio_path.stem.replace(".house", "").replace("_", " ").replace("-", " ")

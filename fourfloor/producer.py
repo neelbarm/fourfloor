@@ -141,7 +141,13 @@ def apply_producer_plan(analysis: Analysis, plan: Plan,
             slot.source_gain = float(gain)
         start = item.get("source_start")
         if isinstance(start, (int, float)) and 0.0 <= float(start) < plan.duration:
-            slot.source_start = float(start)
+            # onto the source's own bar lines (two target bars each when the
+            # source is half-time): arrange.validate refuses anything else,
+            # which would fail the remix rather than fall back
+            grain = max(1, int(plan.source_bar_grain)) * plan.bar_dur
+            snapped = round(float(start) / grain) * grain if grain > 0 else 0.0
+            if 0.0 <= snapped < plan.duration:
+                slot.source_start = snapped
         label = item.get("source_label")
         if isinstance(label, str) and label:
             slot.source_label = label[:32]

@@ -177,6 +177,27 @@ def test_a_loose_triplet_flow_is_chopped() -> None:
     assert m["triplet_share"] > 0.8 and m["triplet_windows"] > 0.8, m
 
 
+@pytest.mark.parametrize("bpm", [124.0, 126.0, 128.0, 130.0, 132.0])
+def test_auto_keeps_the_loved_flow_and_chops_a_triplet_at_every_set_tempo(bpm) -> None:
+    """The dress-rehearsal regression: --vocal auto chopped CAN'T SAY, whose
+    flowing vocal is the render Neel loved. A CAN'T SAY-shaped line (straight,
+    12 ms late, loose) must flow and a real triplet flow must chop, whatever
+    tempo the set is at."""
+    beat = 60.0 / bpm
+
+    def line(positions, lag, jitter, seed):
+        rng = np.random.default_rng(seed)
+        times = [b + p * beat for b in np.arange(0.0, 179.0, beat)
+                 for p, prob in positions.items() if rng.random() < prob]
+        times = np.sort(np.asarray(times) + lag + rng.uniform(-jitter, jitter, len(times)))
+        return voice_at(times, 180.0)
+
+    mode, m, why = choose_vocal(line(STRAIGHT_LINE, 0.012, 0.022, 1), SR, bpm)
+    assert mode == "flow", (bpm, m, why)
+    mode, m, why = choose_vocal(line(TRIPLET_LINE, 0.015, 0.015, 2), SR, bpm)
+    assert mode == "chop", (bpm, m, why)
+
+
 def test_the_measure_does_not_depend_on_the_tempo() -> None:
     """Chance is one half at any tempo: a random voice reads about the same at
     100 and 150 BPM, where the old fits' chance levels were 0.40 and 0.60."""

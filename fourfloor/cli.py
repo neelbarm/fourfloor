@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -31,6 +32,33 @@ class _Parser(argparse.ArgumentParser):
         raise CliError(message)
 
 
+def default_stems() -> str:
+    """The separation a remix gets when ``--stems`` is not given.
+
+    Demucs when it is installed -- the render Neel loved used it, and his own
+    app remix the same week silently got HPSS because HPSS was the default
+    everywhere -- else the built-in HPSS. ``FOURFLOOR_STEMS=hpss|demucs``
+    overrides it (the test suite pins it to HPSS).
+    """
+    from .stems import demucs_available
+
+    forced = os.environ.get("FOURFLOOR_STEMS", "").strip().lower()
+    if forced in ("hpss", "demucs"):
+        return forced
+    return "demucs" if demucs_available() else "hpss"
+
+
+def _port(text: str) -> int:
+    """A TCP port (0 for any free one), or a parser error rather than a traceback."""
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a port number") from None
+    if not 0 <= n <= 65535:
+        raise argparse.ArgumentTypeError(f"port {n} is out of range; use 1-65535")
+    return n
+
+
 def _parser() -> argparse.ArgumentParser:
     # subparsers inherit this class, so every subcommand raises too
     p = _Parser(
@@ -39,6 +67,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version=f"fourfloor {VERSION}")
     sub = p.add_subparsers(dest="command", required=True)
+    stems_default = default_stems()
+    stems_help = (f"separation engine (default here: {stems_default}; demucs when "
+                  "it is installed, else hpss; demucs needs the [stems] extra)")
+    kit_help = ("(default: the pinned kit, `fourfloor kit default`, else the most "
+                "recently built; 'none' for the synth kit)")
 
     r = sub.add_parser("remix", help="build a house remix of a song")
     r.add_argument("input", nargs="?", help="source audio file (mp3, m4a, wav, flac…)")
@@ -50,14 +83,13 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--compatible-with", metavar="TRACK",
                    help="shift into a key that mixes with this track")
     r.add_argument("--style", metavar="STYLE.JSON", help="style profile from `fourfloor learn`")
-    r.add_argument("--stems", choices=("hpss", "demucs"), default="hpss",
-                   help="separation engine (demucs needs the [stems] extra)")
+    r.add_argument("--stems", choices=("hpss", "demucs"), default=stems_default,
+                   help=stems_help)
     r.add_argument("--length", default=None, help="target length, e.g. 4:30")
     r.add_argument("--form", choices=tuple(FORMS), default="club", help="arrangement preset")
     r.add_argument("--swing", type=float, default=None, help="hat swing, 0 to 0.66")
     r.add_argument("--kit", default=None, metavar="NAME",
-                   help="drum kit built with `fourfloor kit build` "
-                        "(default: the most recent one; 'none' for the synth kit)")
+                   help="drum kit built with `fourfloor kit build` " + kit_help)
     r.add_argument("--bass", choices=("auto", "source", "sub", "none", "synth"),
                    default="auto",
                    help="auto (default) keeps the song's bass unless it is an 808 "
@@ -75,7 +107,7 @@ def _parser() -> argparse.ArgumentParser:
                    help="ask Claude to plan the arrangement (needs ANTHROPIC_API_KEY)")
     r.add_argument("--seed", type=int, default=0, help="randomisation seed")
     r.add_argument("--no-wav", action="store_true", help="write only the mp3")
-    r.add_argument("--preview", action="store_true", help="also write preview.html")
+    r.add_argument("--preview", action="store_true", help="also write <name>.preview.html")
     r.add_argument("--json", action="store_true", help="print the session JSON instead of a report")
     r.add_argument("-q", "--quiet", action="store_true")
 
@@ -85,6 +117,8 @@ def _parser() -> argparse.ArgumentParser:
     kb.add_argument("input", help="a house record to take the drums from")
     kb.add_argument("--name", default=None, help="what to call the kit")
     kb.add_argument("--bars", type=int, default=8, help="loop length in bars (default 8)")
+    kb.add_argument("--force", action="store_true",
+                    help="replace a kit that already has this name")
     kb.add_argument("--json", action="store_true")
     kl = ksub.add_parser("list", help="show the kits you have built")
     kl.add_argument("--json", action="store_true")
@@ -163,7 +197,7 @@ def _parser() -> argparse.ArgumentParser:
                    help="omit per-file rows; save aggregate numbers only")
     l.add_argument("--json", action="store_true")
 
-    v = sub.add_parser("preview", help="write a preview.html next to a remix")
+    v = sub.add_parser("preview", help="write <name>.preview.html next to a remix")
     v.add_argument("input", help="a remix mp3/wav that has a .session.json beside it")
     v.add_argument("-o", "--output", default=None)
 
@@ -200,13 +234,23 @@ def _parser() -> argparse.ArgumentParser:
                          "that mixes with the one before it")
     b.add_argument("--set", dest="set_name", default=None, metavar="NAME",
                    help="what to call the set (default: the source folder's name)")
-    b.add_argument("--stems", choices=("hpss", "demucs"), default="hpss")
+    b.add_argument("--stems", choices=("hpss", "demucs"), default=stems_default,
+                   help=stems_help)
     b.add_argument("--kit", default=None, metavar="NAME",
                    help="one drum kit for the whole set, from `fourfloor kit build` "
-                        "(default: the most recent one; 'none' for the synth kit)")
+                        + kit_help)
     b.add_argument("--bass", choices=("auto", "source", "sub", "none", "synth"),
                    default="auto", help="low-end policy for every track, "
                                         "same meanings as `fourfloor remix --bass`")
+    b.add_argument("--vocal", choices=("auto", "flow", "chop"), default="auto",
+                   help="vocal treatment for every track, same meanings as "
+                        "`fourfloor remix --vocal` (default auto)")
+    b.add_argument("--drums-db", type=float, default=0.0, metavar="DB",
+                   help="trim the drum bus on every track, in decibels (default 0)")
+    b.add_argument("--no-kick-reinforce", action="store_true",
+                   help="do not put a synth kick under a sampled loop's kicks")
+    b.add_argument("--style", metavar="STYLE.JSON", default=None,
+                   help="style profile from `fourfloor learn`, for swing and length")
     b.add_argument("--form", choices=tuple(FORMS), default="club")
     b.add_argument("--length", default=None, help="target length per track, e.g. 4:30")
     b.add_argument("--swing", type=float, default=None)
@@ -216,7 +260,8 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--jobs", type=int, default=1,
                    help="render this many tracks at once (default 1)")
     b.add_argument("--resume", action="store_true",
-                   help="skip tracks that already have an mp3 and a session file")
+                   help="keep tracks already rendered with these same settings; "
+                        "redo any that differ or were cut off")
     b.add_argument("--json", action="store_true",
                    help="print set.json instead of the report")
     b.add_argument("-q", "--quiet", action="store_true")
@@ -224,7 +269,8 @@ def _parser() -> argparse.ArgumentParser:
     critic_command.add_parser(sub)
 
     s = sub.add_parser("serve", help="run the local web app: drop a song in a browser")
-    s.add_argument("--port", type=int, default=4444, help="port to listen on (default 4444)")
+    s.add_argument("--port", type=_port, default=4444,
+                   help="port to listen on (default 4444)")
     s.add_argument("--open", action="store_true", dest="open_browser",
                    help="open the app in your browser once it is up")
     s.add_argument("--home", default=None, metavar="DIR",
@@ -548,28 +594,50 @@ def cmd_inspect(args, c: ui.C) -> int:
     return 0
 
 
+def check_writable(path: str | Path, what: str = "output") -> None:
+    """Refuse an output whose folder cannot be made or written, before the work.
+
+    Found only at the write phase, this used to cost a whole render (or a whole
+    ``learn``) and end in an ffmpeg error or a traceback.
+    """
+    folder = Path(path).expanduser().parent
+    probe = folder
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if not probe.is_dir():
+        raise ValueError(f"cannot write the {what} to {path}: {probe} is not a folder")
+    if not os.access(probe, os.W_OK | os.X_OK):
+        raise ValueError(f"cannot write the {what} to {path}: {probe} is not writable")
+
+
 def cmd_remix(args, c: ui.C) -> int:
-    from .remix import remix
+    from .remix import remix, validate_options
 
     if not args.input and not args.url:
         raise ValueError("give me a file, or `fourfloor remix --url <link>`")
     quiet = args.quiet or args.json
     cleanup = None
+    opts = remix_options(args)
+    style = Style.load(args.style) if args.style else None
     if args.url:
+        # every cheap check before the download, which can be an hour of audio
+        out = Path(args.output) if args.output else None
+        validate_options(opts, out or Path.cwd() / "link.house.mp3")
+        check_writable(out or Path.cwd() / "link.house.mp3")
         if not quiet:
             print(ui.header(c, "fetch"))
             print()
         got, cleanup = _from_link(args.url, c, quiet=quiet)
         src = got.path
         # the temp folder goes away, so an unnamed output lands where you are
-        out = Path(args.output) if args.output else Path.cwd() / f"{src.stem}.house.mp3"
+        out = out or Path.cwd() / f"{src.stem}.house.mp3"
     else:
         src = Path(args.input)
         out = Path(args.output) if args.output else src.with_suffix("").with_name(
             src.stem + ".house.mp3")
-    style = Style.load(args.style) if args.style else None
+        validate_options(opts, out, source=src)
+        check_writable(out)
 
-    opts = remix_options(args)
     if not quiet:
         print(ui.header(c, f"remixing {src.name}"))
         print()
@@ -624,9 +692,10 @@ def cmd_kit(args, c: ui.C) -> int:
                         else c.grey("none yet")))
             return 0
         try:
-            got = kit_mod.pin(args.name)
+            kit_mod.pin(args.name)
         except (FileNotFoundError, ValueError) as exc:
             raise CliError(f"no kit called {args.name!r}: {exc}") from exc
+        got = kit_mod.pinned()                 # what a remix will really use
         print(ui.kv(c, "default kit", c.bold(got) if got
                     else c.grey("unpinned: the most recently built")))
         return 0
@@ -636,7 +705,8 @@ def cmd_kit(args, c: ui.C) -> int:
         print()
     progress = ui.Progress(c, quiet=args.json)
     try:
-        k = kit_mod.build(args.input, name=args.name, bars=args.bars, progress=progress)
+        k = kit_mod.build(args.input, name=args.name, bars=args.bars, progress=progress,
+                          force=args.force)
     finally:
         progress.close()
     if args.json:
@@ -660,6 +730,7 @@ def cmd_kit(args, c: ui.C) -> int:
 def cmd_learn(args, c: ui.C) -> int:
     from .style import learn
 
+    check_writable(args.output, "style profile")
     if not args.json:
         print(ui.header(c, f"learning from {Path(args.folder).name}"))
         print()
@@ -746,7 +817,9 @@ def cmd_refs(args, c: ui.C) -> int:
     # learn
     repo = None if (args.repo or "none").lower() == "none" else args.repo
     if repo and not Path(repo).parent.is_dir():
-        print(ui.warn(c, f"no folder for {repo}; writing only the private profile"))
+        # stderr: with --json, stdout has to be nothing but the JSON
+        print(ui.warn(c, f"no folder for {repo}; writing only the private profile"),
+              file=sys.stderr)
         repo = None
     if not quiet:
         print(ui.header(c, "refs learn"))
@@ -760,12 +833,13 @@ def cmd_refs(args, c: ui.C) -> int:
 
 
 def cmd_preview(args, c: ui.C) -> int:
+    from .export import session_path_for
     from .preview import write_preview
 
     audio = Path(args.input)
-    sess_path = audio.with_suffix("").with_suffix(".session.json")
-    if not sess_path.is_file():
-        sess_path = Path(str(audio.with_suffix("")) + ".session.json")
+    # X.house.mp3 -> X.house.session.json, as remix writes it; replacing the
+    # inner suffix instead found X.session.json, another remix's session
+    sess_path = session_path_for(audio)
     if not sess_path.is_file():
         print(ui.error(c, f"no session file beside {audio.name} "
                           f"(expected {sess_path.name})"), file=sys.stderr)
@@ -854,13 +928,20 @@ def cmd_batch(args, c: ui.C) -> int:
         stems=args.stems, kit=args.kit, bass=args.bass, jobs=args.jobs,
         resume=args.resume, length=args.length, form=args.form, swing=args.swing,
         seed=args.seed, wav=args.wav, set_name=args.set_name, artist=args.artist,
+        vocal=args.vocal, drums_db=args.drums_db,
+        kick_reinforce=not args.no_kick_reinforce, style=args.style,
         on_event=reporter,
     )
     if args.json:
         print(json.dumps(manifest, indent=2))
     elif not quiet:
         print(reporter.report(manifest))
-    return 1 if manifest["summary"]["failed"] and not manifest["summary"]["ok"] else 0
+    summary = manifest["summary"]
+    if summary["failed"]:
+        # 1: nothing in the set; 3: a set with tracks missing, which a script
+        # chaining `batch && export` must not mistake for a whole one
+        return 1 if not (summary["ok"] or summary["skipped"]) else 3
+    return 0
 
 
 def cmd_serve(args, c: ui.C) -> int:
@@ -883,6 +964,9 @@ def main(argv: list[str] | None = None) -> int:
                 "refs": cmd_refs, "critic": critic_command.run}
     try:
         return handlers[args.command](args, c)
+    except CliError as exc:
+        print(ui.error(c, str(exc)), file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         print("\n" + ui.error(c, "interrupted"), file=sys.stderr)
         return 130
@@ -894,8 +978,13 @@ def main(argv: list[str] | None = None) -> int:
     except NotADirectoryError as exc:
         print(ui.error(c, f"not a folder: {exc}"), file=sys.stderr)
         return 1
-    except (RuntimeError, ValueError) as exc:
+    except (RuntimeError, ValueError, OverflowError) as exc:
         print(ui.error(c, str(exc)), file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # a full disk, a read-only folder, a port in use: a message, not a traceback
+        print(ui.error(c, f"{exc.strerror or exc}"
+                          + (f": {exc.filename}" if exc.filename else "")), file=sys.stderr)
         return 1
 
 

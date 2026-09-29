@@ -21,9 +21,11 @@ _BLOCKS = " ▁▂▃▄▅▆▇█"
 
 
 def supports_color() -> bool:
-    if os.environ.get("NO_COLOR") is not None:
+    # NO_COLOR counts only when it is set to something (no-color.org), and
+    # FORCE_COLOR=0 / false is a request for no forcing, not for colour
+    if os.environ.get("NO_COLOR"):
         return False
-    if os.environ.get("FORCE_COLOR"):
+    if os.environ.get("FORCE_COLOR", "").strip().lower() not in ("", "0", "false", "no"):
         return True
     return sys.stdout.isatty()
 

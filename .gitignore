@@ -21,6 +21,18 @@ private/
 styles/learned.json
 *.house.wav
 *.session.wav
+# a learned profile without --anonymous names every reference file it read;
+# only the anonymised aggregates below are committed
+style.json
+styles/*.json
+!styles/klickaud-refs.json
+!styles/pairs.json
+# remixes rendered from inside the repo (the committed demo is already tracked)
+*.house.mp3
+*.house.session.json
+*.house.plan.json
+*.house.batch.json
+*.preview.html
 
 # os
 .DS_Store

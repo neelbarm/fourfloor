@@ -131,12 +131,35 @@
 
       <div class="grid-2">
         <div class="field">
-          <div class="field-head"><label>Separation</label></div>
+          <div class="field-head">
+            <label>Separation</label>
+            <output class="field-value" id="stemsOut"></output>
+          </div>
           <div class="seg" id="stemsSeg" role="group" aria-label="Separation engine"><i class="thumb"></i></div>
         </div>
         <div class="field">
           <div class="field-head"><label>Form</label></div>
           <div class="seg" id="formSeg" role="group" aria-label="Arrangement form"><i class="thumb"></i></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="field">
+          <div class="field-head">
+            <label>Vocal</label>
+            <output class="field-value" id="vocalOut">measured per song</output>
+          </div>
+          <div class="seg" id="vocalSeg" role="group" aria-label="Vocal treatment"><i class="thumb"></i></div>
+        </div>
+        <div class="field">
+          <div class="field-head">
+            <label for="drumsDb">Drum level</label>
+            <output class="field-value" id="drumsOut">0.0<i>dB</i></output>
+          </div>
+          <div class="row slider-row">
+            <input type="range" id="drumsDb" min="-12" max="6" step="0.5" value="0"
+                   aria-label="Drum level, in decibels">
+          </div>
         </div>
       </div>
 
