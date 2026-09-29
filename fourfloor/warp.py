@@ -197,15 +197,34 @@ def build(analysis, target_bpm: float, beat_multiple: float, semitones: int = 0,
     ratio_pitch = 2.0 ** (semitones / 12.0)
 
     if len(analysis.grid.beats) < 2:
-        # No usable grid: one global stretch is all that is left.
-        ratio = max(analysis.grid.bpm, 1e-6) / max(target_bpm * beat_multiple, 1e-6)
-        y = PV.time_stretch(x, ratio * ratio_pitch)
+        # No usable grid: one global stretch is all that is left. One source
+        # beat becomes ``beat_multiple`` target beats, so the audio has to run
+        # ``target / (source * multiple)`` times as fast (time_stretch's rate
+        # is >1 for faster) -- and ``ratio_pitch`` longer again when the
+        # resample below is going to shorten it back while moving the pitch.
+        rate = max(target_bpm, 1e-6) / max(analysis.grid.bpm * beat_multiple, 1e-6)
+        y = PV.time_stretch(x, rate / ratio_pitch)
         if semitones:
             y = resample_ratio(y, 1.0 / ratio_pitch)
+        dur = len(x) / float(sr)
+        wm = WarpMap(in_times=np.array([0.0, dur]),
+                     out_times=np.array([0.0, len(y) / float(sr)]),
+                     target_bpm=target_bpm, beat_multiple=beat_multiple)
         return y, wm
 
     stretched = PV.warp(x, wm.in_times, wm.out_times * ratio_pitch, sr,
                         int(round(wm.duration * ratio_pitch * sr)))
     if semitones:
         stretched = resample_ratio(stretched, 1.0 / ratio_pitch)
+    # Before the first knot the warp has nothing to read but source frame 0,
+    # and the vocoder resynthesises it over and over: up to a bar of the
+    # song's first 23 ms as a drone. The song has not started yet there, so
+    # that stretch of the timeline is silence, with a short fade into bar one.
+    head = min(len(stretched), int(round(float(wm.out_times[0]) * sr)))
+    if head > 0:
+        stretched = np.array(stretched, dtype=np.float32, copy=True)
+        stretched[:head] = 0.0
+        k = min(len(stretched) - head, max(1, int(0.004 * sr)))
+        ramp = np.linspace(0.0, 1.0, k, dtype=np.float32)
+        stretched[head:head + k] *= ramp[:, None] if stretched.ndim == 2 else ramp
     return stretched, wm
