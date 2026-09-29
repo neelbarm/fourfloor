@@ -11,7 +11,7 @@ import numpy as np
 from . import arrange, session
 from .analysis import Analysis, analyze, suggest_house_tempo
 from .analysis.key import KeyEstimate, nearest_compatible, parse_key, semitone_shift
-from .audio import SR, decode, write_mp3, write_wav
+from .audio import SR, decode, write_mp3_under, write_wav
 from .dsp.pitch import TempoPlan, plan_tempo
 from .house.bass import choose_bass
 from .house.vocal import choose_vocal
@@ -259,13 +259,16 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
 
     step("write", str(out))
     paths: dict[str, Path] = {}
-    if out.suffix.lower() == ".wav":
-        paths["wav"] = write_wav(out, audio, a.sr)
-        paths["mp3"] = write_mp3(out.with_suffix(".mp3"), audio, a.sr)
-    else:
-        paths["mp3"] = write_mp3(out, audio, a.sr)
-        if opts.wav:
-            paths["wav"] = write_wav(out.with_suffix(".wav"), audio, a.sr)
+    # The MP3 first: it is the file a DJ plays, and the encoder's overshoot
+    # decides how far the buffer has to come down to keep it off full scale.
+    # The WAV, the session and the reported levels then describe that same
+    # buffer and that file.
+    mp3_path = out.with_suffix(".mp3") if out.suffix.lower() == ".wav" else out
+    paths["mp3"], audio, mp3_peak = write_mp3_under(mp3_path, audio, a.sr)
+    metrics = dict(metrics, peak_db=mp3_peak,
+                   rms_db=float(20 * np.log10(max(float(np.sqrt(np.mean(np.square(audio)))), 1e-9))))
+    if out.suffix.lower() == ".wav" or opts.wav:
+        paths["wav"] = write_wav(out.with_suffix(".wav"), audio, a.sr)
 
     stem_base = out.with_suffix("")
     sess = session.build(
@@ -285,6 +288,8 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
         },
         tempo_plan=tempo.to_dict(),
     )
+    # the peak a player will actually see: the decoded MP3's, not the buffer's
+    sess["loudness"]["peak_db"] = round(mp3_peak, 2)
     issues = session.validate(sess)
     if issues:
         raise RuntimeError("session file failed validation: " + "; ".join(issues))

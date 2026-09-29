@@ -108,21 +108,76 @@ def write_wav(path: str | Path, x: np.ndarray, sr: int = SR) -> Path:
     return path
 
 
-def write_mp3(path: str | Path, x: np.ndarray, sr: int = SR, bitrate: str = "320k") -> Path:
-    """Encode a float buffer straight to MP3 through ffmpeg's libmp3lame."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    y = np.clip(x if x.ndim == 2 else np.stack([x, x], axis=1), -1.0, 1.0).astype("<f4")
+#: The highest sample a delivered MP3 may decode to, in dBFS. The master puts
+#: its *sample* peak at -1.0, but a loud master's inter-sample peaks come back
+#: 1-1.5 dB higher through the encoder, over full scale, where a fixed-point
+#: decoder in a CDJ or a controller clips them. So the decoded file is
+#: measured, and the buffer brought down until the file itself is under this.
+MP3_CEILING_DB = -1.0
+
+
+def _encode_mp3(path: Path, y: np.ndarray, sr: int, bitrate: str) -> None:
     proc = subprocess.run(
         [
             _tool("ffmpeg"), "-v", "error", "-y", "-nostdin",
             "-f", "f32le", "-ar", str(sr), "-ac", "2", "-i", "-",
-            "-codec:a", "libmp3lame", "-b:a", bitrate, str(path),
+            "-codec:a", "libmp3lame", "-b:a", bitrate, "-f", "mp3", str(path),
         ],
-        input=y.tobytes(), capture_output=True, check=False,
+        input=np.ascontiguousarray(y, dtype="<f4").tobytes(),
+        capture_output=True, check=False,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg mp3 encode failed: {proc.stderr.decode('utf8', 'replace')}")
+
+
+def peak_db(x: np.ndarray) -> float:
+    """Sample peak of a buffer, in dBFS."""
+    return float(20.0 * np.log10(max(float(np.max(np.abs(x))) if x.size else 0.0, 1e-6)))
+
+
+def write_mp3_under(path: str | Path, x: np.ndarray, sr: int = SR,
+                    ceiling_db: float = MP3_CEILING_DB, bitrate: str = "320k",
+                    tries: int = 4) -> tuple[Path, np.ndarray, float]:
+    """Encode ``x`` so that the MP3 *decodes* no higher than ``ceiling_db``.
+
+    Returns ``(path, buffer, decoded_peak_db)``: the buffer that was actually
+    encoded (``x``, or ``x`` turned down by what the encoder's overshoot
+    needed), so a WAV written beside it and the session's loudness can say the
+    same thing as the file. The encode goes to a temporary sibling and is moved
+    into place only once it passes.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    y = np.clip(x if x.ndim == 2 else np.stack([x, x], axis=1), -1.0, 1.0).astype(np.float32)
+    ceiling = 10.0 ** (ceiling_db / 20.0)
+    tmp = path.with_name(f".{path.stem}.encoding.mp3")
+    try:
+        got = 0.0
+        for _ in range(max(1, tries)):
+            _encode_mp3(tmp, y, sr, bitrate)
+            got = float(np.max(np.abs(decode(tmp, sr).samples))) if y.size else 0.0
+            if got <= ceiling:
+                break
+            # the encoder is close enough to linear that one step lands it;
+            # the small extra margin keeps a second pass rare
+            y = (y * (ceiling / got * 0.995)).astype(np.float32)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return path, y, float(20.0 * np.log10(max(got, 1e-6)))
+
+
+def write_mp3(path: str | Path, x: np.ndarray, sr: int = SR, bitrate: str = "320k") -> Path:
+    """Encode a float buffer straight to MP3 through ffmpeg's libmp3lame.
+
+    No ceiling is enforced here; a finished render goes through
+    :func:`write_mp3_under`.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    y = np.clip(x if x.ndim == 2 else np.stack([x, x], axis=1), -1.0, 1.0).astype("<f4")
+    _encode_mp3(path, y, sr, bitrate)
     return path
 
 
