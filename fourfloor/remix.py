@@ -60,6 +60,11 @@ class RemixOptions:
     keep_layers: bool = False
     """Hold on to the engine's individual buses so the alignment gate can
     measure the source layer without the kit shouting over it."""
+    gate: bool = False
+    """Run the layered alignment gate on the render (source layer, kit and
+    arrangement spans, ~10-25 s more per track) and put its verdict in
+    ``metrics`` under ``alignment_*`` keys, which is what ``fourfloor batch``
+    records per track."""
 
 
 @dataclass
@@ -109,6 +114,31 @@ def _resolve_key(a: Analysis, opts: RemixOptions) -> tuple[int, KeyEstimate, lis
         shift = 0
     target = KeyEstimate((a.key.tonic + shift) % 12, a.key.is_minor, a.key.confidence)
     return int(shift), target, warnings
+
+
+def _gate_metrics(audio, sr: int, bpm: float, engine, spans, sampled: bool) -> dict:
+    """The layered alignment gate, flattened into ``alignment_*`` metrics.
+
+    Judged on the isolated source layer, as the gate is calibrated for; the
+    finished mix alone reads every render, good or bad, as failing its tails.
+    """
+    from .analysis.alignment import alignment_report
+
+    rep = alignment_report(audio, sr, bpm, 0.0,
+                           source_stem=engine.layers.get("source_perc"),
+                           kit_layer=engine.layers.get("kit"), spans=spans,
+                           kit_is_sampled=sampled)
+    judged = rep.get("source", rep["mix"])
+    out = {"alignment_ok": bool(rep["ok"]),
+           "alignment_problems": list(rep["problems"]),
+           "alignment_judged_on": rep["judged_on"],
+           "alignment_median_ms": round(float(judged["median_ms"]), 2),
+           "alignment_p90_ms": round(float(judged["p90_ms"]), 2),
+           "alignment_within_20ms": round(float(judged["within_20ms"]), 4),
+           "alignment_bar_phase": int(judged["bar_phase"])}
+    if "kit" in rep:
+        out["alignment_kit_median_ms"] = round(float(rep["kit"]["median_ms"]), 2)
+    return out
 
 
 def _bass_label(mode: str, stem_name: str) -> str:
@@ -256,6 +286,9 @@ def remix(path: str | Path, out: str | Path, opts: RemixOptions | None = None,
     audio, metrics = engine.render()
     layers = engine.layers if opts.keep_layers else {}
     spans = list(engine.source_spans)
+    if opts.gate:
+        metrics = dict(metrics, **_gate_metrics(audio, a.sr, target_bpm, engine,
+                                                spans, drum_kit is not None))
 
     step("write", str(out))
     paths: dict[str, Path] = {}

@@ -303,3 +303,41 @@ def test_a_half_time_source_is_read_as_half_time(trap_remix) -> None:
     lines = trap_remix.warp.bar_downbeats
     bars = lines / trap_remix.plan.bar_dur
     assert np.allclose(bars, np.round(bars))
+
+
+def test_a_finished_mix_is_judged_on_what_a_mix_can_show(monkeypatch) -> None:
+    """Every delivered mp3, the loved CAN'T SAY render included, read a p90 of
+    45-48 ms and 64-70% within 20 ms (kick and bass attack envelopes in the low
+    band, a breakdown with no kit), so the mix-only gate failed them all. The
+    same numbers on an isolated source layer are still a failure."""
+    golden_mix = {"onsets": 900, "median_ms": 9.0, "p90_ms": 46.9, "within_20ms": 0.698,
+                  "comb_offset_ms": 2.0, "comb_sharpness": 0.4, "half_beat_ratio": 1.0,
+                  "beat_alignment": "grid", "bar_phase": 0, "bar_phase_margin": 0.3}
+    monkeypatch.setattr(A, "_layer_report", lambda *a, **k: dict(golden_mix))
+    x = np.zeros(44100 * 4, dtype=np.float32)
+    mix_only = A.alignment_report(x, 44100, BPM, 0.0)
+    assert mix_only["ok"] and mix_only["judged_on"] == "mix", mix_only["problems"]
+    layered = A.alignment_report(x, 44100, BPM, 0.0, source_stem=x)
+    assert not layered["ok"] and layered["judged_on"] == "source"
+    assert any("p90" in p for p in layered["problems"])
+    # and a mix that really is off the grid still fails on its median
+    monkeypatch.setattr(A, "_layer_report",
+                        lambda *a, **k: dict(golden_mix, median_ms=40.0))
+    assert not A.alignment_report(x, 44100, BPM, 0.0)["ok"]
+
+
+def test_the_gate_can_travel_with_a_render_as_metrics(trap_remix) -> None:
+    """``batch`` records metric keys with 'align' in them, and the engine never
+    produced any: set.json's alignment was null for every track. remix(...,
+    gate=True) now puts the layered gate's verdict there."""
+    from types import SimpleNamespace
+
+    from fourfloor.remix import _gate_metrics
+
+    m = _gate_metrics(trap_remix.audio, trap_remix.sr, trap_remix.plan.target_bpm,
+                      SimpleNamespace(layers=trap_remix.layers),
+                      trap_remix.source_spans, False)
+    assert m["alignment_ok"] is True, m
+    assert m["alignment_judged_on"] == "source"
+    assert all("align" in k for k in m)
+    assert m["alignment_median_ms"] < A.MAX_MEDIAN_MS
