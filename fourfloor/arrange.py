@@ -327,6 +327,14 @@ def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
             else:
                 src_at = hook_at
             src_at, src_bars = span(src_at, bars)
+            if drop_i > 0 and any(abs(src_at - u) < 1e-6 for u in used_drops):
+                # a short song backed both drops up to the same bar: move this
+                # one a source bar along rather than play the first drop again
+                for alt in (src_at + src_bar, src_at - src_bar):
+                    if (alt >= 0.0 and _available_bars(wm, alt) >= src_bars
+                            and not any(abs(alt - u) < 1e-6 for u in used_drops)):
+                        src_at = alt
+                        break
             used_drops.append(src_at)
             drop_cursor = src_at + src_bars * bar_dur
             pattern = "drop" if drop_i == 0 else "drop_var"
