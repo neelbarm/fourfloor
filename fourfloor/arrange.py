@@ -74,6 +74,8 @@ class Plan:
     slots: list[Slot] = field(default_factory=list)
     note: str = ""
     source: dict = field(default_factory=dict)
+    #: target bars per source bar (2 for a half-time source); not serialised
+    source_bar_grain: int = 1
 
     @property
     def duration(self) -> float:
@@ -163,6 +165,11 @@ def _span_bars(wm: WarpMap, sec: Section) -> int:
     return wm.bars_between(sec.start, sec.end)
 
 
+def source_bar_grain(beat_multiple: float) -> int:
+    """How many target bars one source bar becomes (1 unless half-time)."""
+    return max(1, int(round(beat_multiple))) if beat_multiple >= 1.5 else 1
+
+
 def _available_bars(wm: WarpMap, start_warped: float) -> int:
     """Whole target bars of source left from a warped position to the end."""
     return max(1, int((wm.duration - start_warped) // wm.bar_dur))
@@ -199,6 +206,12 @@ def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
     wm = warp if warp is not None else WarpMap.from_analysis(
         analysis, target_bpm, beat_multiple)
     bar_dur = wm.bar_dur
+    # One bar of the *source*, warped. A half-time source (beat_multiple 2) has
+    # a bar two target bars long, and a slot must start on one of its bar
+    # lines, not between them. WarpMap.from_grid puts source downbeats on
+    # multiples of this, lead-in included.
+    grain = source_bar_grain(beat_multiple)
+    src_bar = grain * bar_dur
     base = FORMS.get(form_name, FORMS["club"])
     if length:
         # Floor at what the form can actually express. Asking for less used to
@@ -281,12 +294,14 @@ def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
         bars sooner, which nobody notices.
         """
         anchor = max(0.0, min(anchor, max(0.0, wm.duration - bar_dur)))
-        anchor = round(anchor / bar_dur) * bar_dur
+        anchor = round(anchor / src_bar) * src_bar
         short = want_bars - _available_bars(wm, anchor)
         if short > 0:
+            # back up by whole *source* bars: under a half-time source only
+            # every other target bar line is the song's bar one
             anchor = max(0.0, anchor - short * bar_dur)
-            anchor = round(anchor / bar_dur) * bar_dur
-        return anchor, max(1, min(want_bars, _available_bars(wm, anchor)))
+            anchor = math.floor(anchor / src_bar + 1e-9) * src_bar
+        return float(anchor), max(1, min(want_bars, _available_bars(wm, anchor)))
 
     def fresh_drop(bars: int, used: list[float]) -> float:
         """A hook anchor as far as possible from the ones already played."""
@@ -347,9 +362,13 @@ def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
             # Run into the drop out of the bars immediately before it, so the
             # build is the song's own approach rather than a preview of the
             # chorus played twice.
-            want = drop_cursor if drop_i and _available_bars(wm, drop_cursor) >= bars \
-                else max(0.0, hook_at - bars * bar_dur)
+            walk_on = bool(drop_i and _available_bars(wm, drop_cursor) >= bars)
+            want = drop_cursor if walk_on else max(0.0, hook_at - bars * bar_dur)
             src_at, src_bars = span(want, bars)
+            if walk_on:
+                # the drop after it carries on from here: the build is the
+                # song's approach *into* that drop, not the same bars twice
+                drop_cursor = src_at + src_bars * bar_dur
             s = Slot(kind=kind, index=len(slots), start_bar=bar, bars=bars,
                      source_start=src_at, source_bars=src_bars,
                      source_label=hook.label, drum_pattern="build",
@@ -371,7 +390,7 @@ def plan(analysis: Analysis, target_bpm: float, beat_multiple: float,
 
     tempo_note = (f"{analysis.grid.bpm:.2f} BPM source laid on a {target_bpm:.2f} BPM grid")
     return Plan(target_bpm=target_bpm, bar_dur=bar_dur, total_bars=bar, form=form_name,
-                slots=slots, note=tempo_note,
+                slots=slots, note=tempo_note, source_bar_grain=grain,
                 source={
                     "file": analysis.path.split("/")[-1],
                     "bpm": round(analysis.grid.bpm, 2),
@@ -400,10 +419,11 @@ def validate(p: Plan) -> list[str]:
     for s in p.slots:
         # A slot that starts mid-bar in the source puts the song's bar line
         # inside the remix's bar, which is exactly what "off beat" sounds like.
-        bars = s.source_start / p.bar_dur
+        bars = s.source_start / (p.bar_dur * max(1, p.source_bar_grain))
         if abs(bars - round(bars)) > 1e-4:
             problems.append(f"slot {s.index} ({s.kind}) starts {s.source_start:.4f}s "
-                            f"into the source, which is not a bar line")
+                            f"into the source, which is not a bar line"
+                            + (" of the source" if p.source_bar_grain > 1 else ""))
         if s.source_bars <= 0:
             problems.append(f"slot {s.index} ({s.kind}) has no source material")
     return problems

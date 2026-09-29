@@ -109,3 +109,61 @@ def test_session_validate_rejects_bad_input(fixture_analysis) -> None:
     assert session.validate({k: v for k, v in s.items() if k != "cues"})
     bad = dict(s, bpm=400.0)
     assert any("bpm" in m for m in session.validate(bad))
+
+
+def synthetic_analysis(bpm: float, seconds: float, hook_at: float):
+    """A song with a steady grid and a verse/hook/verse/hook shape."""
+    from fourfloor.analysis import Analysis
+    from fourfloor.analysis.key import KeyEstimate
+    from fourfloor.analysis.structure import Section
+    from fourfloor.analysis.tempo import BeatGrid
+
+    beat = 60.0 / bpm
+    beats = np.arange(0.5, seconds - 0.5, beat)
+    sections = [Section(0.0, hook_at, "verse", 0, 0.4, -18.0),
+                Section(hook_at, seconds, "hook", 1, 0.9, -10.0)]
+    return Analysis(path="synthetic.wav", duration=seconds, sr=44100,
+                    grid=BeatGrid(bpm=bpm, beats=beats, downbeat_index=0),
+                    key=KeyEstimate(tonic=0, is_minor=True, confidence=0.9),
+                    sections=sections, chords=[], rms_db=-12.0, peak_db=-1.0)
+
+
+@pytest.mark.parametrize("length", [180.0, 270.0, 360.0])
+def test_a_half_time_source_is_entered_on_its_own_bar_one(fixture_analysis,
+                                                          length: float) -> None:
+    """Under beat_multiple 2 one source bar is two target bars. Backing a span
+    up by an odd number of target bars started a drop on the song's beat 3."""
+    p = plan(fixture_analysis, 124.0, 2.0, length=length)
+    assert p.source_bar_grain == 2
+    assert validate(p) == []
+    for s in p.slots:
+        src_bars = s.source_start / (2 * p.bar_dur)
+        assert abs(src_bars - round(src_bars)) < 1e-6, (s.kind, s.source_start / p.bar_dur)
+
+
+def test_validate_knows_a_half_time_bar_line(fixture_analysis) -> None:
+    p = plan(fixture_analysis, 124.0, 2.0, length=180.0)
+    p.slots[2].source_start = p.slots[2].source_start + p.bar_dur
+    assert any("not a bar line of the source" in x for x in validate(p))
+
+
+def test_the_second_build_is_not_replayed_by_the_drop_after_it() -> None:
+    """The build before drop 2 took the bars at the cursor, and drop 2 then
+    started at the same cursor: the same 8 bars twice, back to back."""
+    a = synthetic_analysis(128.0, 420.0, hook_at=60.0)
+    p = plan(a, 128.0, 1.0, length=270.0)
+    assert validate(p) == []
+    drops = [s for s in p.slots if s.kind == "drop"]
+    assert len(drops) == 2
+    for i, s in enumerate(p.slots[:-1]):
+        nxt = p.slots[i + 1]
+        if s.kind == "build" and nxt.kind == "drop":
+            b0, b1 = s.source_start, s.source_start + s.source_bars * p.bar_dur
+            d0 = nxt.source_start
+            assert not (b0 <= d0 < b1), (
+                f"build at {b0 / p.bar_dur:.0f} bars is replayed by the drop at "
+                f"{d0 / p.bar_dur:.0f}")
+    # and drop 2 still walks on from the song, straight out of its build
+    second_build = [s for s in p.slots if s.kind == "build"][1]
+    assert drops[1].source_start == pytest.approx(
+        second_build.source_start + second_build.source_bars * p.bar_dur)
