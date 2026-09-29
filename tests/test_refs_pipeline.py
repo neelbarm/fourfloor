@@ -535,3 +535,111 @@ def test_learning_writes_a_private_profile_and_an_anonymous_one(
 def test_learning_with_no_references_says_so(opts) -> None:
     with pytest.raises(pipeline.PipelineError):
         pipeline.learn(opts)
+
+
+# ---------------------------------------------------------------------------
+# regressions: one original per pair, failures that remember, dry runs
+# ---------------------------------------------------------------------------
+
+def test_a_forced_run_replaces_the_original_instead_of_filing_a_second(
+        tmp_path, opts, fake_run) -> None:
+    """``refs add --force`` (and a resume after an interrupted kit build)
+    filed ``<slug>.original-2.mp3``, which learn() took for a house remix."""
+    source = local(tmp_path, "Somebody - The Original (Neel Remix)")
+    (entry,) = pipeline.add([source], opts)
+    opts.force = True
+    pipeline.add([source], opts)
+    originals = sorted(p.name for p in opts.pairs.glob(f"{entry.slug}.original*"))
+    assert originals == [f"{entry.slug}.original.mp3"]
+
+
+def test_an_interrupted_kit_build_leaves_the_pair_settled(tmp_path, opts,
+                                                           fake_run, monkeypatch) -> None:
+    def interrupted(remix, slug, opts_, note):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(pipeline, "_build_kit", interrupted)
+    source = local(tmp_path, "Somebody - The Original (Neel Remix)")
+    with pytest.raises(KeyboardInterrupt):
+        pipeline.add([source], opts)
+    led = Ledger(opts.ledger_path)
+    assert led.by_url(source).status == "done"
+    assert Path(led.by_url(source).original_path).is_file()
+
+
+def test_learn_leaves_out_a_numbered_original(tmp_path, opts, learned_style) -> None:
+    opts.pairs.mkdir(parents=True)
+    shutil.copyfile(FIXTURE, opts.pairs / "one.remix.mp3")
+    shutil.copyfile(FIXTURE, opts.pairs / "one.original.mp3")
+    shutil.copyfile(FIXTURE, opts.pairs / "one.original-2.mp3")
+    result = pipeline.learn(opts, repo_out=tmp_path / "pairs.json")
+    assert result["n_files"] == 1
+
+
+def test_a_failure_keeps_what_the_ledger_knew(tmp_path, opts, fake_run) -> None:
+    """A failed link was replaced by a bare Entry: the slug and remix path were
+    lost, the remix orphaned, and the retry filed it again as <slug>-2."""
+    source = local(tmp_path, "Somebody - The Original (Neel Remix)")
+    calls = {"n": 0}
+    import fourfloor.refs.pipeline as P
+    saved = P._compare
+
+    def fails_once(original, remix, opts_, note):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("demucs failed")
+        return saved(original, remix, opts_, note)
+
+    P._compare = fails_once
+    try:
+        (first,) = pipeline.add([source], opts)
+        assert first.status == "failed" and "demucs" in first.error
+        led = Ledger(opts.ledger_path)
+        kept = led.by_url(source)
+        assert kept.slug and Path(kept.remix_path).is_file()
+        (second,) = pipeline.add([source], opts)
+    finally:
+        P._compare = saved
+    assert second.status == "done"
+    assert second.slug == kept.slug
+    assert sorted(p.name for p in opts.pairs.glob("*.remix.*")) == [f"{kept.slug}.remix.mp3"]
+
+
+def test_a_dry_run_over_a_set_writes_nothing_even_when_a_track_fails(
+        tmp_path, opts, fake_run, monkeypatch) -> None:
+    good = local(tmp_path, "Somebody - The Original (Neel Remix)")
+    pipeline.add([good], opts)                      # a real, settled entry
+    before = opts.ledger_path.read_text(encoding="utf8")
+
+    playlist = "https://soundcloud.com/someone/sets/a-set"
+    dead = "https://soundcloud.com/someone/private"
+
+    def describe(source, opts_):
+        if source == playlist:
+            return {"_type": "playlist", "entries": [{"url": good}, {"url": dead}]}, "a set", ""
+        if source == dead:
+            raise pipeline.fetch_mod.FetchError("private track")
+        return pipeline._describe.__wrapped__(source, opts_)
+
+    real = pipeline._describe
+    describe.__wrapped__ = real
+    monkeypatch.setattr(pipeline, "_describe", describe)
+    monkeypatch.setattr(pipeline.fetch_mod, "is_playlist", lambda info: info.get("_type") == "playlist")
+    monkeypatch.setattr(pipeline.fetch_mod, "entries_of", lambda info: info["entries"])
+    opts.dry_run = True
+    opts.force = True
+    out = pipeline.add([playlist], opts)
+    assert [e.status for e in out] == ["dry-run", "failed"]
+    assert opts.ledger_path.read_text(encoding="utf8") == before
+
+
+def test_rejecting_a_filed_pair_takes_it_out_of_learning(tmp_path, opts, fake_run) -> None:
+    source = local(tmp_path, "Somebody - The Original (Neel Remix)")
+    (entry,) = pipeline.add([source], opts)
+    assert pipeline.sidecars(opts)
+    dropped = pipeline.reject(entry.slug, opts)
+    assert dropped.status == "standalone"
+    assert not pipeline.sidecars(opts), "a rejected pair still feeds the vocal table"
+    assert not list(opts.pairs.glob(f"{entry.slug}.original*"))
+    assert not dropped.original_path
+    assert (opts.home / "rejected" / f"{entry.slug}.json").is_file()

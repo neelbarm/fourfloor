@@ -30,6 +30,8 @@ what stays on disk is two mp3s, a small JSON, and a kit.
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import tempfile
 import time
@@ -85,6 +87,11 @@ class Options:
     @property
     def ledger_path(self) -> Path:
         return Path(self.home) / "ledger.json"
+
+
+#: An original's file name, including a numbered duplicate an older version
+#: filed (``<slug>.original-2.mp3``).
+ORIGINAL_RE = re.compile(r"\.original(-\d+)?\.[a-z0-9]+$", re.I)
 
 
 def _noop(*_a, **_k) -> None:
@@ -149,12 +156,31 @@ def add(sources: list[str], opts: Options | None = None, on=None) -> list[Entry]
         except KeyboardInterrupt:
             raise
         except Exception as exc:                       # one bad link, not a bad run
-            entry = Entry(url=str(source), status="failed", error=_sentence(exc))
-            if not opts.dry_run:
-                led.put(entry)
+            entry = _mark_failed(led, source, exc, opts.dry_run)
             note("error", f"{source}: {entry.error}")
             out.append(entry)
     return out
+
+
+def _mark_failed(led: Ledger, source: str, exc: BaseException, dry_run: bool) -> Entry:
+    """Record a failed link without forgetting what is already known about it.
+
+    Replacing the entry with a bare failed one dropped its slug and remix path,
+    so the downloaded remix was orphaned and the retry filed a second copy
+    under ``<slug>-2``. A dry run writes nothing, and does not touch the
+    ledger's own objects either.
+    """
+    key = str(source).strip().strip('"\'')
+    entry = led.by_url(key)
+    if entry is None:
+        entry = Entry(url=key)
+    elif dry_run:
+        entry = Entry.from_dict(entry.to_dict())
+    entry.status = "failed"
+    entry.error = _sentence(exc)
+    if not dry_run:
+        led.put(entry)
+    return entry
 
 
 def _sentence(exc: BaseException) -> str:
@@ -185,9 +211,10 @@ def add_one(source: str, opts: Options, led: Ledger, on=None) -> list[Entry]:
                 time.sleep(max(0.0, opts.pause))
             try:
                 out.extend(add_one(link, opts, led, on=note))
+            except KeyboardInterrupt:
+                raise
             except Exception as exc:
-                bad = Entry(url=link, status="failed", error=_sentence(exc))
-                led.put(bad)
+                bad = _mark_failed(led, link, exc, opts.dry_run)
                 note("error", f"{link}: {bad.error}")
                 out.append(bad)
         return out
@@ -200,6 +227,10 @@ def _ingest(source: str, info: dict, title: str, uploader: str,
     note("step", f"parsed: {parsed.label()}")
 
     entry = led.by_url(source) or Entry(url=source)
+    if opts.dry_run:
+        # a dry run reports; it must not change what the ledger holds, even in
+        # memory -- a later put() of any other entry would save it all
+        entry = Entry.from_dict(entry.to_dict())
     entry.status = "pending"
     entry.title, entry.uploader = title, uploader
     entry.site = "local file" if info.get("local") else fetch_mod.site_of(source)
@@ -265,6 +296,9 @@ def _ingest(source: str, info: dict, title: str, uploader: str,
         if accepted is not None:
             match, cand, path, orig_fp, remix_fp = accepted
             _file_pair(entry, match, cand, path, orig_fp, remix_fp, opts, note)
+            # settled now, before the kit build: an interrupt during Demucs
+            # must not leave it pending with its original already filed
+            led.put(entry)
         elif best_seen is not None and best_seen[0].verdict == "needs_review":
             match, cand, _path = best_seen
             entry.status = "needs_review"
@@ -352,8 +386,18 @@ def _stamp_match(entry: Entry, match: verify.Match, cand: search.Candidate) -> N
 def _file_pair(entry: Entry, match, cand, path: Path, orig_fp, remix_fp,
                opts: Options, note) -> None:
     """Move the verified original into place and write the sidecar."""
-    target = fetch_mod.free_path(opts.pairs, f"{entry.slug}.original", ".mp3")
-    shutil.move(str(path), str(target))
+    # One original per pair. A resumed, forced or repeated accept replaces it;
+    # free_path used to file a second one as <slug>.original-2.mp3, which the
+    # learner then took for a house reference.
+    opts.pairs.mkdir(parents=True, exist_ok=True)
+    target = opts.pairs / f"{entry.slug}.original.mp3"
+    part = target.with_name(f".{target.name}.part")
+    shutil.move(str(path), str(part))
+    os.replace(part, target)
+    old = Path(entry.original_path) if entry.original_path else None
+    if (old is not None and old != target and old.parent == opts.pairs
+            and ORIGINAL_RE.search(old.name) and old.is_file()):
+        old.unlink()
     entry.original_path = str(target)
     entry.status = "done"
     _stamp_match(entry, match, cand)
@@ -398,6 +442,33 @@ def _keep_standalone(entry: Entry, opts: Options, note, best_seen=None) -> None:
         entry.original_title = best_seen[1].title
         entry.original_url = best_seen[1].url
     note("warn", f"{entry.slug}: no original verified — kept as a standalone remix")
+
+
+def _unfile_pair(entry: Entry, opts: Options, note) -> None:
+    """Take a filed pair's sidecar and original out of ``pairs/``.
+
+    learn() reads every sidecar in ``pairs/``, so a rejected pair left there
+    kept feeding the vocal table and the tempo medians. They are moved to
+    ``rejected/`` rather than deleted: the verdict can be reversed by hand.
+    """
+    moved = []
+    candidates = [opts.pairs / f"{entry.slug}.json"]
+    if entry.original_path:
+        candidates.append(Path(entry.original_path))
+    if opts.pairs.is_dir():
+        candidates.extend(p for p in opts.pairs.iterdir()
+                          if p.name.startswith(f"{entry.slug}.original")
+                          and ORIGINAL_RE.search(p.name))
+    for path in dict.fromkeys(candidates):
+        if path.is_file() and path.parent == opts.pairs:
+            rejected = Path(opts.home) / "rejected"
+            rejected.mkdir(parents=True, exist_ok=True)
+            dest = fetch_mod.free_path(rejected, path.stem, path.suffix)
+            shutil.move(str(path), str(dest))
+            moved.append(path.name)
+    entry.original_path = ""
+    if moved:
+        note("step", f"moved {', '.join(moved)} to rejected/")
 
 
 def _build_kit(remix: Path, slug: str, opts: Options, note) -> str:
@@ -458,6 +529,7 @@ def accept(slug: str, opts: Options | None = None, on=None,
                          f"({match.verdict}); filing it because you said so")
         _file_pair(entry, match, cand, got.path, orig_fp, remix_fp, opts, note)
         entry.verdict = "accepted by hand"
+        led.put(entry)                 # filed: settled before any kit build
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if opts.kit and not entry.kit:
@@ -474,6 +546,7 @@ def reject(slug: str, opts: Options | None = None, on=None) -> Entry:
     entry = led.by_slug(slug)
     if entry is None:
         raise PipelineError(f"nothing called {slug!r} has been ingested")
+    _unfile_pair(entry, opts, note)
     _keep_standalone(entry, opts, note)
     entry.verdict = "rejected by hand"
     entry.original_url = entry.original_title = ""
@@ -525,10 +598,7 @@ def learn(opts: Options | None = None, on=None, repo_out: str | Path | None = No
             # them into the median would teach the engine to aim at 120 because
             # half its references are not house at all.
             files.extend(f for f in find_audio(folder)
-                         if not f.name.lower().endswith((".original.mp3",
-                                                         ".original.wav",
-                                                         ".original.m4a",
-                                                         ".original.flac")))
+                         if not ORIGINAL_RE.search(f.name.lower()))
     if not files:
         raise PipelineError(f"no reference audio in {opts.home}")
 
