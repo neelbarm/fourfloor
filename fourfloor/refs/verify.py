@@ -571,6 +571,10 @@ def compare(original: Fingerprint, remix: Fingerprint) -> Match:
     # is rarely exactly the ratio of two detected tempi. The ratio *reported* is
     # still the one the two detected tempi imply -- that is the number style
     # learning wants -- and the refinement only decides the score.
+    # ``best`` stays in the units ``top`` was chosen in: a refined half- or
+    # double-time reading pays the same relation cost, or refinement would
+    # hand back exactly the advantage the cost exists to take away.
+    cost = 0.0 if abs(top[2] - 1.0) < 1e-9 else RELATION_COST
     best, fine_used = top, 1.0
     for fine in REFINE:
         if abs(fine - 1.0) < 1e-9:
@@ -578,8 +582,8 @@ def compare(original: Fingerprint, remix: Fingerprint) -> Match:
         score, k, end, cells, _ = _align(remix.chroma, original.chroma,
                                          base * top[2] * fine,
                                          semitones=(-top[1],))
-        if score > best[0]:
-            best, fine_used = (score, k, top[2], end, cells), fine
+        if score > -1.0 and score - cost > best[0]:
+            best, fine_used = (score - cost, k, top[2], end, cells), fine
 
     score, semis, relation, _end, cells = best
     null = float(np.median(field_)) if field_ else 0.0

@@ -279,3 +279,30 @@ def test_without_demucs_nothing_is_separated_at_all(tmp_path, no_demucs) -> None
     got = V.fingerprint(path, kind="remix", demucs=False)
     assert got.source == "mix"
     assert not no_demucs
+
+
+def test_refining_a_half_time_reading_keeps_its_relation_cost(monkeypatch) -> None:
+    """A wrong pair scoring 0.40 straight and 0.56 raw at half time (0.51 after
+    the cost, under ACCEPT) was refined to a raw 0.555, compared with the
+    penalised 0.51 and reported unpenalised: a 'match' out of a reject."""
+    import numpy as np
+
+    def fake_align(query, ref, scale, semitones=V.SEMITONES):
+        rel = scale / base
+        if abs(rel - 1.0) < 1e-6:
+            return 0.40, 0, 10, 10, [0.30, 0.31]
+        if abs(rel - 2.0) < 1e-6:
+            return 0.56, 0, 10, 10, [0.30, 0.31]
+        if abs(rel - 0.5) < 1e-6:
+            return 0.10, 0, 10, 10, [0.30]
+        return 0.555, 0, 10, 10, [0.30]            # a refinement of half time
+
+    monkeypatch.setattr(V, "_align", fake_align)
+    chroma = np.ones((12, 16), dtype=np.float32)
+    o = V.Fingerprint(bpm=100.0, source="vocals", chroma=chroma)
+    r = V.Fingerprint(bpm=100.0, source="vocals", chroma=chroma)
+    base = r.bpm / o.bpm
+    m = V.compare(o, r)
+    assert m.beat_relation == 2.0
+    assert m.score == pytest.approx(0.56 - V.RELATION_COST), m
+    assert m.verdict != "match", m
