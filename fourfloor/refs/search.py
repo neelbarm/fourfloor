@@ -156,7 +156,9 @@ def score_candidate(parsed: T.Parsed, cand: Candidate) -> Candidate:
             penalty += cost
             names.append(word)
     if parsed.remixer and len(parsed.remixer) > 2:
-        if re.search(re.escape(parsed.remixer.lower()), haystack):
+        # whole words, like every other penalty: "Ric" is not in "lyrics"
+        name = re.escape(parsed.remixer.lower())
+        if re.search(rf"(?<![a-z0-9]){name}(?![a-z0-9])", haystack):
             penalty += 0.8                            # this *is* the remix we have
             names.append(f"credited to {parsed.remixer}")
 

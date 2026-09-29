@@ -415,3 +415,29 @@ def test_the_same_query_is_not_asked_for_twice() -> None:
 def test_a_title_we_could_not_read_asks_for_nothing() -> None:
     assert titles.search_queries(titles.parse("")) == []
     assert titles.search_queries(titles.parse("-")) == []
+
+
+@pytest.mark.parametrize("title, artist, track, remixer", [
+    ("SZA | Kill Bill - BOSEP Remix", "SZA", "Kill Bill", "BOSEP"),
+    ("Travis Scott | CAN'T SAY - Its Murph Remix", "Travis Scott", "CAN'T SAY", "Its Murph"),
+    ("DRAKE: Passionfruit - Its Murph Edit", "DRAKE", "Passionfruit", "Its Murph"),
+    ("Defected Records | Fisher - Losing It", "Fisher", "Losing It", ""),
+])
+def test_a_pipe_before_a_dashed_credit_keeps_the_artist(title, artist, track, remixer) -> None:
+    p = titles.parse(title, "")
+    assert (p.artist, p.track, p.remixer) == (artist, track, remixer), p
+
+
+@pytest.mark.parametrize("title, track", [
+    ("Lady Gaga, Bruno Mars - Die With A Smile (Its Murph Remix)", "Die With A Smile"),
+    ("Sam Smith - Stay With Me (BOSEP Remix)", "Stay With Me"),
+    ("Billy Idol - Dancing With Myself (JLOOD Edit)", "Dancing With Myself"),
+])
+def test_with_in_a_title_is_not_a_feature(title, track) -> None:
+    p = titles.parse(title, "")
+    assert p.track == track and not p.feat, p
+
+
+def test_with_in_brackets_is_still_a_feature() -> None:
+    p = titles.parse("Artist - Song (with Someone) (X Remix)", "")
+    assert p.track == "Song" and p.feat == "Someone"

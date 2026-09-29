@@ -93,6 +93,9 @@ _SPACE = re.compile(r"\s+")
 _DASH = re.compile(r"\s+[-–—―~]+\s+")
 _GROUP = re.compile(r"[\(\[\{]([^\(\)\[\]\{\}]*)[\)\]\}]")
 _FEAT = re.compile(r"\b(feat\.?|ft\.?|featuring|with)\s+(.+)$", re.I)
+#: In plain text "with" is part of titles ("Die With A Smile", "Stay With Me");
+#: only inside brackets ("(with X)") does it name a feature.
+_FEAT_PLAIN = re.compile(r"\b(feat\.?|ft\.?|featuring)\s+(.+)$", re.I)
 _KEYWORD = re.compile(r"\b(" + "|".join(KEYWORDS) + r")\b", re.I)
 _WORD = re.compile(r"[\w'&]+", re.UNICODE)
 _SLUG_DROP = re.compile(r"[^a-z0-9]+")
@@ -147,9 +150,18 @@ def _strip_prefix(text: str) -> str:
                         and _DASH.search(head) is None
                         and _DASH.search(rest) is not None
                         and (head.isupper() or sep == "|"))
-        is_prefix = (low in PREFIXES
-                     or any(low.startswith(p) for p in PREFIXES)
-                     or named_source)
+        # ...unless what is behind it is ``Track - Remixer Remix``: then the
+        # head is the artist ("SZA | Kill Bill - BOSEP Remix"), and dropping
+        # it made the track the artist and cut the remixer's name in two.
+        known = low in PREFIXES or any(low.startswith(p) for p in PREFIXES)
+        rest_parts = [x for x in _DASH.split(rest) if x.strip(" -|·•,")]
+        tail = (_SPACE.sub(" ", _GROUP.sub(" ", rest_parts[-1])).strip(" -|·•,")
+                if rest_parts else "")
+        if (named_source and not known and len(rest_parts) == 2
+                and tail and _is_credit(tail)):
+            out = f"{head} - {rest}"
+            break
+        is_prefix = known or named_source
         if not is_prefix or not rest:
             break
         out = rest
@@ -284,11 +296,11 @@ def parse(title: str, uploader: str = "") -> Parsed:
         p.track = body
 
     # a feature left in the plain text belongs to the artist, not the title
-    feat = _FEAT.search(p.track)
+    feat = _FEAT_PLAIN.search(p.track)
     if feat:
         p.feat = p.feat or feat.group(2).strip()
         p.track = p.track[:feat.start()].strip(" -,")
-    feat = _FEAT.search(p.artist)
+    feat = _FEAT_PLAIN.search(p.artist)
     if feat:
         p.feat = p.feat or feat.group(2).strip()
         p.artist = p.artist[:feat.start()].strip(" -,")

@@ -207,3 +207,23 @@ def test_a_failing_search_is_reported_as_one_sentence(monkeypatch) -> None:
     with pytest.raises(S.SearchError) as exc:
         S._entries("anything", 5, 30.0)
     assert "check the network" in str(exc.value)
+
+
+def test_a_short_remixer_name_inside_a_word_is_not_a_credit() -> None:
+    """'Ric' matched inside 'Lyrics' and knocked the real original under the
+    download cutoff."""
+    from fourfloor.refs import search as S
+    from fourfloor.refs import titles as T
+
+    parsed = T.parse("Don Toliver - Body (Ric Remix)", "")
+    assert parsed.remixer == "Ric"
+    real = S.score_candidate(parsed, S.Candidate(
+        url="u", title="Don Toliver - Body (Lyrics)", uploader="Lyrics Channel",
+        duration=180.0))
+    assert not any("credited" in n for n in real.penalties), real.penalties
+    from fourfloor.refs.pipeline import MIN_CANDIDATE_SCORE
+    assert real.score >= MIN_CANDIDATE_SCORE, real.score
+    remix = S.score_candidate(parsed, S.Candidate(
+        url="v", title="Don Toliver - Body (Ric Remix)", uploader="ric",
+        duration=180.0))
+    assert any("credited" in n for n in remix.penalties)
