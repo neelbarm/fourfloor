@@ -60,8 +60,8 @@ def resample_to(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     return np.interp(src, np.arange(len(x), dtype=np.float64), x)
 
 
-def _mel_filters(sr: int, n_fft: int, n_mels: int) -> np.ndarray:
-    """A (n_bins, n_mels) triangular filterbank, area-normalised."""
+def _mel_edges(sr: int, n_mels: int) -> np.ndarray:
+    """The ``n_mels + 2`` corner frequencies of the filterbank, in Hz."""
     def to_mel(f):
         return 2595.0 * np.log10(1.0 + np.asarray(f, dtype=np.float64) / 700.0)
 
@@ -69,7 +69,17 @@ def _mel_filters(sr: int, n_fft: int, n_mels: int) -> np.ndarray:
         return 700.0 * (10.0 ** (np.asarray(m, dtype=np.float64) / 2595.0) - 1.0)
 
     f_min, f_max = 30.0, min(sr / 2.0 - 1.0, 11000.0)
-    edges = from_mel(np.linspace(to_mel(f_min), to_mel(f_max), n_mels + 2))
+    return from_mel(np.linspace(to_mel(f_min), to_mel(f_max), n_mels + 2))
+
+
+def mel_centres(sr: int = ANALYSIS_SR, n_mels: int = N_MELS) -> np.ndarray:
+    """Centre frequency of each mel band, in Hz."""
+    return _mel_edges(sr, n_mels)[1:-1]
+
+
+def _mel_filters(sr: int, n_fft: int, n_mels: int) -> np.ndarray:
+    """A (n_bins, n_mels) triangular filterbank, area-normalised."""
+    edges = _mel_edges(sr, n_mels)
     freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
     bank = np.zeros((len(freqs), n_mels), dtype=np.float64)
     for m in range(n_mels):
@@ -505,23 +515,41 @@ def measure_loudness(samples: np.ndarray, m: Measured) -> None:
     m.clip_fraction = float(np.mean(np.abs(x) >= 0.9985))
 
 
+#: The voice band of the proxy, in Hz: telephone bandwidth, where the words are.
+VOCAL_BAND = (300.0, 3400.0)
+
+#: Seconds per window of the syllabic-energy spectrum. Four seconds holds
+#: enough 4-8 Hz cycles to resolve them; the windows are averaged over the
+#: whole track.
+SYLLABLE_WINDOW = 4.0
+
+
 def measure_vocal(sp: Spectral, m: Measured, vocal_mono: np.ndarray | None = None,
                   sr: int = ANALYSIS_SR) -> None:
     """Syllabic-rate energy in the vocal band, and its level against the rest.
 
     With a real Demucs vocal stem this reads the stem. Without one it falls
-    back to a band proxy: the 300-3400 Hz mel bands stand in for the voice
-    and the bands outside it for the backing. The proxy cannot tell a vocal
-    from a lead synth, which is exactly why it is reported as a proxy.
+    back to a band proxy: the mel bands centred in :data:`VOCAL_BAND`
+    stand in for the voice and the bands outside it for the backing. The
+    proxy cannot tell a vocal from a lead synth, which is exactly why it is
+    reported as a proxy.
+
+    Two things this once got wrong. The bands were picked off a *linear*
+    frequency axis laid over a mel-spaced filterbank, so the "voice" was
+    165-1009 Hz -- bass harmonics and kick body -- and the 1-3.4 kHz where
+    words are intelligible was counted as backing. And the syllabic
+    spectrum was taken over the first four seconds only, which in a house
+    remix is the drum intro: the term measured the intro's hats and none
+    of the vocal. It is now a Welch average over the whole track.
     """
     if vocal_mono is not None and vocal_mono.size:
         vsp = spectral(resample_to(vocal_mono, sr, ANALYSIS_SR))
         voice = vsp.mel.sum(axis=1)
         m.vocal_source = "demucs"
     else:
-        lo = np.searchsorted(np.linspace(30, 11000, N_MELS), 300.0)
-        hi = np.searchsorted(np.linspace(30, 11000, N_MELS), 3400.0)
-        voice = sp.mel[:, lo:hi].sum(axis=1)
+        centres = mel_centres(int(round(sp.fps * HOP)), sp.mel.shape[1])
+        band = (centres >= VOCAL_BAND[0]) & (centres <= VOCAL_BAND[1])
+        voice = sp.mel[:, band].sum(axis=1)
         m.vocal_source = "band-proxy"
     rest = sp.mel.sum(axis=1) - (voice if m.vocal_source == "band-proxy" else 0.0)
     v_rms = float(np.sqrt(np.mean(np.square(voice)))) if voice.size else 0.0
@@ -530,8 +558,16 @@ def measure_vocal(sp: Spectral, m: Measured, vocal_mono: np.ndarray | None = Non
     if voice.size < int(sp.fps * 2):
         return
     env = voice - uniform_filter1d(voice, size=int(sp.fps * 1.0) | 1)
-    win_n = min(len(env), int(sp.fps * 4))
-    spec = np.abs(np.fft.rfft((env[:win_n] - env[:win_n].mean()) * np.hanning(win_n))) ** 2
+    win_n = min(len(env), int(sp.fps * SYLLABLE_WINDOW))
+    step = max(1, win_n // 2)
+    win = np.hanning(win_n)
+    spec = np.zeros(win_n // 2 + 1)
+    count = 0
+    for start in range(0, len(env) - win_n + 1, step):
+        seg = env[start: start + win_n]
+        spec += np.abs(np.fft.rfft((seg - seg.mean()) * win)) ** 2
+        count += 1
+    spec /= max(count, 1)
     freqs = np.fft.rfftfreq(win_n, 1.0 / sp.fps)
     syll = (freqs >= 4.0) & (freqs <= 8.0)
     ref = (freqs >= 0.5) & (freqs <= 20.0)

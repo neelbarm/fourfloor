@@ -505,3 +505,53 @@ def test_a_clip_shorter_than_one_beat_measures_instead_of_crashing(seconds):
     m = _measure(x, bpm=None)
     assert m.split_peak == 1.0
     assert 0.0 <= S.score_groove(m).score <= 100.0
+
+
+# ---------------------------------------------------------------------------
+# vocal: the band it claims, over the whole track
+# ---------------------------------------------------------------------------
+
+def _vocal(x: np.ndarray) -> F.Measured:
+    m = F.Measured(duration=len(x) / SR)
+    F.measure_vocal(F.spectral(F.resample_to(x, SR, F.ANALYSIS_SR)), m)
+    return m
+
+
+def _tone(hz: float, seconds: float = 6.0, amp: float = 0.3) -> np.ndarray:
+    t = np.arange(int(seconds * SR)) / SR
+    return amp * np.sin(2 * np.pi * hz * t)
+
+
+def test_the_proxy_vocal_band_is_300_to_3400_hz():
+    centres = F.mel_centres()
+    band = centres[(centres >= F.VOCAL_BAND[0]) & (centres <= F.VOCAL_BAND[1])]
+    assert band.min() >= 300.0 and band.max() <= 3400.0 and band.max() > 3000.0
+    # a 2 kHz voice is voice; a 200 Hz bassline is backing
+    assert _vocal(_tone(2000.0)).vocal_ratio_db > 10.0
+    assert _vocal(_tone(200.0)).vocal_ratio_db < -10.0
+
+
+def _syllables(seconds: float, start: float, stop: float) -> np.ndarray:
+    """A 1.2 kHz voice gated at 5 Hz -- syllables -- between start and stop."""
+    t = np.arange(int(seconds * SR)) / SR
+    gate = (np.sin(2 * np.pi * 5.0 * t) > 0).astype(np.float64)
+    on = (t >= start) & (t < stop)
+    return 0.3 * np.sin(2 * np.pi * 1200.0 * t) * gate * on
+
+
+def test_a_vocal_after_the_intro_is_heard():
+    """A house intro is drums; the vocal comes in after it."""
+    late = _vocal(_syllables(24.0, 8.0, 24.0))
+    assert late.vocal_mod > 1.0
+
+
+def _pad(seconds: float) -> np.ndarray:
+    """Backing in the same band that swells slowly and never articulates."""
+    t = np.arange(int(seconds * SR)) / SR
+    return 0.3 * (1.0 + 0.8 * np.sin(2 * np.pi * 0.7 * t)) * np.sin(2 * np.pi * 900.0 * t)
+
+
+def test_a_chop_in_the_first_seconds_does_not_stand_for_the_whole_track():
+    whole = _vocal(_pad(24.0) + _syllables(24.0, 0.0, 24.0))
+    first_only = _vocal(_pad(24.0) + _syllables(24.0, 0.0, 4.0))
+    assert first_only.vocal_mod < 0.5 * whole.vocal_mod

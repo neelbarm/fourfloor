@@ -56,7 +56,12 @@ BANDS: dict[str, tuple[float, float]] = {
     # vocal
     "vocal_lo": (-20.0, -8.0),
     "vocal_hi": (2.0, 9.0),         # above this the vocal band is too hot
-    "vocal_mod": (0.50, 1.80),
+    # Re-placed when vocal_mod moved from the first 4 s to the whole track
+    # (and to the real 300-3400 Hz band). The rated renders were no longer on
+    # disk, so the fit is: keep the six references' mean term where it was
+    # (0.807). They read 1.12-1.62 over the whole track; fourfloor renders
+    # 0.55-1.49; the instrumental lofi render lowest.
+    "vocal_mod": (0.50, 1.70),
     # loudness
     "rms_lo": (-20.0, -12.0),
     "rms_hi": (-6.0, -2.0),
