@@ -19,6 +19,12 @@ def run(args, c: ui.C) -> int:
 
     target = Path(args.input)
     quiet = args.json or args.quiet
+    # Checked before the local critique, which can take minutes: a typo in
+    # --ref should cost a second, not the whole run.
+    for flag, value in (("--ref", args.ref), ("--source", args.source)):
+        if value and not Path(value).is_file():
+            print(ui.error(c, f"{flag} {value}: no such file"), file=sys.stderr)
+            return 2
     if not quiet:
         print(ui.header(c, f"critic {target.name}"))
     progress = ui.Progress(c, quiet=quiet) if not quiet else None
@@ -55,10 +61,21 @@ def _ask_gemini(target: Path, args, step) -> dict:
     except g.GeminiError as exc:
         print(ui.warn(ui.C(False), f"gemini unavailable: {exc}"), file=sys.stderr)
         return {"error": str(exc)}
+    except Exception as exc:        # noqa: BLE001 - the local report still prints
+        # Only the type: an unexpected exception's message is not scrubbed
+        # of the key, so it is not repeated here.
+        msg = f"gemini failed unexpectedly ({type(exc).__name__})"
+        print(ui.warn(ui.C(False), msg), file=sys.stderr)
+        return {"error": msg}
     if not args.no_feedback:
-        written = g.append_markers(target, result, session)
-        if written:
-            result["feedback_file"] = str(written)
+        try:
+            written = g.append_markers(target, result, session)
+        except (g.GeminiError, OSError, ValueError) as exc:
+            print(ui.warn(ui.C(False), f"feedback not updated: {exc}"), file=sys.stderr)
+            result["feedback_error"] = str(exc)
+        else:
+            if written:
+                result["feedback_file"] = str(written)
     return result
 
 

@@ -401,3 +401,287 @@ def test_a_real_error_is_not_swallowed_by_the_fallback(monkeypatch, audio):
     with pytest.raises(G.GeminiError) as exc:
         G.Ear(KEY).review(audio)
     assert "400" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# the key never leaks, whatever the key file looks like
+# ---------------------------------------------------------------------------
+
+def test_only_the_first_line_of_the_key_file_is_the_key(monkeypatch, tmp_path):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(G, "KEY_FILE", tmp_path / "gemini.key")
+    (tmp_path / "gemini.key").write_text("\n# my key\nAIzaFirstLine\n# rotated sept\nold\n")
+    assert G.load_key() == "AIzaFirstLine"
+
+
+def test_an_env_key_with_a_comment_line_uses_its_first_line(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaFromEnv\n# rotated sept")
+    assert G.load_key() == "AIzaFromEnv"
+
+
+def test_a_key_with_spaces_in_it_is_refused_without_repeating_it(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza secret-part")
+    with pytest.raises(G.GeminiError) as exc:
+        G.load_key()
+    assert "secret-part" not in str(exc.value) and "AIza" not in str(exc.value)
+
+
+def test_a_header_refused_by_http_client_does_not_quote_the_key(monkeypatch, audio):
+    """The real failure: http.client's ValueError quotes the whole header."""
+    bad = "AIzaLEAKED\n# rotated sept"
+    monkeypatch.setattr(G, "API_ROOT", "http://127.0.0.1:9")   # never reached
+    with pytest.raises(G.GeminiError) as exc:
+        G.Ear(bad, "gemini-2.5-pro").review(audio)
+    assert "LEAKED" not in str(exc.value) and "rotated" not in str(exc.value)
+    assert exc.value.__cause__ is None and exc.value.__suppress_context__
+
+
+# ---------------------------------------------------------------------------
+# every transport failure is a GeminiError, never a traceback
+# ---------------------------------------------------------------------------
+
+def test_a_timeout_moves_on_to_the_next_model(monkeypatch, audio):
+    seen: list[str] = []
+
+    def transport(req, timeout=None):
+        if "/models?" in req.full_url:
+            return MODELS
+        seen.append(req.full_url.split("/models/")[1].split(":")[0])
+        if len(seen) == 1:
+            raise TimeoutError("The read operation timed out")
+        return _generate(GOOD)
+
+    monkeypatch.setattr(urllib.request, "urlopen", transport)
+    out = G.Ear(KEY).review(audio)
+    assert seen == ["gemini-2.5-pro", "gemini-2.5-flash"]
+    assert out["model"] == "gemini-2.5-flash"
+
+
+def test_a_dropped_connection_is_retried(monkeypatch, audio):
+    import http.client
+
+    attempts = {"n": 0}
+
+    def transport(req, timeout=None):
+        if "/models?" in req.full_url:
+            return MODELS
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise http.client.RemoteDisconnected("Remote end closed connection")
+        if attempts["n"] == 2:
+            raise ConnectionResetError(54, "Connection reset by peer")
+        return _generate(GOOD)
+
+    monkeypatch.setattr(urllib.request, "urlopen", transport)
+    assert G.Ear(KEY).review(audio)["overall_score"] == 62.0
+    assert attempts["n"] == 3
+
+
+def test_a_short_read_that_persists_is_a_gemini_error(monkeypatch, audio):
+    import http.client
+
+    def transport(req, timeout=None):
+        if "/models?" in req.full_url:
+            return MODELS
+        raise http.client.IncompleteRead(b"{", 400)
+
+    monkeypatch.setattr(urllib.request, "urlopen", transport)
+    with pytest.raises(G.GeminiError):
+        G.Ear(KEY).review(audio)
+
+
+def test_an_unreachable_upload_is_a_gemini_error(monkeypatch, tmp_path):
+    big = tmp_path / "big.mp3"
+    big.write_bytes(b"\x00" * (G.INLINE_LIMIT + 1024))
+    down = urllib.error.URLError(OSError(8, "nodename nor servname provided"))
+    monkeypatch.setattr(urllib.request, "urlopen", Recorder({}, default=down))
+    with pytest.raises(G.GeminiError) as exc:
+        G.Ear(KEY).part_for(big, "render")
+    assert "upload" in str(exc.value)
+
+
+def test_an_upload_reply_that_is_not_json_is_a_gemini_error(monkeypatch, tmp_path):
+    big = tmp_path / "big.mp3"
+    big.write_bytes(b"\x00" * (G.INLINE_LIMIT + 1024))
+    start = _Response(b"{}", {"X-Goog-Upload-URL": "https://upload.example/session"})
+    rec = Recorder({"upload/v1beta/files": start,
+                    "upload.example": _Response(b"<html>502 Bad Gateway</html>")})
+    monkeypatch.setattr(urllib.request, "urlopen", rec)
+    with pytest.raises(G.GeminiError):
+        G.Ear(KEY).part_for(big, "render")
+
+
+def test_a_missing_reference_is_a_gemini_error(monkeypatch, audio, tmp_path):
+    monkeypatch.setattr(urllib.request, "urlopen", Recorder({}))
+    with pytest.raises(G.GeminiError) as exc:
+        G.Ear(KEY).review(audio, ref=tmp_path / "typo.mp3")
+    assert "typo.mp3" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# a cut-off reply is one model's failure, not the ear's
+# ---------------------------------------------------------------------------
+
+def test_a_truncated_reply_falls_through_to_the_next_model(monkeypatch, audio):
+    cut = json.dumps({"candidates": [{
+        "content": {"parts": [{"text": '{"overall_score": 38, "verdict": "x", '
+                                       '"issues": [{"time_sec": 1, "category": "good"}, '
+                                       '{"time_sec": 12'}]},
+        "finishReason": "MAX_TOKENS"}]}).encode()
+    seen: list[str] = []
+
+    def transport(req, timeout=None):
+        if "/models?" in req.full_url:
+            return MODELS
+        seen.append(req.full_url.split("/models/")[1].split(":")[0])
+        return _Response(cut) if len(seen) == 1 else _generate(GOOD)
+
+    monkeypatch.setattr(urllib.request, "urlopen", transport)
+    out = G.Ear(KEY).review(audio)
+    assert out["model"] == "gemini-2.5-flash" and len(seen) == 2
+
+
+def test_when_every_reply_is_cut_off_the_error_says_why(monkeypatch, audio):
+    cut = _Response(json.dumps({"candidates": [{
+        "content": {"parts": [{"text": '{"overall_score": 38, "issues": [{'}]},
+        "finishReason": "MAX_TOKENS"}]}).encode())
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        Recorder({"/models?": MODELS}, default=cut))
+    with pytest.raises(G.GeminiError) as exc:
+        G.Ear(KEY).review(audio)
+    assert "MAX_TOKENS" in str(exc.value)
+
+
+def test_the_output_cap_follows_what_the_model_allows(monkeypatch, audio):
+    listing = _Response(json.dumps({"models": [
+        {"name": "models/gemini-2.5-pro", "outputTokenLimit": 65536,
+         "supportedGenerationMethods": ["generateContent"]},
+    ]}).encode())
+    rec = Recorder({"/models?": listing, ":generateContent": _generate(GOOD)})
+    monkeypatch.setattr(urllib.request, "urlopen", rec)
+    G.Ear(KEY).review(audio)
+    cap = rec.body_for(":generateContent")["generationConfig"]["maxOutputTokens"]
+    assert cap == G.MAX_OUTPUT_TOKENS > 4096
+
+
+# ---------------------------------------------------------------------------
+# scores and times the model can get wrong
+# ---------------------------------------------------------------------------
+
+def test_a_score_of_one_is_the_worst_score_not_a_perfect_fraction():
+    assert G.repair_json('{"overall_score": 1, "verdict": "x"}')["overall_score"] == 1.0
+    assert G.repair_json('{"overall_score": 1.0, "verdict": "x"}')["overall_score"] == 1.0
+
+
+@pytest.mark.parametrize("raw", ["Infinity", "-Infinity", "NaN", "1e400"])
+def test_a_non_finite_time_becomes_zero(raw):
+    out = G.repair_json('{"overall_score": 50, "verdict": "x", "issues": '
+                        '[{"time_sec": ' + raw + ', "category": "good", "note": "n"}]}')
+    assert out["issues"][0]["time_sec"] == 0.0
+
+
+def test_a_time_past_the_end_is_clamped_to_the_render():
+    out = G.repair_json('{"overall_score": 50, "issues": [{"time_sec": 900}]}', 212.5)
+    assert out["issues"][0]["time_sec"] == 212.5
+
+
+def test_a_non_finite_time_never_reaches_feedback_json(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOURFLOOR_HOME", str(tmp_path))
+    render = tmp_path / "remixes" / "abc123" / "x.mp3"
+    render.parent.mkdir(parents=True)
+    render.write_bytes(b"")
+    result = {"issues": [{"time_sec": float("inf"), "category": "good", "note": "n"}]}
+    written = G.append_markers(render, result, SESSION)
+    text = written.read_text()
+    assert "Infinity" not in text and "NaN" not in text
+    assert json.loads(text)["markers"][0]["time"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# feedback.json is never wiped
+# ---------------------------------------------------------------------------
+
+def _remix_with_feedback(monkeypatch, tmp_path, text: str) -> tuple[Path, Path]:
+    monkeypatch.setenv("FOURFLOOR_HOME", str(tmp_path))
+    render = tmp_path / "remixes" / "abc123" / "x.mp3"
+    render.parent.mkdir(parents=True)
+    render.write_bytes(b"")
+    target = render.parent / "feedback.json"
+    target.write_text(text)
+    return render, target
+
+
+@pytest.mark.parametrize("text", [
+    # a hand edit left a trailing comma
+    '{"markers": [{"time": 12.0, "author": "neel", "note": "keep this"},],'
+    ' "ratings": [{"stars": 5}]}',
+    # cut off mid-write
+    '{"markers": [{"time": 12.0, "author": "neel", "note": "keep th',
+    # valid JSON, but not a feedback document
+    '[{"time": 12.0, "author": "neel"}]',
+])
+def test_an_unreadable_feedback_file_is_left_exactly_as_it_was(monkeypatch, tmp_path, text):
+    render, target = _remix_with_feedback(monkeypatch, tmp_path, text)
+    with pytest.raises(G.GeminiError):
+        G.append_markers(render, GOOD, SESSION)
+    assert target.read_text() == text
+
+
+def test_ratings_and_votes_survive_and_the_old_document_is_kept(monkeypatch, tmp_path):
+    before = {"markers": [{"time": 12.0, "author": "neel", "note": "keep this"}],
+              "ratings": [{"stars": 5, "at": 1.0}], "votes": [{"prefer": "a"}]}
+    render, target = _remix_with_feedback(monkeypatch, tmp_path, json.dumps(before))
+    G.append_markers(render, GOOD, SESSION)
+    doc = json.loads(target.read_text())
+    assert doc["ratings"] == before["ratings"] and doc["votes"] == before["votes"]
+    assert json.loads((target.parent / "feedback.json.bak").read_text()) == before
+    assert not (target.parent / "feedback.json.tmp").exists()
+
+
+# ---------------------------------------------------------------------------
+# the command: a Gemini failure never costs the local report
+# ---------------------------------------------------------------------------
+
+def _args(render: Path, **kw):
+    import argparse
+
+    base = dict(input=str(render), json=True, quiet=True, refs=None, embed="auto",
+                demucs=False, windows=4, ear="gemini", ref=None, source=None,
+                model=None, no_feedback=False, pass_mark=0.0)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_a_missing_ref_is_refused_before_the_local_critique(monkeypatch, audio, tmp_path):
+    from fourfloor import ui
+    from fourfloor.critic import command, score
+
+    def never(*_a, **_k):
+        raise AssertionError("the local critique ran before --ref was checked")
+
+    monkeypatch.setattr(score, "critique", never)
+    code = command.run(_args(audio, ref=str(tmp_path / "typo.mp3")), ui.C(False))
+    assert code == 2
+
+
+def test_an_unexpected_ear_failure_still_prints_the_local_report(monkeypatch, audio, capsys):
+    from fourfloor import ui
+    from fourfloor.critic import command
+
+    def boom(*_a, **_k):
+        raise KeyError("AIza-should-not-print")
+
+    monkeypatch.setattr(G, "listen", boom)
+    out = command._ask_gemini(audio, _args(audio), lambda _s: None)
+    assert "error" in out and "KeyError" in out["error"]
+    assert "AIza-should-not-print" not in capsys.readouterr().err
+
+
+def test_a_refused_feedback_file_is_a_note_not_a_crash(monkeypatch, tmp_path):
+    from fourfloor.critic import command
+
+    render, target = _remix_with_feedback(monkeypatch, tmp_path, '{"markers": [,]}')
+    monkeypatch.setattr(G, "listen", lambda *_a, **_k: dict(GOOD))
+    out = command._ask_gemini(render, _args(render), lambda _s: None)
+    assert out["overall_score"] == 62 and "feedback_error" in out
+    assert target.read_text() == '{"markers": [,]}'
